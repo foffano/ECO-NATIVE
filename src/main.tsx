@@ -582,8 +582,7 @@ function App() {
     setOpenRouterModelDraft(nextSettings.integrations.openrouter_model || "qwen/qwen3.5-flash-02-23");
     setKieImageModelDraft(nextSettings.integrations.kie_image_model || "qwen/image-edit");
     const isCleanDefaultWorkspace =
-      nextStoreProfiles.length === 1 &&
-      nextStoreProfiles[0]?.name === "Loja principal" &&
+      (nextStoreProfiles.length === 0 || (nextStoreProfiles.length === 1 && nextStoreProfiles[0]?.name === "Loja principal")) &&
       nextProjects.length === 0 &&
       nextProducts.length === 0;
     if (isCleanDefaultWorkspace && window.localStorage.getItem(ONBOARDING_COMPLETE_KEY) !== "true") {
@@ -1311,7 +1310,7 @@ function App() {
       <aside className="sidebar">
         <div className="brand">
           <span className="brand-mark">
-            <img src="/eco-logo.png" alt="" />
+            <img src="./eco-logo.png" alt="" />
           </span>
           <div>
             <strong>ECO Native</strong>
@@ -1588,7 +1587,7 @@ function OnboardingModal({
       <form className="onboarding-dialog" role="dialog" aria-modal="true" aria-labelledby="onboarding-title" onSubmit={submit}>
         <div className="onboarding-hero">
           <span className="brand-mark">
-            <img src="/eco-logo.png" alt="" />
+            <img src="./eco-logo.png" alt="" />
           </span>
           <div>
             <p className="eyebrow">Primeira configuração</p>
