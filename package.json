@@ -1,0 +1,98 @@
+{
+  "name": "eco-native-studio",
+  "version": "0.1.0",
+  "private": false,
+  "description": "AI-assisted e-commerce listing studio for product research, content generation, image creation, and marketplace export.",
+  "author": "ECO Native",
+  "main": "apps/desktop/electron/main.cjs",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/marlo/ECO-NATIVE.git"
+  },
+  "type": "module",
+  "scripts": {
+    "dev": "concurrently \"npm:dev:frontend\" \"npm:dev:backend\"",
+    "dev:frontend": "vite --host 127.0.0.1 --port 5173",
+    "dev:backend": "python -m uvicorn backend.app.main:app --reload --host 127.0.0.1 --port 8765",
+    "dev:desktop": "concurrently \"npm:dev:frontend\" \"npm:dev:backend\" \"wait-on http://127.0.0.1:5173 http://127.0.0.1:8765/health && electron apps/desktop/electron/main.cjs\"",
+    "build": "npm.cmd run build:frontend",
+    "build:frontend": "tsc -b && vite build",
+    "build:playwright": "python scripts/prepare_playwright.py",
+    "build:backend": "python -m PyInstaller --noconfirm --clean --onefile --name eco-native-api --distpath dist/backend --workpath dist/pyinstaller-build --specpath dist/pyinstaller-spec --paths . --collect-all playwright --collect-all uvicorn --collect-all fastapi backend/desktop_server.py",
+    "dist": "npm.cmd run dist:win",
+    "dist:win": "npm.cmd run build:frontend && npm.cmd run build:playwright && npm.cmd run build:backend && electron-builder --win --config.directories.output=%USERPROFILE%\\ECO-NATIVE-release",
+    "dist:mac": "npm run build:frontend && npm run build:playwright && npm run build:backend && electron-builder --mac",
+    "publish:win": "npm.cmd run build:frontend && npm.cmd run build:playwright && npm.cmd run build:backend && electron-builder --win --publish always --config.directories.output=%USERPROFILE%\\ECO-NATIVE-release",
+    "preview": "vite preview --host 127.0.0.1 --port 4173"
+  },
+  "dependencies": {
+    "@vitejs/plugin-react": "^5.1.1",
+    "concurrently": "^9.2.1",
+    "electron-updater": "^6.6.2",
+    "lucide-react": "^0.468.0",
+    "vite": "^7.2.7",
+    "wait-on": "^9.0.3"
+  },
+  "devDependencies": {
+    "electron": "^39.2.6",
+    "electron-builder": "^26.0.12",
+    "@types/react": "^19.2.7",
+    "@types/react-dom": "^19.2.3",
+    "typescript": "^5.9.3",
+    "react": "^19.2.1",
+    "react-dom": "^19.2.1"
+  },
+  "build": {
+    "appId": "com.econative.studio",
+    "productName": "ECO Native Studio",
+    "icon": "build/icon.png",
+    "directories": {
+      "output": "dist/installers"
+    },
+    "files": [
+      "apps/desktop/electron/**/*",
+      "dist/frontend/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "dist/frontend",
+        "to": "frontend"
+      },
+      {
+        "from": "dist/backend",
+        "to": "backend"
+      },
+      {
+        "from": "dist/playwright-browsers",
+        "to": "playwright-browsers"
+      }
+    ],
+    "win": {
+      "icon": "build/icon.ico",
+      "target": [
+        "nsis"
+      ],
+      "artifactName": "ECO-Native-Studio-${version}-Windows-${arch}.${ext}"
+    },
+    "mac": {
+      "target": [
+        "dmg"
+      ],
+      "artifactName": "ECO-Native-Studio-${version}-macOS-${arch}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
+    },
+    "publish": [
+      {
+        "provider": "github",
+        "releaseType": "release"
+      }
+    ]
+  }
+}
