@@ -7,7 +7,7 @@
   "main": "apps/desktop/electron/main.cjs",
   "repository": {
     "type": "git",
-    "url": "https://github.com/marlo/ECO-NATIVE.git"
+    "url": "https://github.com/foffano/ECO-NATIVE.git"
   },
   "type": "module",
   "scripts": {
