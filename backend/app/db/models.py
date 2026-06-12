@@ -15,16 +15,10 @@ def now_iso() -> str:
 
 
 class ProductStatus(StrEnum):
-    imported = "imported"
-    scraped = "scraped"
-    ai_approved = "ai_approved"
-    assets_downloaded = "assets_downloaded"
-    images_generated = "images_generated"
-    listing_generated = "listing_generated"
-    needs_review = "needs_review"
-    approved = "approved"
+    collected = "collected"
+    in_edit = "in_edit"
+    ready = "ready"
     exported = "exported"
-    failed = "failed"
 
 
 class JobStatus(StrEnum):
@@ -108,12 +102,85 @@ class Product(BaseModel):
     project_id: str
     name: str
     source_url: str | None = None
-    status: ProductStatus = ProductStatus.imported
+    status: ProductStatus = ProductStatus.collected
     tags: list[str] = Field(default_factory=list)
     ai_score: str | None = None
     listing: Listing = Field(default_factory=Listing)
     assets: list[Asset] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
+    created_at: str = Field(default_factory=now_iso)
+    updated_at: str = Field(default_factory=now_iso)
+
+
+class BlockedSourceUrl(BaseModel):
+    id: str = Field(default_factory=new_id)
+    project_id: str
+    url: str
+    reason: str = "deleted"
+    label: str | None = None
+    created_at: str = Field(default_factory=now_iso)
+
+
+class FilamentSpool(BaseModel):
+    id: str = Field(default_factory=new_id)
+    store_profile_id: str
+    name: str
+    material: str = "PLA"
+    color: str | None = None
+    spool_price_brl: float = Field(ge=0)
+    spool_weight_g: float = Field(default=1000, gt=0)
+    notes: str | None = None
+    created_at: str = Field(default_factory=now_iso)
+    updated_at: str = Field(default_factory=now_iso)
+
+
+class ProductionSettings(BaseModel):
+    store_profile_id: str
+    electricity_kwh_price_brl: float = Field(default=0.85, ge=0)
+    printer_power_watts: float = Field(default=200, ge=0)
+    updated_at: str = Field(default_factory=now_iso)
+
+
+class Printer3D(BaseModel):
+    id: str = Field(default_factory=new_id)
+    name: str
+    model: str | None = None
+    notes: str | None = None
+    active: bool = True
+    created_at: str = Field(default_factory=now_iso)
+    updated_at: str = Field(default_factory=now_iso)
+
+
+class PrintPlate(BaseModel):
+    id: str = Field(default_factory=new_id)
+    name: str
+    print_time_minutes: int = Field(default=0, ge=0)
+    filament_grams: float = Field(default=0, ge=0)
+    filament_id: str | None = None
+    quantity: int = Field(default=1, ge=1)
+    notes: str = ""
+
+
+class PrintScheduleStatus(StrEnum):
+    planned = "planned"
+    printing = "printing"
+    done = "done"
+    failed = "failed"
+    cancelled = "cancelled"
+
+
+class PrintScheduleTask(BaseModel):
+    id: str = Field(default_factory=new_id)
+    printer_id: str
+    scheduled_date: str
+    start_time: str
+    duration_minutes: int = Field(default=0, ge=0)
+    product_id: str | None = None
+    plate_id: str | None = None
+    title: str
+    quantity: int = Field(default=1, ge=1)
+    notes: str = ""
+    status: PrintScheduleStatus = PrintScheduleStatus.planned
     created_at: str = Field(default_factory=now_iso)
     updated_at: str = Field(default_factory=now_iso)
 
@@ -138,3 +205,8 @@ class StudioState(BaseModel):
     jobs: list[Job] = Field(default_factory=list)
     ai_profiles: list[AiProfile] = Field(default_factory=list)
     store_profiles: list[StoreProfile] = Field(default_factory=list)
+    blocked_source_urls: list[BlockedSourceUrl] = Field(default_factory=list)
+    filament_spools: list[FilamentSpool] = Field(default_factory=list)
+    production_settings: list[ProductionSettings] = Field(default_factory=list)
+    printers_3d: list[Printer3D] = Field(default_factory=list)
+    print_schedule_tasks: list[PrintScheduleTask] = Field(default_factory=list)

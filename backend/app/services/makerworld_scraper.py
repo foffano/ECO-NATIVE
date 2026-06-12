@@ -8,7 +8,14 @@ from pathlib import Path
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
 
-from backend.app.core.paths import DATA_DIR, PROJECTS_DIR
+from backend.app.core.paths import DATA_DIR
+from backend.app.db.models import Product, Project, StoreProfile
+from backend.app.services.product_paths import (
+    cover_image_filename,
+    model_filename,
+    product_assets_dir,
+    resolve_sku_for_capture,
+)
 
 MAKERWORLD_BASE = "https://makerworld.com"
 MAKERWORLD_HOME = "https://makerworld.com/pt"
@@ -24,6 +31,7 @@ class ScrapedProduct:
     local_image_path: str | None = None
     model_file_path: str | None = None
     model_error: str | None = None
+    sku: str | None = None
 
 
 @dataclass
@@ -48,11 +56,6 @@ def build_search_url(keyword: str) -> str:
         return MAKERWORLD_HOME
     encoded = urllib.parse.quote(keyword)
     return f"https://makerworld.com/pt/search/models?keyword={encoded}"
-
-
-def safe_filename(value: str) -> str:
-    cleaned = re.sub(r'[\\/*?:"<>|]', "", value).strip()
-    return cleaned[:120] or "produto"
 
 
 def open_makerworld_context(playwright, headless: bool):
@@ -113,6 +116,9 @@ def scrape_product_urls(
     headless: bool = False,
     download_cover: bool = True,
     download_model: bool = False,
+    sku_reference_products: list[Product] | None = None,
+    project: Project | None = None,
+    store_profile: StoreProfile | None = None,
 ) -> list[ScrapedProduct]:
     normalized_urls = []
     for url in urls:
@@ -124,6 +130,7 @@ def scrape_product_urls(
         return []
 
     products: list[ScrapedProduct] = []
+    sku_candidates = list(sku_reference_products or [])
     with sync_playwright() as playwright:
         browser = open_makerworld_context(playwright, headless=headless)
         page = browser.new_page()
@@ -136,12 +143,28 @@ def scrape_product_urls(
                     if headless:
                         raise RuntimeError("MakerWorld bloqueou navegador headless com Cloudflare.")
                     page.wait_for_timeout(20_000)
-                product = scrape_current_product_page(project_id, page, url, download_cover)
-                if download_model:
-                    product_dir = PROJECTS_DIR / project_id / safe_filename(product.name)
+                product = scrape_current_product_page(
+                    project_id,
+                    page,
+                    url,
+                    download_cover,
+                    sku_candidates=sku_candidates,
+                    project=project,
+                    store_profile=store_profile,
+                )
+                if product.sku:
+                    sku_candidates.append(
+                        Product(
+                            project_id=project_id,
+                            name=product.name,
+                            metadata={"sku": product.sku},
+                        )
+                    )
+                if download_model and product.sku:
+                    product_dir = product_assets_dir(project_id, product.sku)
                     product_dir.mkdir(parents=True, exist_ok=True)
                     try:
-                        product.model_file_path = download_3mf_from_current_page(page, product_dir)
+                        product.model_file_path = download_3mf_from_current_page(page, product_dir, product.sku)
                     except Exception as exc:
                         product.model_error = f"{exc.__class__.__name__}: {exc}"
                 products.append(product)
@@ -157,7 +180,15 @@ def scrape_product_urls(
     return products
 
 
-def scrape_current_product_page(project_id: str, page, url: str, download_cover: bool) -> ScrapedProduct:
+def scrape_current_product_page(
+    project_id: str,
+    page,
+    url: str,
+    download_cover: bool,
+    sku_candidates: list[Product] | None = None,
+    project: Project | None = None,
+    store_profile: StoreProfile | None = None,
+) -> ScrapedProduct:
     title = page.locator("h1").text_content(timeout=5000)
     title = title.strip() if title else url.rstrip("/").split("/")[-1].replace("-", " ").title()
 
@@ -179,9 +210,13 @@ def scrape_current_product_page(project_id: str, page, url: str, download_cover:
         "elements => [...new Set(elements.map(element => element.textContent.trim()).filter(Boolean))]",
     )
 
+    sku = None
+    if sku_candidates is not None and project and store_profile:
+        sku = resolve_sku_for_capture(title, sku_candidates, project, store_profile)
+
     local_image_path = None
-    if download_cover and image_url:
-        local_image_path = download_cover_image(project_id, title, image_url)
+    if download_cover and image_url and sku:
+        local_image_path = download_cover_image(project_id, sku, image_url)
 
     return ScrapedProduct(
         name=title,
@@ -190,13 +225,14 @@ def scrape_current_product_page(project_id: str, page, url: str, download_cover:
         description=description,
         image_url=image_url,
         local_image_path=local_image_path,
+        sku=sku,
     )
 
 
-def download_cover_image(project_id: str, title: str, image_url: str) -> str | None:
-    product_dir = PROJECTS_DIR / project_id / safe_filename(title)
+def download_cover_image(project_id: str, sku: str, image_url: str) -> str | None:
+    product_dir = product_assets_dir(project_id, sku)
     product_dir.mkdir(parents=True, exist_ok=True)
-    output_path = product_dir / "capa_produto.jpg"
+    output_path = product_dir / cover_image_filename(sku)
 
     try:
         urllib.request.urlretrieve(image_url, output_path)
@@ -210,11 +246,12 @@ def download_approved_product_assets(
     product_url: str,
     title: str,
     image_url: str | None,
+    sku: str,
     headless: bool = False,
 ) -> DownloadedProductAssets:
     assets = DownloadedProductAssets()
     if image_url:
-        assets.cover_image_path = download_cover_image(project_id, title, image_url)
+        assets.cover_image_path = download_cover_image(project_id, sku, image_url)
 
     with sync_playwright() as playwright:
         browser = open_makerworld_context(playwright, headless=headless)
@@ -227,9 +264,9 @@ def download_approved_product_assets(
                     raise RuntimeError("MakerWorld bloqueou navegador headless com Cloudflare.")
                 page.wait_for_timeout(20_000)
 
-            product_dir = PROJECTS_DIR / project_id / safe_filename(title)
+            product_dir = product_assets_dir(project_id, sku)
             product_dir.mkdir(parents=True, exist_ok=True)
-            assets.model_file_path = download_3mf_from_current_page(page, product_dir)
+            assets.model_file_path = download_3mf_from_current_page(page, product_dir, sku)
         except Exception as exc:
             assets.model_error = f"{exc.__class__.__name__}: {exc}"
         finally:
@@ -238,7 +275,7 @@ def download_approved_product_assets(
     return assets
 
 
-def download_3mf_from_current_page(page, product_dir: Path) -> str | None:
+def download_3mf_from_current_page(page, product_dir: Path, sku: str) -> str | None:
     try:
         page.wait_for_load_state("networkidle", timeout=15_000)
     except PlaywrightTimeoutError:
@@ -267,7 +304,7 @@ def download_3mf_from_current_page(page, product_dir: Path) -> str | None:
     download_info = downloaded
     download = download_info.value
     suffix = Path(download.suggested_filename).suffix or ".3mf"
-    output_path = product_dir / f"model{suffix}"
+    output_path = product_dir / model_filename(sku, suffix)
     download.save_as(str(output_path))
     return str(output_path)
 

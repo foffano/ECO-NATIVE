@@ -64,7 +64,7 @@ Para distribuicao publica no macOS, sera necessario configurar assinatura e nota
 
 O app usa `electron-updater`.
 
-No app instalado, a aba **Ajustes > Aplicativo** tem o botao **Verificar atualizacoes**. Ele consulta o GitHub Releases, baixa a nova versao e instala ao fechar/reabrir o app.
+No app instalado, a aba **Ajustes > Backup** tem o botao **Verificar atualizacoes**. Ele consulta o GitHub Releases, baixa a nova versao e instala ao fechar/reabrir o app.
 
 Para publicar uma release Windows automaticamente:
 
@@ -76,7 +76,7 @@ npm.cmd run publish:win
 Antes de publicar, confira em `package.json` se o campo `repository.url` aponta para o repositorio GitHub correto. Hoje ele esta configurado como:
 
 ```text
-https://github.com/marlo/ECO-NATIVE.git
+https://github.com/foffano/ECO-NATIVE.git
 ```
 
 ## Dados locais do app instalado

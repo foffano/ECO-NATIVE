@@ -1,6 +1,6 @@
 {
   "name": "eco-native-studio",
-  "version": "0.1.2",
+  "version": "0.1.4",
   "private": false,
   "description": "AI-assisted e-commerce listing studio for product research, content generation, image creation, and marketplace export.",
   "author": "ECO Native",
@@ -91,6 +91,8 @@
     "publish": [
       {
         "provider": "github",
+        "owner": "foffano",
+        "repo": "ECO-NATIVE",
         "releaseType": "release"
       }
     ]

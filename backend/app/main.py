@@ -9,8 +9,12 @@ from backend.app.api.routes_image_options import router as image_options_router
 from backend.app.api.routes_jobs import router as jobs_router
 from backend.app.api.routes_products import router as products_router
 from backend.app.api.routes_projects import router as projects_router
+from backend.app.api.routes_r2 import router as r2_router
 from backend.app.api.routes_runtime import router as runtime_router
 from backend.app.api.routes_settings import router as settings_router
+from backend.app.api.routes_filaments import router as filaments_router
+from backend.app.api.routes_printers import router as printers_router
+from backend.app.api.routes_schedule import router as schedule_router
 from backend.app.api.routes_store_profiles import router as store_profiles_router
 from backend.app.core.paths import ensure_app_dirs
 
@@ -48,4 +52,8 @@ app.include_router(runtime_router, prefix="/api/runtime", tags=["runtime"])
 app.include_router(ai_profiles_router, prefix="/api/ai-profiles", tags=["ai-profiles"])
 app.include_router(assets_router, prefix="/api/assets", tags=["assets"])
 app.include_router(store_profiles_router, prefix="/api/store-profiles", tags=["store-profiles"])
+app.include_router(filaments_router, prefix="/api/store-profiles", tags=["filaments"])
+app.include_router(printers_router, prefix="/api/printers", tags=["printers"])
+app.include_router(schedule_router, prefix="/api/schedule", tags=["schedule"])
 app.include_router(image_options_router, prefix="/api/image-options", tags=["image-options"])
+app.include_router(r2_router, prefix="/api/r2", tags=["r2"])

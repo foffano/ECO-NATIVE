@@ -4,16 +4,33 @@ import subprocess
 import sys
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, File, HTTPException, UploadFile
 from pydantic import BaseModel
 
-from backend.app.core.paths import PROJECTS_DIR
-from backend.app.db.models import Listing, Product, ProductStatus
+from backend.app.db.models import Asset, Listing, PrintPlate, Product, ProductStatus, now_iso
 from backend.app.db.store import store
+from backend.app.services.product_paths import (
+    MODEL_FILE_SUFFIXES,
+    extra_model_filename,
+    is_model_asset_kind,
+    model_filename,
+    product_dir_for,
+)
+from backend.app.services.print_plates import plate_totals, read_print_plates, write_print_plates
+from backend.app.services.production_cost import (
+    ProductionCost,
+    build_production_cost_breakdown,
+    get_production_settings,
+    normalize_production_cost,
+    write_production_cost,
+)
+from backend.app.services.source_url_blacklist import block_product_source_url
 from backend.app.services.sku import ensure_color_skus, ensure_product_sku
 from backend.app.services.store_profiles import get_store_profile
 
 router = APIRouter()
+
+MAX_MODEL_FILE_BYTES = 50 * 1024 * 1024
 
 
 class ProductCreate(BaseModel):
@@ -31,17 +48,21 @@ class ProductUpdate(BaseModel):
     metadata: dict | None = None
 
 
-def safe_folder_name(value: str) -> str:
-    cleaned = re.sub(r'[\\/*?:"<>|]', "", value).strip()
-    return cleaned[:120] or "produto"
+class ProductionCostBatchItem(BaseModel):
+    product_id: str
+    production_cost: ProductionCost
+
+
+class ProductionCostBatchRequest(BaseModel):
+    items: list[ProductionCostBatchItem]
+
+
+class PrintPlatesUpdate(BaseModel):
+    plates: list[PrintPlate]
 
 
 def product_folder(product: Product) -> Path:
-    for asset in product.assets:
-        asset_path = Path(asset.path)
-        if asset_path.exists():
-            return asset_path.parent
-    return PROJECTS_DIR / product.project_id / safe_folder_name(product.name)
+    return product_dir_for(product)
 
 
 def open_folder(path: Path) -> None:
@@ -114,6 +135,89 @@ def update_product(product_id: str, payload: ProductUpdate) -> Product:
     return store.upsert_product(product)
 
 
+def _production_context(product: Product):
+    state = store.load()
+    project = next((item for item in state.projects if item.id == product.project_id), None)
+    store_profile = get_store_profile(project.store_profile_id if project else None)
+    filaments = [item for item in state.filament_spools if item.store_profile_id == store_profile.id]
+    settings = get_production_settings(state, store_profile.id)
+    return filaments, settings
+
+
+@router.put("/production-costs/batch")
+def batch_update_production_costs(payload: ProductionCostBatchRequest) -> dict:
+    if not payload.items:
+        return {"updated": 0, "product_ids": []}
+
+    state = store.load()
+    updated_ids: list[str] = []
+    missing_ids: list[str] = []
+
+    for item in payload.items:
+        product = next((entry for entry in state.products if entry.id == item.product_id), None)
+        if not product:
+            missing_ids.append(item.product_id)
+            continue
+        write_production_cost(product, normalize_production_cost(item.production_cost))
+        product.updated_at = now_iso()
+        updated_ids.append(product.id)
+
+    if missing_ids:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Produto(s) nao encontrado(s): {', '.join(missing_ids)}",
+        )
+
+    store.save(state)
+    return {"updated": len(updated_ids), "product_ids": updated_ids}
+
+
+@router.get("/{product_id}/production-cost")
+def get_production_cost(product_id: str) -> dict:
+    state = store.load()
+    product = next((item for item in state.products if item.id == product_id), None)
+    if not product:
+        raise HTTPException(status_code=404, detail="Produto nao encontrado")
+    filaments, settings = _production_context(product)
+    breakdown = build_production_cost_breakdown(product, filaments, settings)
+    return breakdown.model_dump()
+
+
+@router.put("/{product_id}/production-cost")
+def update_production_cost(product_id: str, payload: ProductionCost) -> dict:
+    state = store.load()
+    product = next((item for item in state.products if item.id == product_id), None)
+    if not product:
+        raise HTTPException(status_code=404, detail="Produto nao encontrado")
+    write_production_cost(product, normalize_production_cost(payload))
+    store.upsert_product(product)
+    filaments, settings = _production_context(product)
+    breakdown = build_production_cost_breakdown(product, filaments, settings)
+    return breakdown.model_dump()
+
+
+@router.get("/{product_id}/print-plates")
+def get_print_plates(product_id: str) -> dict:
+    state = store.load()
+    product = next((item for item in state.products if item.id == product_id), None)
+    if not product:
+        raise HTTPException(status_code=404, detail="Produto nao encontrado")
+    plates = read_print_plates(product)
+    return {"plates": [plate.model_dump() for plate in plates], "totals": plate_totals(plates)}
+
+
+@router.put("/{product_id}/print-plates")
+def update_print_plates(product_id: str, payload: PrintPlatesUpdate) -> dict:
+    state = store.load()
+    product = next((item for item in state.products if item.id == product_id), None)
+    if not product:
+        raise HTTPException(status_code=404, detail="Produto nao encontrado")
+    plates = payload.plates
+    write_print_plates(product, plates)
+    store.upsert_product(product)
+    return {"plates": [plate.model_dump() for plate in plates], "totals": plate_totals(plates)}
+
+
 @router.post("/{product_id}/open-folder")
 def open_product_folder(product_id: str) -> dict[str, str]:
     state = store.load()
@@ -130,12 +234,105 @@ def open_product_folder(product_id: str) -> dict[str, str]:
     return {"status": "opened", "path": str(folder)}
 
 
-@router.delete("/{product_id}")
-def delete_product(product_id: str) -> dict[str, str]:
+def _next_extra_model_index(product: Product) -> int:
+    indices = []
+    for asset in product.assets:
+        if asset.kind == "model_3mf":
+            continue
+        match = re.fullmatch(r"model_3mf_extra_(\d+)", asset.kind)
+        if match:
+            indices.append(int(match.group(1)))
+    return max(indices, default=0) + 1
+
+
+@router.post("/{product_id}/model-files")
+async def upload_model_file(product_id: str, file: UploadFile = File(...)) -> Product:
     state = store.load()
-    if not any(product.id == product_id for product in state.products):
+    product = next((p for p in state.products if p.id == product_id), None)
+    if not product:
         raise HTTPException(status_code=404, detail="Produto nao encontrado")
-    state.products = [product for product in state.products if product.id != product_id]
+
+    original_name = Path(file.filename or "modelo.3mf").name
+    suffix = Path(original_name).suffix.lower() or ".3mf"
+    if suffix not in MODEL_FILE_SUFFIXES:
+        raise HTTPException(status_code=400, detail="Formato nao suportado. Use arquivos .3mf ou .stl.")
+
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="Arquivo vazio.")
+    if len(content) > MAX_MODEL_FILE_BYTES:
+        raise HTTPException(status_code=400, detail="Arquivo maior que 50MB.")
+
+    project = next((item for item in state.projects if item.id == product.project_id), None)
+    store_profile = get_store_profile(project.store_profile_id if project else None)
+    ensure_product_sku(product, state.products, project, store_profile)
+    sku = str(product.metadata.get("sku") or "").strip()
+    if not sku:
+        raise HTTPException(status_code=400, detail="SKU do produto nao encontrado.")
+
+    folder = product_folder(product)
+    folder.mkdir(parents=True, exist_ok=True)
+
+    has_primary = any(asset.kind == "model_3mf" for asset in product.assets)
+    if not has_primary:
+        output_name = model_filename(sku, suffix)
+        kind = "model_3mf"
+    else:
+        index = _next_extra_model_index(product)
+        output_name = extra_model_filename(sku, index, suffix)
+        kind = f"model_3mf_extra_{index}"
+
+    output_path = folder / output_name
+    output_path.write_bytes(content)
+
+    product.assets.append(
+        Asset(
+            product_id=product.id,
+            kind=kind,
+            path=str(output_path),
+        )
+    )
+    if product.metadata.get("model_download_error"):
+        product.metadata.pop("model_download_error", None)
+    return store.upsert_product(product)
+
+
+@router.delete("/{product_id}/assets/{asset_id}")
+def delete_product_asset(product_id: str, asset_id: str) -> Product:
+    state = store.load()
+    product = next((p for p in state.products if p.id == product_id), None)
+    if not product:
+        raise HTTPException(status_code=404, detail="Produto nao encontrado")
+
+    asset = next((item for item in product.assets if item.id == asset_id), None)
+    if not asset:
+        raise HTTPException(status_code=404, detail="Arquivo nao encontrado.")
+    if not is_model_asset_kind(asset.kind):
+        raise HTTPException(status_code=400, detail="Somente arquivos 3D podem ser removidos por aqui.")
+
+    asset_path = Path(asset.path)
+    if asset_path.exists() and asset_path.is_file():
+        asset_path.unlink(missing_ok=True)
+
+    product.assets = [item for item in product.assets if item.id != asset_id]
+    return store.upsert_product(product)
+
+
+@router.delete("/{product_id}")
+def delete_product(product_id: str) -> dict:
+    state = store.load()
+    product = next((item for item in state.products if item.id == product_id), None)
+    if not product:
+        raise HTTPException(status_code=404, detail="Produto nao encontrado")
+
+    cleanup = purge_product_data(product)
+    blocked = block_product_source_url(state, product)
+    state.products = [item for item in state.products if item.id != product_id]
     state.jobs = [job for job in state.jobs if job.product_id != product_id]
     store.save(state)
-    return {"status": "deleted", "product_id": product_id}
+    return {
+        "status": "deleted",
+        "product_id": product_id,
+        "cleanup": cleanup,
+        "blocked_url": blocked.model_dump() if blocked else None,
+    }

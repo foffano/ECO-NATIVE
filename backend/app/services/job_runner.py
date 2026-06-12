@@ -15,6 +15,7 @@ from backend.app.services.makerworld_scraper import (
     discover_model_urls,
     scrape_product_urls,
 )
+from backend.app.services.source_url_blacklist import collect_skip_urls
 
 
 def _finish_job(job: Job, message: str) -> Job:
@@ -46,24 +47,21 @@ def run_collect_job(job: Job, payload) -> Job:
     job.progress = 20
     job.message = "Coletando produtos"
     manual_links = bool(payload.urls)
-    job.logs.append("Job iniciado com scraper MakerWorld. Produtos serao coletados sem curadoria IA.")
+    job.logs.append("Job iniciado com scraper MakerWorld. Produtos serão coletados sem curadoria IA.")
     store.upsert_job(job)
 
     state = store.load()
     project = next((item for item in state.projects if item.id == payload.project_id), None)
     store_profile = get_store_profile(payload.store_profile_id or (project.store_profile_id if project else None))
-    existing_urls = {
-        clean_makerworld_url(product.source_url)
-        for product in state.products
-        if product.project_id == payload.project_id and product.source_url
-    }
+    product_urls, blocked_urls, skip_urls = collect_skip_urls(state, payload.project_id)
+    sku_reference_products = list(state.products)
 
     try:
         urls = payload.urls
         if not urls:
             job.progress = 35
             job.message = "Buscando links no MakerWorld"
-            job.logs.append(f"Busca por palavra-chave: {payload.keyword or 'tendencias'}")
+            job.logs.append(f"Busca por palavra-chave: {payload.keyword or 'tendências'}")
             job.logs.append(f"Loja ativa: {store_profile.name} | nicho={store_profile.niche}")
             store.upsert_job(job)
             urls = discover_model_urls(
@@ -74,13 +72,27 @@ def run_collect_job(job: Job, payload) -> Job:
             )
 
         job.progress = 60
-        job.message = "Lendo paginas de produtos"
-        urls = [
-            clean_makerworld_url(url)
-            for url in urls[: payload.limit]
-            if clean_makerworld_url(url) not in existing_urls
-        ]
-        job.logs.append(f"{len(urls)} link(s) novo(s) para extracao direta.")
+        job.message = "Lendo páginas de produtos"
+        filtered_urls: list[str] = []
+        skipped_existing = 0
+        skipped_blocked = 0
+        for url in urls[: payload.limit]:
+            clean_url = clean_makerworld_url(url)
+            if not clean_url:
+                continue
+            if clean_url in product_urls:
+                skipped_existing += 1
+                continue
+            if clean_url in blocked_urls:
+                skipped_blocked += 1
+                continue
+            filtered_urls.append(clean_url)
+        urls = filtered_urls
+        if skipped_existing:
+            job.logs.append(f"{skipped_existing} link(s) já coletado(s) ignorado(s).")
+        if skipped_blocked:
+            job.logs.append(f"{skipped_blocked} link(s) ignorado(s) pela lista de bloqueio.")
+        job.logs.append(f"{len(urls)} link(s) novo(s) para extração direta.")
         store.upsert_job(job)
 
         scraped_products = scrape_product_urls(
@@ -89,6 +101,9 @@ def run_collect_job(job: Job, payload) -> Job:
             headless=not payload.visible_browser,
             download_cover=True,
             download_model=True,
+            sku_reference_products=sku_reference_products,
+            project=project,
+            store_profile=store_profile,
         )
     except Exception as exc:
         job.status = JobStatus.failed
@@ -98,10 +113,13 @@ def run_collect_job(job: Job, payload) -> Job:
         return store.upsert_job(job)
 
     created = 0
-    sku_reference_products = list(state.products)
     for scraped in scraped_products:
-        if scraped.source_url in existing_urls:
-            job.logs.append(f"Duplicado ignorado: {scraped.source_url}")
+        clean_url = clean_makerworld_url(scraped.source_url)
+        if clean_url in skip_urls:
+            if clean_url in blocked_urls:
+                job.logs.append(f"Lista de bloqueio, ignorado: {clean_url}")
+            else:
+                job.logs.append(f"Duplicado ignorado: {clean_url}")
             continue
 
         job.status = JobStatus.running
@@ -112,8 +130,8 @@ def run_collect_job(job: Job, payload) -> Job:
         product = Product(
             project_id=payload.project_id,
             name=scraped.name,
-            source_url=scraped.source_url,
-            status=ProductStatus.assets_downloaded,
+            source_url=clean_url,
+            status=ProductStatus.collected,
             ai_score="coletado_sem_curadoria",
             tags=scraped.tags or (["link selecionado", "coleta"] if manual_links else ["coleta"]),
             metadata={
@@ -126,7 +144,10 @@ def run_collect_job(job: Job, payload) -> Job:
                 "model_download_error": scraped.model_error,
             },
         )
-        ensure_product_sku(product, sku_reference_products, project, store_profile)
+        if scraped.sku:
+            product.metadata["sku"] = scraped.sku
+        else:
+            ensure_product_sku(product, sku_reference_products, project, store_profile)
         sku_reference_products.append(product)
         if scraped.local_image_path:
             product.assets.append(
@@ -148,7 +169,8 @@ def run_collect_job(job: Job, payload) -> Job:
         if scraped.model_error:
             job.logs.append(f"Falha ao baixar 3MF de {scraped.name}: {scraped.model_error}")
         store.upsert_product(product)
-        existing_urls.add(scraped.source_url)
+        skip_urls.add(clean_url)
+        product_urls.add(clean_url)
         created += 1
 
     job.metadata["ai_cost_total_usd"] = 0
@@ -157,13 +179,13 @@ def run_collect_job(job: Job, payload) -> Job:
     job.metadata["rejected_products"] = 0
     job.metadata["manual_without_ai"] = True
     job.metadata["ai_curation_skipped"] = True
-    return _finish_job(job, f"{created} produto(s) coletado(s) e adicionados para revisao.")
+    return _finish_job(job, f"{created} produto(s) coletado(s) e adicionados para revisão.")
 
 
 def run_listing_job(job: Job, product: Product) -> Job:
     job.status = JobStatus.running
     job.progress = 50
-    job.message = "Gerando anuncio com IA"
+    job.message = "Gerando anúncio com IA"
     state = store.load()
     project = next((item for item in state.projects if item.id == product.project_id), None)
     store_profile = get_store_profile(project.store_profile_id if project else None)
@@ -178,15 +200,15 @@ def run_listing_job(job: Job, product: Product) -> Job:
     except Exception as exc:
         job.status = JobStatus.failed
         job.progress = 100
-        job.message = "Falha ao gerar anuncio com IA"
+        job.message = "Falha ao gerar anúncio com IA"
         job.logs.append(f"{exc.__class__.__name__}: {exc}")
         return store.upsert_job(job)
 
-    product.status = ProductStatus.listing_generated
+    product.status = ProductStatus.in_edit
     product.metadata["listing_prompt"] = store_profile.listing_prompt
     product.metadata["store_profile_id"] = store_profile.id
     store.upsert_product(product)
-    return _finish_job(job, "Anuncio gerado e salvo para revisao")
+    return _finish_job(job, "Anúncio gerado e salvo para revisão")
 
 
 def run_image_job(
@@ -220,7 +242,7 @@ def run_image_job(
         if selected_colors:
             job.progress = 70
             job.message = "Gerando variações de cor selecionadas"
-            job.logs.append("Usando prompt de variacao de cor do exemplo, executado via Kie.ai/Qwen.")
+            job.logs.append("Usando prompt de variação de cor do exemplo, executado via Kie.ai/Qwen.")
             store.upsert_job(job)
 
             source_asset = next((asset for asset in studio_assets if "studio_classic" in asset.kind), None)
@@ -251,7 +273,7 @@ def run_image_job(
         job.logs.append(f"{exc.__class__.__name__}: {exc}")
         return store.upsert_job(job)
 
-    product.status = ProductStatus.images_generated
+    product.status = ProductStatus.in_edit
     product.metadata["image_prompt"] = store_profile.image_prompt
     product.metadata["image_prompts"] = store_profile.image_prompts
     product.metadata["color_variation_prompt"] = store_profile.color_variation_prompt
@@ -280,8 +302,8 @@ def run_regenerate_image_job(job: Job, product: Product, prompt_key: str, extra_
         if not source_asset:
             job.status = JobStatus.failed
             job.progress = 100
-            job.message = "Imagem base IA nao encontrada"
-            job.logs.append("Gere uma imagem base antes de recriar variacoes de cor.")
+            job.message = "Imagem base IA não encontrada"
+            job.logs.append("Gere uma imagem base antes de recriar variações de cor.")
             return store.upsert_job(job)
         try:
             ensure_product_sku(product, state.products, project, store_profile)
@@ -298,15 +320,15 @@ def run_regenerate_image_job(job: Job, product: Product, prompt_key: str, extra_
         except Exception as exc:
             job.status = JobStatus.failed
             job.progress = 100
-            job.message = "Falha ao recriar variacao de cor"
+            job.message = "Falha ao recriar variação de cor"
             job.logs.append(f"{exc.__class__.__name__}: {exc}")
             return store.upsert_job(job)
 
-        product.status = ProductStatus.images_generated
+        product.status = ProductStatus.in_edit
         product.metadata["last_regenerated_image"] = prompt_key
         product.metadata["last_regenerated_image_extra_prompt"] = extra_prompt
         store.upsert_product(product)
-        return _finish_job(job, f"VariaÃ§Ã£o {color_name} recriada")
+        return _finish_job(job, f"Variação {color_name} recriada")
 
     prompt = store_profile.image_prompts.get(prompt_key)
     if not prompt:
@@ -333,7 +355,7 @@ def run_regenerate_image_job(job: Job, product: Product, prompt_key: str, extra_
         job.logs.append(f"{exc.__class__.__name__}: {exc}")
         return store.upsert_job(job)
 
-    product.status = ProductStatus.images_generated
+    product.status = ProductStatus.in_edit
     product.metadata["last_regenerated_image"] = prompt_key
     product.metadata["last_regenerated_image_extra_prompt"] = extra_prompt
     store.upsert_product(product)

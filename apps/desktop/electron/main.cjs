@@ -1,5 +1,6 @@
 const { app, BrowserWindow, ipcMain } = require("electron");
 const { autoUpdater } = require("electron-updater");
+const semver = require("semver");
 const { spawn } = require("child_process");
 const http = require("http");
 const path = require("path");
@@ -103,11 +104,17 @@ ipcMain.handle("updates:check", async () => {
 
   try {
     const result = await autoUpdater.checkForUpdatesAndNotify();
+    const currentVersion = app.getVersion();
+    const latestVersion = result?.updateInfo?.version;
+    if (latestVersion && semver.gt(latestVersion, currentVersion)) {
+      return {
+        ok: true,
+        message: `Nova versão ${latestVersion} encontrada. O download começa em segundo plano e a instalação ocorre ao fechar o app.`,
+      };
+    }
     return {
       ok: true,
-      message: result?.updateInfo?.version
-        ? `Atualização ${result.updateInfo.version} verificada.`
-        : "Nenhuma atualização nova encontrada.",
+      message: `Você já está na versão mais recente (${currentVersion}).`,
     };
   } catch (error) {
     return {

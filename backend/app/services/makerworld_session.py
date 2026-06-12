@@ -53,7 +53,7 @@ def open_login_session() -> MakerWorldSessionStatus:
 
     return MakerWorldSessionStatus(
         open=True,
-        message="Janela MakerWorld aberta. Faca login e conclua qualquer verificacao; os cookies serao salvos automaticamente.",
+        message="Janela MakerWorld aberta. Faça login e conclua qualquer verificação; os cookies serão salvos automaticamente.",
     )
 
 

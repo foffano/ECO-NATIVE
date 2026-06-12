@@ -11,6 +11,6 @@ def read_runtime_status() -> dict:
     exchange = get_exchange_status(allow_fetch=online)
     return {
         "online": online,
-        "requires_internet": True,
+        "requires_internet": False,
         "exchange": exchange,
     }

@@ -10,14 +10,20 @@ from backend.app.db.models import Asset, Product
 from backend.app.services.cloudflare_r2 import upload_file_to_r2
 from backend.app.services.cost_tracker import add_kie_image_cost
 from backend.app.services.image_options import color_description_map
+from backend.app.services.product_paths import (
+    color_variation_filename,
+    product_dir_for,
+    studio_image_filename,
+)
 from backend.app.services.prompt_library import IMAGE_PROMPTS, render_color_variation_prompt
 
 
 def product_output_dir(product: Product) -> Path:
-    cover = next((asset for asset in product.assets if asset.kind == "cover_image"), None)
-    if cover:
-        return Path(cover.path).parent
-    return Path("data") / "projects" / product.project_id / product.id
+    return product_dir_for(product)
+
+
+def product_sku(product: Product) -> str:
+    return str(product.metadata.get("sku") or "").strip().upper()
 
 
 def r2_key_prefix(product: Product) -> str:
@@ -111,6 +117,9 @@ def generate_studio_images(
     if not cover:
         raise RuntimeError("Produto sem imagem base capturada.")
 
+    sku = product_sku(product)
+    if not sku:
+        raise RuntimeError("Produto sem SKU. Gere o SKU antes de criar imagens.")
     output_dir = product_output_dir(product)
     output_dir.mkdir(parents=True, exist_ok=True)
     source_url = asset_public_url(product, cover)
@@ -119,7 +128,7 @@ def generate_studio_images(
     prompts = image_prompts or IMAGE_PROMPTS
     for prompt_key, prompt in prompts.items():
         kind = f"generated_{prompt_key}"
-        output_path = output_dir / f"capa_produto_{prompt_key}.png"
+        output_path = output_dir / studio_image_filename(sku, prompt_key)
         if output_path.exists():
             public_url = existing_asset_public_url(product, kind, output_path) or upload_file_to_r2(output_path, r2_key_prefix(product))
             created_assets.append(
@@ -157,9 +166,12 @@ def regenerate_studio_image(
     if not cover:
         raise RuntimeError("Produto sem imagem base capturada.")
 
+    sku = product_sku(product)
+    if not sku:
+        raise RuntimeError("Produto sem SKU. Gere o SKU antes de recriar imagens.")
     output_dir = product_output_dir(product)
     output_dir.mkdir(parents=True, exist_ok=True)
-    output_path = output_dir / f"capa_produto_{prompt_key}.png"
+    output_path = output_dir / studio_image_filename(sku, prompt_key)
     source_url = asset_public_url(product, cover)
     final_prompt = " ".join(part.strip() for part in [prompt, store_extra_prompt, specific_extra_prompt] if part.strip())
 
@@ -187,10 +199,13 @@ def regenerate_color_variation_with_kie(
     if not color_desc:
         raise RuntimeError(f"Cor nao encontrada: {color_name}")
 
-    source_path = Path(source_asset.path)
+    sku = product_sku(product)
+    if not sku:
+        raise RuntimeError("Produto sem SKU. Gere o SKU antes de recriar variacoes de cor.")
+    source_prompt_key = source_asset.kind.replace("generated_", "", 1) or "studio_classic"
     output_dir = product_output_dir(product)
     output_dir.mkdir(parents=True, exist_ok=True)
-    output_path = output_dir / f"{source_path.stem}_{color_name}.png"
+    output_path = output_dir / color_variation_filename(sku, source_prompt_key, color_name)
     source_url = asset_public_url(product, source_asset)
 
     task_id = create_kie_task(
@@ -199,7 +214,7 @@ def regenerate_color_variation_with_kie(
         settings.kie_api_key,
         kie_model,
     )
-    add_kie_image_cost(product, f"RecriaÃ§Ã£o de variaÃ§Ã£o de cor: {color_name}", model=kie_model)
+    add_kie_image_cost(product, f"Recriação de variação de cor: {color_name}", model=kie_model)
     result_url = poll_kie_task(task_id, settings.kie_api_key)
     download_url(result_url, output_path)
     public_url = upload_file_to_r2(output_path, r2_key_prefix(product), force=True)
@@ -218,7 +233,10 @@ def generate_color_variations_with_kie(
         raise RuntimeError("KIE_API_KEY nao configurada.")
     kie_model = settings.kie_image_model or "qwen/image-edit"
 
-    source_path = Path(source_asset.path)
+    sku = product_sku(product)
+    if not sku:
+        raise RuntimeError("Produto sem SKU. Gere o SKU antes de criar variacoes de cor.")
+    source_prompt_key = source_asset.kind.replace("generated_", "", 1) or "studio_classic"
     output_dir = product_output_dir(product)
     source_url = asset_public_url(product, source_asset)
     color_map = color_description_map()
@@ -229,7 +247,7 @@ def generate_color_variations_with_kie(
         if not color_desc:
             continue
 
-        output_path = output_dir / f"{source_path.stem}_{color_name}.png"
+        output_path = output_dir / color_variation_filename(sku, source_prompt_key, color_name)
         kind = f"color_{color_name}"
         if output_path.exists():
             public_url = existing_asset_public_url(product, kind, output_path) or upload_file_to_r2(output_path, r2_key_prefix(product))

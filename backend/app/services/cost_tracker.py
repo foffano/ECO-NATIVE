@@ -85,3 +85,16 @@ def add_kie_image_cost(product: Product, action: str, model: str = "qwen/image-e
         units=units,
         metadata={"unit_cost_usd": kie_image_cost_usd(), "credits_per_image": 2, "usd_per_1000_credits": 5},
     )
+
+
+def product_ai_cost_usd(product: Product) -> float:
+    stored = product.metadata.get("cost_total_usd")
+    if stored is not None:
+        try:
+            return float(stored)
+        except (TypeError, ValueError):
+            pass
+    events = product.metadata.get("cost_events") or []
+    if isinstance(events, list):
+        return round(sum(float(item.get("cost_usd") or 0) for item in events if isinstance(item, dict)), 6)
+    return 0.0
