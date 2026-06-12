@@ -1,6 +1,6 @@
 {
   "name": "eco-native-studio",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "private": false,
   "description": "AI-assisted e-commerce listing studio for product research, content generation, image creation, and marketplace export.",
   "author": "ECO Native",
@@ -13,7 +13,7 @@
   "scripts": {
     "dev": "concurrently \"npm:dev:frontend\" \"npm:dev:backend\"",
     "dev:frontend": "vite --host 127.0.0.1 --port 5173",
-    "dev:backend": "python -m uvicorn backend.app.main:app --reload --host 127.0.0.1 --port 8765",
+    "dev:backend": "python scripts/ensure_playwright.py && python -m uvicorn backend.app.main:app --reload --host 127.0.0.1 --port 8765",
     "dev:desktop": "concurrently \"npm:dev:frontend\" \"npm:dev:backend\" \"wait-on http://127.0.0.1:5173 http://127.0.0.1:8765/health && electron apps/desktop/electron/main.cjs\"",
     "build": "npm.cmd run build:frontend",
     "build:frontend": "tsc -b && vite build",

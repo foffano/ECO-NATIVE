@@ -6,7 +6,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import sync_playwright
+
+from backend.app.core.playwright_env import configure_playwright_browsers, playwright_install_hint
 
 from backend.app.core.paths import DATA_DIR
 from backend.app.db.models import Product, Project, StoreProfile
@@ -59,14 +62,22 @@ def build_search_url(keyword: str) -> str:
 
 
 def open_makerworld_context(playwright, headless: bool):
+    if not configure_playwright_browsers():
+        raise RuntimeError(playwright_install_hint())
     user_data_path = DATA_DIR / "browser_data" / "makerworld"
     user_data_path.mkdir(parents=True, exist_ok=True)
-    return playwright.chromium.launch_persistent_context(
-        user_data_dir=user_data_path,
-        headless=headless,
-        accept_downloads=True,
-        args=["--disable-blink-features=AutomationControlled"],
-    )
+    try:
+        return playwright.chromium.launch_persistent_context(
+            user_data_dir=user_data_path,
+            headless=headless,
+            accept_downloads=True,
+            args=["--disable-blink-features=AutomationControlled"],
+        )
+    except PlaywrightError as error:
+        message = str(error)
+        if "Executable doesn't exist" in message:
+            raise RuntimeError(playwright_install_hint()) from error
+        raise
 
 
 def discover_model_urls(keyword: str, limit: int, scrolls: int = 8, headless: bool = False) -> list[str]:

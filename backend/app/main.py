@@ -1,3 +1,7 @@
+from backend.app.core.playwright_env import configure_playwright_browsers
+
+configure_playwright_browsers()
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 

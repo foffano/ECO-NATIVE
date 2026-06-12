@@ -8,6 +8,7 @@ Plataforma React + FastAPI + Electron para organizar e automatizar a criacao de 
 python -m venv .venv
 .\.venv\Scripts\python -m pip install -r backend\requirements.txt
 npm.cmd install
+npm.cmd run build:playwright
 npm.cmd run dev
 ```
 
