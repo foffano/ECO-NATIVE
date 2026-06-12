@@ -97,6 +97,11 @@ async function createWindow() {
   }
 }
 
+ipcMain.handle("app:info", () => ({
+  name: app.getName(),
+  version: app.getVersion(),
+}));
+
 ipcMain.handle("updates:check", async () => {
   if (!app.isPackaged) {
     return { ok: false, message: "Atualizações automáticas só funcionam no aplicativo instalado." };

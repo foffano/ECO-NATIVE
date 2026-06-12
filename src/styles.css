@@ -12,6 +12,45 @@
   --eco-green: #24b96f;
   --eco-green-dark: #0f7a54;
   --eco-teal: #0c6a5a;
+  --eco-sidebar-glow: rgba(36, 185, 111, 0.18);
+  --eco-accent-border: #88d2a9;
+  --eco-surface-muted: #e1eee1;
+  --eco-surface-muted-border: #aebeb1;
+  --eco-accent-highlight: #b5e6cb;
+  --eco-accent-track: #e1eee1;
+  --eco-sidebar-text: #edfbf0;
+  --eco-sidebar-text-muted: #7fa88a;
+  --eco-sidebar-text-strong: #f9fdf2;
+  --eco-sidebar-border: var(--eco-sidebar-border);
+  --eco-sidebar-border-strong: var(--eco-sidebar-border-strong);
+  --eco-sidebar-border-subtle: var(--eco-sidebar-border-subtle);
+  --eco-sidebar-hover: var(--eco-sidebar-hover);
+  --eco-on-sidebar: #fafdf3;
+  --eco-shadow: var(--eco-shadow);
+  --eco-shadow-md: rgba(7, 31, 22, 0.28);
+  --eco-shadow-lg: var(--eco-shadow-lg);
+  --eco-shadow-xl: var(--eco-shadow-xl);
+  --eco-shadow-deep: var(--eco-shadow-deep);
+  --eco-overlay: var(--eco-overlay);
+  --eco-overlay-strong: var(--eco-overlay-strong);
+  --eco-accent-tint-12: rgba(15, 122, 84, 0.12);
+  --eco-accent-tint-18: rgba(15, 122, 84, 0.18);
+  --eco-accent-border-alpha: rgba(36, 185, 111, 0.38);
+  --eco-forest-alpha-08: rgba(16, 48, 32, 0.08);
+  --eco-forest-alpha-12: rgba(16, 48, 32, 0.12);
+  --eco-success-bg: #cfeedc;
+  --eco-success-border: #82d1a6;
+  --eco-success-text: #0c3f2c;
+  --eco-accent-mid: #1b9f64;
+  --eco-highlight-bg: #c1e9d3;
+  --eco-page-subtle: #f8fbf6;
+  --eco-highlight-surface: #c4e9d1;
+  --eco-highlight-border: #8dd4ac;
+  --eco-surface-hover: #e2efe2;
+  --eco-forest-alpha-14: rgba(16, 48, 32, 0.14);
+  --eco-shadow-sm: rgba(16, 48, 32, 0.08);
+  --eco-shadow-menu: rgba(7, 31, 22, 0.24);
+  --eco-backdrop-heavy: rgba(7, 31, 22, 0.82);
   color: var(--eco-ink);
   font-family:
     Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
@@ -28,7 +67,13 @@
 body {
   margin: 0;
   min-width: 320px;
-  min-height: 100vh;
+  height: 100vh;
+  height: 100dvh;
+  overflow: hidden;
+}
+
+#root {
+  height: 100%;
 }
 
 button,
@@ -46,12 +91,17 @@ button {
 .app-shell {
   display: grid;
   grid-template-columns: 240px minmax(0, 1fr);
-  min-height: 100vh;
+  height: 100%;
+  overflow: hidden;
 }
 
 .sidebar {
-  background: radial-gradient(circle at 30% 8%, rgba(36, 185, 111, 0.18), transparent 32%), var(--eco-forest);
-  color: #f8f4ea;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+  background: radial-gradient(circle at 30% 8%, var(--eco-sidebar-glow), transparent 32%), var(--eco-forest);
+  color: var(--eco-on-sidebar);
   padding: 24px 18px;
 }
 
@@ -88,7 +138,7 @@ button {
 }
 
 .brand span:last-child {
-  color: #b7d6bd;
+  color: var(--eco-sidebar-text-muted);
   font-size: 13px;
 }
 
@@ -100,8 +150,9 @@ button {
   align-items: center;
   padding: 10px;
   margin-bottom: 24px;
+  flex-shrink: 0;
   background: transparent;
-  border: 1px solid rgba(191, 242, 200, 0.18);
+  border: 1px solid var(--eco-sidebar-border);
   border-radius: 8px;
 }
 
@@ -143,7 +194,7 @@ button {
   justify-content: space-between;
   gap: 8px;
   padding: 0;
-  color: #f8fff6;
+  color: var(--eco-sidebar-text-strong);
   background: transparent;
   border: 0;
   border-radius: 8px;
@@ -160,7 +211,7 @@ button {
 
 .store-picker-button svg {
   flex: 0 0 auto;
-  color: #b7d6bd;
+  color: var(--eco-sidebar-text-muted);
   transition: transform 160ms ease;
 }
 
@@ -179,10 +230,10 @@ button {
   max-height: 260px;
   overflow: auto;
   padding: 8px;
-  background: #0b2719;
-  border: 1px solid rgba(191, 242, 200, 0.22);
+  background: var(--eco-forest-2);
+  border: 1px solid var(--eco-sidebar-border-strong);
   border-radius: 10px;
-  box-shadow: 0 18px 40px rgba(4, 18, 11, 0.38);
+  box-shadow: 0 18px 40px var(--eco-shadow-xl);
 }
 
 .store-picker-option {
@@ -196,13 +247,13 @@ button {
   background: transparent;
   border: 0;
   border-radius: 8px;
-  color: #d9ead8;
+  color: var(--eco-sidebar-text);
   text-align: left;
 }
 
 .store-picker-option:hover,
 .store-picker-option.active {
-  background: rgba(191, 242, 200, 0.13);
+  background: var(--eco-sidebar-hover);
   color: #ffffff;
 }
 
@@ -240,6 +291,17 @@ button {
 .app-tabs {
   display: grid;
   gap: 6px;
+  align-content: start;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.sidebar-footer {
+  margin-top: auto;
+  padding-top: 12px;
+  flex-shrink: 0;
+  border-top: 1px solid var(--eco-sidebar-border-subtle);
 }
 
 .tab-button {
@@ -247,7 +309,7 @@ button {
   align-items: center;
   gap: 10px;
   width: 100%;
-  color: #d9ead8;
+  color: var(--eco-sidebar-text);
   padding: 11px 12px;
   border-radius: 8px;
   background: transparent;
@@ -256,11 +318,13 @@ button {
 
 .tab-button.active,
 .tab-button:hover {
-  background: rgba(36, 185, 111, 0.18);
+  background: var(--eco-sidebar-glow);
 }
 
 .workspace {
   padding: 28px;
+  min-height: 0;
+  overflow-y: auto;
 }
 
 .topbar {
@@ -343,10 +407,10 @@ button:disabled {
   min-height: 44px;
   padding: 10px 12px 10px 14px;
   background: var(--eco-forest);
-  border: 1px solid rgba(191, 242, 200, 0.18);
+  border: 1px solid var(--eco-sidebar-border);
   border-radius: 8px;
   color: var(--eco-panel);
-  box-shadow: 0 18px 40px rgba(7, 31, 22, 0.25);
+  box-shadow: 0 18px 40px var(--eco-shadow);
 }
 
 .toast-notice span {
@@ -360,7 +424,7 @@ button:disabled {
   height: 26px;
   place-items: center;
   padding: 0;
-  background: rgba(255, 253, 250, 0.12);
+  background: color-mix(in srgb, var(--eco-panel) 12%, transparent);
   border-radius: 999px;
   color: var(--eco-panel);
   font-size: 18px;
@@ -378,7 +442,7 @@ button:disabled {
   display: grid;
   place-items: center;
   padding: 18px;
-  background: rgba(11, 18, 14, 0.58);
+  background: var(--eco-overlay);
 }
 
 .offline-backdrop {
@@ -388,7 +452,7 @@ button:disabled {
   display: grid;
   place-items: center;
   padding: 18px;
-  background: rgba(7, 18, 12, 0.72);
+  background: var(--eco-overlay-strong);
   backdrop-filter: blur(6px);
 }
 
@@ -400,7 +464,7 @@ button:disabled {
   background: var(--eco-panel);
   border: 1px solid var(--eco-line);
   border-radius: 8px;
-  box-shadow: 0 24px 70px rgba(20, 34, 27, 0.34);
+  box-shadow: 0 24px 70px var(--eco-shadow-lg);
 }
 
 .offline-dialog h2,
@@ -421,7 +485,7 @@ button:disabled {
   background: var(--eco-panel);
   border: 1px solid var(--eco-line);
   border-radius: 8px;
-  box-shadow: 0 24px 70px rgba(20, 34, 27, 0.28);
+  box-shadow: 0 24px 70px var(--eco-shadow-md);
 }
 
 .confirm-dialog p {
@@ -449,7 +513,7 @@ button:disabled {
   padding: 22px;
   overflow: auto;
   background:
-    linear-gradient(135deg, rgba(20, 52, 35, 0.92), rgba(221, 136, 71, 0.18)),
+    linear-gradient(135deg, color-mix(in srgb, var(--eco-forest) 92%, transparent), rgba(221, 136, 71, 0.18)),
     var(--eco-forest);
 }
 
@@ -463,7 +527,7 @@ button:disabled {
   background: var(--eco-panel);
   border: 1px solid rgba(255, 255, 255, 0.26);
   border-radius: 8px;
-  box-shadow: 0 34px 90px rgba(5, 16, 10, 0.42);
+  box-shadow: 0 34px 90px var(--eco-shadow-deep);
 }
 
 .onboarding-hero {
@@ -509,7 +573,7 @@ button:disabled {
   padding: 16px;
   border: 1px solid var(--eco-line);
   border-radius: 8px;
-  background: rgba(255, 253, 250, 0.78);
+  background: color-mix(in srgb, var(--eco-panel) 78%, transparent);
 }
 
 .panel-title.compact {
@@ -599,7 +663,7 @@ button:disabled {
 .product-card.selected,
 .product-card.active {
   background: var(--eco-soft);
-  border-color: #bfe6c7;
+  border-color: var(--eco-accent-border);
 }
 
 .product-card-select {
@@ -613,8 +677,8 @@ button:disabled {
   height: 76px;
   padding: 0;
   overflow: hidden;
-  background: #edf1e8;
-  border: 1px solid #dfe5da;
+  background: var(--eco-surface-muted);
+  border: 1px solid var(--eco-surface-muted-border);
   border-radius: 10px;
   color: var(--eco-muted);
 }
@@ -669,7 +733,7 @@ button:disabled {
   gap: 1px;
   min-width: 0;
   padding: 5px 9px;
-  background: #edf1e8;
+  background: var(--eco-surface-muted);
   border-radius: 999px;
   line-height: 1.2;
 }
@@ -689,7 +753,7 @@ button:disabled {
 }
 
 .pipeline-badge.done {
-  background: #e5f6ea;
+  background: var(--eco-accent-highlight);
 }
 
 .pipeline-badge.done .pipeline-badge-detail {
@@ -811,8 +875,8 @@ button:disabled {
   border-radius: 50%;
   background:
     radial-gradient(circle, var(--eco-panel) 0 54%, transparent 55%),
-    conic-gradient(var(--eco-green) var(--value), #dbeadc 0);
-  box-shadow: inset 0 0 0 1px rgba(7, 31, 22, 0.06);
+    conic-gradient(var(--eco-green) var(--value), var(--eco-accent-track) 0);
+  box-shadow: inset 0 0 0 1px var(--eco-forest-alpha-08);
 }
 
 .donut-chart span {
@@ -867,7 +931,7 @@ button:disabled {
 .chart-bar-track {
   height: 10px;
   overflow: hidden;
-  background: #dbeadc;
+  background: var(--eco-accent-track);
   border-radius: 999px;
 }
 
@@ -941,7 +1005,7 @@ button:disabled {
 .settings-nav button.active {
   background: var(--eco-soft);
   color: var(--eco-green-dark);
-  box-shadow: inset 0 0 0 1px #bfe6c7;
+  box-shadow: inset 0 0 0 1px var(--eco-accent-border);
 }
 
 .settings-content {
@@ -981,7 +1045,7 @@ button:disabled {
 
 .store-profile-card.active {
   background: var(--eco-soft);
-  border-color: #bfe6c7;
+  border-color: var(--eco-accent-border);
 }
 
 .store-profile-mark {
@@ -1054,7 +1118,7 @@ button:disabled {
 }
 
 .backup-upload-button:hover {
-  border-color: rgba(34, 120, 62, 0.38);
+  border-color: var(--eco-accent-border-alpha);
   background: var(--eco-soft);
 }
 
@@ -1093,7 +1157,7 @@ button:disabled {
   background: var(--eco-panel);
   border: 1px solid var(--eco-line);
   border-radius: 8px;
-  box-shadow: 0 24px 70px rgba(20, 34, 27, 0.28);
+  box-shadow: 0 24px 70px var(--eco-shadow-md);
 }
 
 .color-dialog-options {
@@ -1108,7 +1172,7 @@ button:disabled {
   display: grid;
   place-items: center;
   padding: 18px;
-  background: rgba(11, 18, 14, 0.58);
+  background: var(--eco-overlay);
 }
 
 .profile-editor-dialog {
@@ -1119,7 +1183,7 @@ button:disabled {
   background: var(--eco-panel);
   border: 1px solid var(--eco-line);
   border-radius: 8px;
-  box-shadow: 0 24px 70px rgba(20, 34, 27, 0.28);
+  box-shadow: 0 24px 70px var(--eco-shadow-md);
 }
 
 .integration-editor-dialog {
@@ -1833,14 +1897,14 @@ textarea {
 .schedule-metric-bar-track {
   height: 10px;
   border-radius: 999px;
-  background: #e8efe8;
+  background: var(--eco-highlight-surface);
   overflow: hidden;
 }
 
 .schedule-metric-bar-fill {
   height: 100%;
   border-radius: inherit;
-  background: linear-gradient(90deg, #6ea86e, var(--eco-green-dark));
+  background: linear-gradient(90deg, var(--eco-accent-mid), var(--eco-green-dark));
 }
 
 .schedule-metric-bar.tone-warn .schedule-metric-bar-fill {
@@ -1872,7 +1936,7 @@ textarea {
 
 .schedule-week-day.today,
 .schedule-month-cell.today {
-  background: #f4fbf4;
+  background: var(--eco-highlight-bg);
 }
 
 .schedule-week-day-head {
@@ -2014,7 +2078,7 @@ textarea {
   min-height: 52px;
   border-right: 1px solid var(--eco-line);
   border-bottom: 1px solid var(--eco-line);
-  background: #fafcf9;
+  background: var(--eco-page-subtle);
 }
 
 .agenda-column-headers-wrap {
@@ -2022,7 +2086,7 @@ textarea {
   grid-row: 1;
   overflow: hidden;
   border-bottom: 1px solid var(--eco-line);
-  background: #fafcf9;
+  background: var(--eco-page-subtle);
 }
 
 .agenda-column-headers {
@@ -2072,7 +2136,7 @@ textarea {
   left: 0;
   z-index: 3;
   border-right: 1px solid var(--eco-line);
-  background: #fafcf9;
+  background: var(--eco-page-subtle);
 }
 
 .agenda-hour-label {
@@ -2100,7 +2164,7 @@ textarea {
 
 .agenda-hour-line {
   box-sizing: border-box;
-  border-bottom: 1px solid rgba(16, 42, 28, 0.08);
+  border-bottom: 1px solid var(--eco-forest-alpha-08);
 }
 
 .agenda-columns {
@@ -2112,7 +2176,7 @@ textarea {
 
 .agenda-column {
   position: relative;
-  border-right: 1px solid rgba(16, 42, 28, 0.08);
+  border-right: 1px solid var(--eco-forest-alpha-08);
   min-height: 100%;
   cursor: crosshair;
 }
@@ -2126,10 +2190,10 @@ textarea {
   z-index: 2;
   box-sizing: border-box;
   border-radius: 6px;
-  border: 1px solid rgba(16, 42, 28, 0.12);
+  border: 1px solid var(--eco-forest-alpha-12);
   border-left: 3px solid var(--eco-green-dark);
-  background: rgba(56, 118, 29, 0.12);
-  box-shadow: 0 1px 4px rgba(16, 42, 28, 0.08);
+  background: var(--eco-accent-tint-12);
+  box-shadow: 0 1px 4px var(--eco-forest-alpha-08);
   overflow: hidden;
   touch-action: none;
   user-select: none;
@@ -2154,7 +2218,7 @@ textarea {
 
 .agenda-event.selected {
   border-color: var(--eco-green-dark);
-  box-shadow: 0 0 0 2px rgba(56, 118, 29, 0.18);
+  box-shadow: 0 0 0 2px var(--eco-accent-tint-18);
 }
 
 .agenda-event.dragging {
@@ -2169,7 +2233,7 @@ textarea {
 }
 
 .agenda-event.status-done {
-  background: rgba(56, 118, 29, 0.18);
+  background: var(--eco-accent-tint-18);
 }
 
 .agenda-event.status-failed,
@@ -2271,7 +2335,7 @@ textarea {
   align-items: center;
   padding: 2px 4px;
   border-radius: 4px;
-  background: rgba(56, 118, 29, 0.12);
+  background: var(--eco-accent-tint-12);
   font-size: 10px;
   line-height: 1.2;
   text-align: left;
@@ -2370,7 +2434,7 @@ textarea {
   border: 1px solid var(--eco-line);
   border-radius: 10px;
   background: #fff;
-  box-shadow: 0 12px 28px rgba(16, 42, 28, 0.14);
+  box-shadow: 0 12px 28px var(--eco-forest-alpha-14);
 }
 
 .schedule-picker-label {
@@ -2424,13 +2488,13 @@ textarea {
 }
 
 .schedule-product-option:hover {
-  border-color: #b8d4b8;
+  border-color: var(--eco-highlight-border);
   background: var(--eco-soft-2);
 }
 
 .schedule-product-option.active {
   border-color: var(--eco-green-dark);
-  background: #edf6ed;
+  background: var(--eco-highlight-surface);
   box-shadow: inset 0 0 0 1px var(--eco-green-dark);
 }
 
@@ -2637,8 +2701,8 @@ textarea {
   width: 44px;
   height: 44px;
   overflow: hidden;
-  background: #edf1e8;
-  border: 1px solid #dfe5da;
+  background: var(--eco-surface-muted);
+  border: 1px solid var(--eco-surface-muted-border);
   border-radius: 8px;
   color: var(--eco-muted);
 }
@@ -2672,7 +2736,7 @@ textarea {
   background: var(--eco-panel);
   border: 1px solid var(--eco-line);
   border-radius: 12px;
-  box-shadow: 0 14px 36px rgba(24, 36, 20, 0.18);
+  box-shadow: 0 14px 36px var(--eco-accent-tint-18);
   pointer-events: none;
   animation: costs-thumb-preview-in 0.18s ease-out;
 }
@@ -2682,7 +2746,7 @@ textarea {
   width: 100%;
   height: 200px;
   object-fit: contain;
-  background: #edf1e8;
+  background: var(--eco-surface-muted);
   border-radius: 8px;
 }
 
@@ -2992,8 +3056,8 @@ textarea {
   place-items: center;
   overflow: hidden;
   margin-right: 10px;
-  background: #edf1e8;
-  border: 1px solid #dfe5da;
+  background: var(--eco-surface-muted);
+  border: 1px solid var(--eco-surface-muted-border);
   border-radius: 8px;
   color: var(--eco-muted);
 }
@@ -3022,7 +3086,7 @@ textarea {
   align-items: center;
   min-height: 24px;
   padding: 0 8px;
-  background: #edf1e8;
+  background: var(--eco-surface-muted);
   border-radius: 999px;
   color: var(--eco-forest-2);
   font-size: 12px;
@@ -3064,14 +3128,14 @@ textarea {
   place-items: start center;
   overflow: auto;
   padding: 36px 24px;
-  background: rgba(20, 34, 27, 0.34);
+  background: var(--eco-shadow-lg);
 }
 
 .details-panel {
   width: min(980px, 100%);
   max-height: calc(100vh - 72px);
   overflow: auto;
-  box-shadow: 0 20px 60px rgba(20, 34, 27, 0.24);
+  box-shadow: 0 20px 60px var(--eco-shadow-menu);
 }
 
 .product-detail-header {
@@ -3115,7 +3179,7 @@ textarea {
 .detail-tabs button.active {
   background: var(--eco-panel);
   color: var(--eco-green-dark);
-  box-shadow: 0 1px 4px rgba(20, 34, 27, 0.08);
+  box-shadow: 0 1px 4px var(--eco-shadow-sm);
 }
 
 .detail-section {
@@ -3318,14 +3382,14 @@ textarea {
   min-width: 26px;
   height: 22px;
   padding: 0 6px;
-  background: rgba(19, 32, 25, 0.82);
-  border: 1px solid rgba(255, 253, 250, 0.78);
+  background: var(--eco-backdrop-heavy);
+  border: 1px solid color-mix(in srgb, var(--eco-panel) 78%, transparent);
   border-radius: 999px;
   color: var(--eco-mint);
   font-size: 10px;
   font-weight: 900;
   line-height: 1;
-  box-shadow: 0 6px 16px rgba(20, 34, 27, 0.22);
+  box-shadow: 0 6px 16px var(--eco-shadow);
 }
 
 .thumb-ai-toggle:hover,
@@ -3395,7 +3459,7 @@ textarea {
   display: grid;
   place-items: center;
   padding: 24px;
-  background: rgba(11, 18, 14, 0.82);
+  background: var(--eco-backdrop-heavy);
 }
 
 .image-fullscreen-viewer {
@@ -3411,12 +3475,12 @@ textarea {
   max-width: 100%;
   max-height: 84vh;
   object-fit: contain;
-  background: #111914;
+  background: var(--eco-forest);
   border-radius: 8px;
 }
 
 .image-fullscreen-viewer span {
-  color: #f8f4ea;
+  color: var(--eco-on-sidebar);
   font-size: 13px;
   font-weight: 800;
   text-align: center;
@@ -3477,10 +3541,10 @@ textarea {
 .warning-box {
   margin: 12px 0;
   padding: 11px 12px;
-  background: #f3fbef;
-  border: 1px solid #c8e8c8;
+  background: var(--eco-success-bg);
+  border: 1px solid var(--eco-success-border);
   border-radius: 8px;
-  color: #245238;
+  color: var(--eco-success-text);
   font-size: 13px;
   font-weight: 700;
 }
@@ -3651,7 +3715,7 @@ textarea {
   gap: 8px;
   margin: 0;
   padding: 9px;
-  background: #fffdf8;
+  background: var(--eco-panel);
   border: 1px solid var(--eco-line);
   border-radius: 8px;
 }
@@ -3727,7 +3791,7 @@ textarea {
   align-items: center;
   min-height: 26px;
   padding: 0 9px;
-  background: #edf1e8;
+  background: var(--eco-surface-muted);
   border-radius: 999px;
   color: var(--eco-forest-2);
   font-size: 12px;
@@ -3741,7 +3805,7 @@ pre {
   padding: 14px;
   background: var(--eco-ink);
   border-radius: 8px;
-  color: #f8f4ea;
+  color: var(--eco-on-sidebar);
   font-family: inherit;
   line-height: 1.5;
   white-space: pre-wrap;
@@ -3770,7 +3834,7 @@ pre {
   gap: 6px;
   min-height: 30px;
   padding: 0 10px;
-  background: #edf1e8;
+  background: var(--eco-surface-muted);
   border-radius: 999px;
   color: var(--eco-forest-2);
   font-size: 12px;
@@ -3780,7 +3844,7 @@ pre {
 
 .product-source-actions a:hover,
 .product-source-actions button:hover {
-  background: #dfe8dc;
+  background: var(--eco-surface-hover);
 }
 
 .product-source-actions span {
@@ -3802,7 +3866,7 @@ pre {
   justify-content: space-between;
   padding: 10px;
   background: var(--eco-soft);
-  border: 1px solid #bfe6c7;
+  border: 1px solid var(--eco-accent-border);
   border-radius: 8px;
 }
 
@@ -3885,10 +3949,10 @@ pre {
 .asset-error {
   margin: 0;
   padding: 10px;
-  background: #f3fbef;
-  border: 1px solid #c8e8c8;
+  background: var(--eco-success-bg);
+  border: 1px solid var(--eco-success-border);
   border-radius: 8px;
-  color: #245238;
+  color: var(--eco-success-text);
   font-size: 13px;
 }
 
@@ -3950,6 +4014,41 @@ pre {
   font-weight: 700;
 }
 
+.settings-app-about {
+  display: grid;
+  grid-template-columns: 52px minmax(0, 1fr);
+  align-items: center;
+  gap: 12px;
+  padding: 14px;
+  margin-bottom: 12px;
+  background: var(--eco-soft);
+  border-radius: 10px;
+}
+
+.settings-app-about .brand-mark {
+  width: 52px;
+  height: 52px;
+  border-radius: 12px;
+  background: var(--eco-panel);
+}
+
+.settings-app-about strong,
+.settings-app-about span {
+  display: block;
+}
+
+.settings-app-about strong {
+  font-size: 18px;
+  color: var(--eco-forest);
+}
+
+.settings-app-about span {
+  margin-top: 4px;
+  color: var(--eco-muted);
+  font-size: 13px;
+  font-weight: 700;
+}
+
 .export-products {
   margin-bottom: 14px;
 }
@@ -4006,7 +4105,7 @@ pre {
   margin-top: 14px;
   padding: 12px;
   background: var(--eco-soft);
-  border: 1px solid #bfe6c7;
+  border: 1px solid var(--eco-accent-border);
   border-radius: 8px;
 }
 
@@ -4026,12 +4125,34 @@ pre {
 }
 
 @media (max-width: 900px) {
+  body {
+    height: auto;
+    overflow: auto;
+  }
+
+  #root {
+    height: auto;
+  }
+
   .app-shell {
     grid-template-columns: 1fr;
+    height: auto;
+    overflow: visible;
   }
 
   .sidebar {
     position: static;
+    height: auto;
+    overflow: visible;
+  }
+
+  .app-tabs {
+    flex: none;
+    overflow: visible;
+  }
+
+  .workspace {
+    overflow: visible;
   }
 
   .tab-layout,
@@ -4131,4 +4252,81 @@ pre {
   .model-file-row {
     flex-direction: column;
   }
+}
+
+.theme-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+  margin-bottom: 18px;
+}
+
+.theme-card {
+  display: grid;
+  grid-template-columns: 52px minmax(0, 1fr);
+  gap: 12px;
+  align-items: center;
+  padding: 12px;
+  border: 1px solid var(--eco-line);
+  border-radius: 12px;
+  background: var(--eco-panel);
+  text-align: left;
+}
+
+.theme-card:hover,
+.theme-card.active {
+  border-color: var(--eco-green-dark);
+  box-shadow: inset 0 0 0 1px var(--eco-green-dark);
+  background: var(--eco-soft);
+}
+
+.theme-card-swatch {
+  width: 52px;
+  height: 52px;
+  border-radius: 12px;
+  border: 1px solid rgba(0, 0, 0, 0.08);
+}
+
+.theme-card-copy {
+  display: grid;
+  gap: 4px;
+}
+
+.theme-card-copy strong {
+  color: var(--eco-forest-2);
+}
+
+.theme-card-copy small {
+  color: var(--eco-muted);
+  line-height: 1.35;
+}
+
+.theme-custom-panel {
+  display: grid;
+  gap: 12px;
+  padding: 16px;
+  border: 1px solid var(--eco-line);
+  border-radius: 12px;
+  background: var(--eco-soft-2);
+}
+
+.theme-custom-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+}
+
+.theme-custom-row input[type="color"] {
+  width: 52px;
+  height: 40px;
+  padding: 2px;
+  border: 1px solid var(--eco-line);
+  border-radius: 8px;
+  background: var(--eco-panel);
+}
+
+.theme-custom-row input:not([type="color"]) {
+  min-width: 120px;
+  flex: 1;
 }

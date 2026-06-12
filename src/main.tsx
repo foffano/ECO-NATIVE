@@ -29,8 +29,20 @@ import {
   CalendarDays,
   Printer,
   Plus,
+  Palette,
 } from "lucide-react";
 import "./styles.css";
+import {
+  applyUiThemePreference,
+  initUiTheme,
+  readUiThemePreference,
+  saveUiThemePreference,
+  UI_THEME_PRESETS,
+  type UiThemeId,
+  type UiThemePreference,
+} from "./uiTheme";
+
+initUiTheme();
 
 const API_BASE = "http://127.0.0.1:8765";
 const ONBOARDING_COMPLETE_KEY = "eco_native_onboarding_complete";
@@ -39,14 +51,25 @@ declare global {
   interface Window {
     ecoNative?: {
       checkForUpdates: () => Promise<{ ok: boolean; message: string }>;
+      getAppInfo: () => Promise<{ name: string; version: string }>;
     };
   }
 }
 
+type AppInfo = {
+  name: string;
+  version: string;
+};
+
+const DEFAULT_APP_INFO: AppInfo = {
+  name: __APP_NAME__,
+  version: __APP_VERSION__,
+};
+
 type Marketplace = "shopee" | "tiktok_shop" | "kwai_shop" | "mercado_livre";
 type AppTab = "dashboard" | "collect" | "products" | "costs" | "schedule" | "settings";
 type ProductDetailSection = "listing" | "images" | "files" | "printing" | "info";
-type SettingsSection = "store" | "integrations" | "colors" | "production" | "printing" | "backup";
+type SettingsSection = "store" | "integrations" | "appearance" | "colors" | "production" | "printing" | "backup";
 type ProductStatus = "collected" | "in_edit" | "ready" | "exported";
 
 type BlockedSourceUrl = {
@@ -2715,15 +2738,6 @@ function App() {
   return (
     <main className="app-shell">
       <aside className="sidebar">
-        <div className="brand">
-          <span className="brand-mark">
-            <img src="./eco-logo.png" alt="" />
-          </span>
-          <div>
-            <strong>ECO Native</strong>
-            <span>Studio</span>
-          </div>
-        </div>
         <StorePicker
           activeStore={activeStoreProfile}
           stores={storeProfiles}
@@ -2745,6 +2759,8 @@ function App() {
           <TabButton active={activeTab === "schedule"} icon={<CalendarDays size={18} />} onClick={() => setActiveTab("schedule")}>
             Impressões
           </TabButton>
+        </nav>
+        <nav className="sidebar-footer" aria-label="Ajustes">
           <TabButton active={activeTab === "settings"} icon={<Settings size={18} />} onClick={() => setActiveTab("settings")}>
             Ajustes
           </TabButton>
@@ -6177,12 +6193,34 @@ function SettingsTab({
   const [loadingIntegrationSecrets, setLoadingIntegrationSecrets] = useState(false);
   const [settingsSection, setSettingsSection] = useState<SettingsSection>("store");
   const [colorDrafts, setColorDrafts] = useState<ImageOptions["colors"]>(imageOptions.colors);
+  const [appInfo, setAppInfo] = useState<AppInfo>(DEFAULT_APP_INFO);
   const [updateStatus, setUpdateStatus] = useState("");
   const [checkingUpdates, setCheckingUpdates] = useState(false);
   const [filamentDrafts, setFilamentDrafts] = useState<FilamentSpool[]>(filaments);
   const [printerDrafts, setPrinterDrafts] = useState<Printer3D[]>(printers);
   const [electricityPrice, setElectricityPrice] = useState("0.85");
   const [printerPower, setPrinterPower] = useState("200");
+  const [uiThemePreference, setUiThemePreference] = useState<UiThemePreference>(() => readUiThemePreference());
+  const [customAccentDraft, setCustomAccentDraft] = useState(
+    () => readUiThemePreference().accent ?? UI_THEME_PRESETS[0].tokens.greenDark,
+  );
+
+  function selectUiTheme(id: UiThemeId) {
+    const next: UiThemePreference = id === "custom"
+      ? { id: "custom", accent: customAccentDraft }
+      : { id: id as Exclude<UiThemeId, "custom"> };
+    setUiThemePreference(next);
+    saveUiThemePreference(next);
+    applyUiThemePreference(next);
+  }
+
+  function applyCustomAccent(accent: string) {
+    setCustomAccentDraft(accent);
+    const next: UiThemePreference = { id: "custom", accent };
+    setUiThemePreference(next);
+    saveUiThemePreference(next);
+    applyUiThemePreference(next);
+  }
 
   useEffect(() => {
     setFilamentDrafts(filaments);
@@ -6201,6 +6239,19 @@ function SettingsTab({
   useEffect(() => {
     setColorDrafts(imageOptions.colors);
   }, [imageOptions.colors]);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!window.ecoNative?.getAppInfo) return;
+    window.ecoNative.getAppInfo()
+      .then((info) => {
+        if (!cancelled) setAppInfo(info);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   async function createAndEditStoreProfile() {
     await onCreateStoreProfile();
@@ -6443,6 +6494,9 @@ function SettingsTab({
         <button className={settingsSection === "integrations" ? "active" : ""} onClick={() => setSettingsSection("integrations")}>
           <KeyRound size={16} /> Integrações
         </button>
+        <button className={settingsSection === "appearance" ? "active" : ""} onClick={() => setSettingsSection("appearance")}>
+          <Palette size={16} /> Aparência
+        </button>
         <button className={settingsSection === "colors" ? "active" : ""} onClick={() => setSettingsSection("colors")}>
           <ImagePlus size={16} /> Cores
         </button>
@@ -6517,6 +6571,62 @@ function SettingsTab({
         <button className="primary profile-create-button" onClick={openIntegrationEditor}>
           <KeyRound size={18} /> Editar integrações
         </button>
+      </div>
+      )}
+
+      {settingsSection === "appearance" && (
+      <div className="panel appearance-settings-panel">
+        <div className="panel-title">
+          <Palette size={18} />
+          <h2>Aparência da interface</h2>
+        </div>
+        <p className="settings-note">
+          Escolha a paleta do app. A preferência fica salva neste navegador/computador e é aplicada imediatamente.
+        </p>
+        <div className="theme-grid">
+          {UI_THEME_PRESETS.map((preset) => (
+            <button
+              key={preset.id}
+              type="button"
+              className={`theme-card${uiThemePreference.id === preset.id ? " active" : ""}`}
+              onClick={() => selectUiTheme(preset.id)}
+            >
+              <span className="theme-card-swatch" style={{ background: preset.swatch }} aria-hidden="true" />
+              <span className="theme-card-copy">
+                <strong>{preset.name}</strong>
+                <small>{preset.description}</small>
+              </span>
+            </button>
+          ))}
+        </div>
+        <div className="theme-custom-panel">
+          <label>
+            Cor personalizada
+            <div className="theme-custom-row">
+              <input
+                type="color"
+                value={customAccentDraft.startsWith("#") ? customAccentDraft : `#${customAccentDraft}`}
+                onChange={(event) => applyCustomAccent(event.target.value)}
+              />
+              <input
+                value={customAccentDraft}
+                onChange={(event) => setCustomAccentDraft(event.target.value)}
+                onBlur={() => applyCustomAccent(customAccentDraft)}
+                placeholder="#0f7a54"
+              />
+              <button
+                className={uiThemePreference.id === "custom" ? "primary" : "quiet-button"}
+                type="button"
+                onClick={() => applyCustomAccent(customAccentDraft)}
+              >
+                Aplicar
+              </button>
+            </div>
+          </label>
+          <button className="quiet-button" type="button" onClick={() => selectUiTheme("forest")}>
+            Restaurar tema padrão
+          </button>
+        </div>
       </div>
       )}
 
@@ -6704,8 +6814,18 @@ function SettingsTab({
           <RefreshCw size={18} />
           <h2>Aplicativo</h2>
         </div>
+        <div className="settings-app-about">
+          <span className="brand-mark">
+            <img src="./eco-logo.png" alt="" />
+          </span>
+          <div>
+            <strong>{appInfo.name}</strong>
+            <span>Versão instalada: {appInfo.version}</span>
+          </div>
+        </div>
         <p className="settings-note">
-          No app instalado, esta opção consulta o GitHub Releases e baixa atualizações publicadas. A instalação acontece ao fechar e abrir o aplicativo.
+          A versão acima é a do app que você está usando agora. No app instalado, o botão abaixo consulta o GitHub Releases;
+          se houver uma versão mais nova, o download ocorre em segundo plano e a instalação ao fechar o aplicativo.
         </p>
         <div className="backup-actions">
           <button className="primary" onClick={checkForAppUpdates} disabled={checkingUpdates}>
