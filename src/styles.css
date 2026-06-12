@@ -4014,6 +4014,87 @@ pre {
   font-weight: 700;
 }
 
+.update-banner {
+  position: fixed;
+  left: 252px;
+  bottom: 22px;
+  z-index: 55;
+  display: grid;
+  gap: 10px;
+  width: min(360px, calc(100vw - 280px));
+  padding: 14px 16px;
+  background: var(--eco-panel);
+  border: 1px solid var(--eco-accent-border);
+  border-radius: 10px;
+  box-shadow: 0 14px 36px var(--eco-shadow-md);
+}
+
+.update-banner-copy {
+  display: grid;
+  gap: 4px;
+}
+
+.update-banner-copy strong {
+  color: var(--eco-forest-2);
+  font-size: 14px;
+}
+
+.update-banner-copy span {
+  color: var(--eco-muted);
+  font-size: 13px;
+  line-height: 1.35;
+}
+
+.update-banner-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.update-banner-actions .primary {
+  min-height: 34px;
+  padding: 0 12px;
+  font-size: 13px;
+}
+
+.app-update-controls {
+  display: grid;
+  gap: 10px;
+}
+
+.update-progress {
+  display: grid;
+  gap: 6px;
+}
+
+.update-progress-track {
+  height: 8px;
+  overflow: hidden;
+  background: var(--eco-accent-track);
+  border-radius: 999px;
+}
+
+.update-progress-track span {
+  display: block;
+  height: 100%;
+  background: linear-gradient(90deg, var(--eco-accent-mid), var(--eco-green-dark));
+  border-radius: inherit;
+  transition: width 0.2s ease;
+}
+
+.update-progress small {
+  color: var(--eco-muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+@media (max-width: 900px) {
+  .update-banner {
+    left: 16px;
+    width: min(360px, calc(100vw - 32px));
+  }
+}
+
 .settings-app-about {
   display: grid;
   grid-template-columns: 52px minmax(0, 1fr);

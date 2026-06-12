@@ -50,11 +50,40 @@ const ONBOARDING_COMPLETE_KEY = "eco_native_onboarding_complete";
 declare global {
   interface Window {
     ecoNative?: {
-      checkForUpdates: () => Promise<{ ok: boolean; message: string }>;
+      checkForUpdates: () => Promise<AppUpdateCheckResult>;
+      downloadUpdate: () => Promise<{ ok: boolean; message?: string }>;
       getAppInfo: () => Promise<{ name: string; version: string }>;
+      installUpdate: () => Promise<{ ok: boolean; message?: string }>;
+      onUpdateEvent: (callback: (event: AppUpdateEvent) => void) => () => void;
     };
   }
 }
+
+type AppUpdatePhase = "idle" | "checking" | "available" | "uptodate" | "downloading" | "downloaded" | "error";
+
+type AppUpdateState = {
+  phase: AppUpdatePhase;
+  version?: string;
+  currentVersion?: string;
+  progress?: number;
+  message?: string;
+  bannerDismissed?: boolean;
+};
+
+type AppUpdateCheckResult = {
+  ok: boolean;
+  status?: "available" | "uptodate" | "error";
+  version?: string;
+  currentVersion?: string;
+  message?: string;
+};
+
+type AppUpdateEvent =
+  | { type: "available"; version: string; currentVersion: string }
+  | { type: "not-available"; version: string; currentVersion: string }
+  | { type: "progress"; percent: number; transferred: number; total: number }
+  | { type: "downloaded"; version: string }
+  | { type: "error"; message: string };
 
 type AppInfo = {
   name: string;
@@ -1464,6 +1493,7 @@ function App() {
   const [r2PublicUrlDraft, setR2PublicUrlDraft] = useState("");
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState("");
+  const [appUpdate, setAppUpdate] = useState<AppUpdateState>({ phase: "idle" });
   const [listingDraft, setListingDraft] = useState<Listing | null>(null);
   const [productNameDraft, setProductNameDraft] = useState("");
   const [lastExport, setLastExport] = useState<{ path: string; count: number; marketplace: string } | null>(null);
@@ -1622,6 +1652,112 @@ function App() {
   useEffect(() => {
     refresh().catch((error) => setNotice(error.message));
   }, []);
+
+  useEffect(() => {
+    if (!window.ecoNative?.onUpdateEvent) return;
+    return window.ecoNative.onUpdateEvent((event) => {
+      if (event.type === "available") {
+        setAppUpdate((prev) => ({
+          phase: "available",
+          version: event.version,
+          currentVersion: event.currentVersion,
+          bannerDismissed: prev.bannerDismissed && prev.version === event.version,
+        }));
+        return;
+      }
+      if (event.type === "not-available") {
+        setAppUpdate((prev) => (
+          prev.phase === "checking"
+            ? {
+                phase: "uptodate",
+                currentVersion: event.currentVersion,
+                message: `Você já está na versão mais recente (${event.currentVersion}).`,
+              }
+            : prev
+        ));
+        return;
+      }
+      if (event.type === "progress") {
+        setAppUpdate((prev) => ({
+          ...prev,
+          phase: "downloading",
+          progress: Math.min(100, Math.max(0, event.percent ?? 0)),
+          bannerDismissed: false,
+        }));
+        return;
+      }
+      if (event.type === "downloaded") {
+        setAppUpdate((prev) => ({
+          ...prev,
+          phase: "downloaded",
+          version: event.version ?? prev.version,
+          progress: 100,
+          message: "Atualização pronta para instalar.",
+          bannerDismissed: false,
+        }));
+        return;
+      }
+      setAppUpdate((prev) => ({
+        ...prev,
+        phase: "error",
+        message: event.message ?? "Erro ao atualizar.",
+      }));
+    });
+  }, []);
+
+  async function checkAppUpdates() {
+    if (!window.ecoNative?.checkForUpdates) {
+      setAppUpdate({ phase: "error", message: "Atualizações ficam disponíveis no app instalado." });
+      return;
+    }
+    setAppUpdate((prev) => ({ ...prev, phase: "checking", message: undefined }));
+    const result = await window.ecoNative.checkForUpdates();
+    if (!result.ok) {
+      setAppUpdate({ phase: "error", message: result.message ?? "Não foi possível verificar atualizações." });
+      return;
+    }
+    if (result.status === "available") {
+      setAppUpdate({
+        phase: "available",
+        version: result.version,
+        currentVersion: result.currentVersion,
+        message: result.message,
+      });
+      return;
+    }
+    setAppUpdate({
+      phase: "uptodate",
+      currentVersion: result.currentVersion,
+      message: result.message,
+    });
+  }
+
+  async function downloadAppUpdate() {
+    if (!window.ecoNative?.downloadUpdate) return;
+    setAppUpdate((prev) => ({
+      ...prev,
+      phase: "downloading",
+      progress: 0,
+      message: "Baixando atualização...",
+      bannerDismissed: false,
+    }));
+    const result = await window.ecoNative.downloadUpdate();
+    if (!result.ok) {
+      setAppUpdate((prev) => ({
+        ...prev,
+        phase: "error",
+        message: result.message ?? "Falha no download.",
+      }));
+    }
+  }
+
+  async function installAppUpdate() {
+    await window.ecoNative?.installUpdate();
+  }
+
+  function dismissAppUpdateBanner() {
+    setAppUpdate((prev) => ({ ...prev, bannerDismissed: true }));
+  }
 
   useEffect(() => {
     function refreshRuntimeStatus() {
@@ -2940,6 +3076,10 @@ function App() {
             onPrintersSaved={reloadPrinters}
             printers={printers}
             onWrapAction={runAction}
+            appUpdate={appUpdate}
+            onCheckAppUpdates={checkAppUpdates}
+            onDownloadAppUpdate={downloadAppUpdate}
+            onInstallAppUpdate={installAppUpdate}
           />
         )}
       </section>
@@ -2951,6 +3091,14 @@ function App() {
           kieImageModel={kieImageModelDraft}
           onFinish={finishOnboarding}
           onSkip={skipOnboarding}
+        />
+      )}
+      {window.ecoNative && (
+        <AppUpdateBanner
+          state={appUpdate}
+          onDismiss={dismissAppUpdateBanner}
+          onDownload={downloadAppUpdate}
+          onInstall={installAppUpdate}
         />
       )}
       {notice && (
@@ -2968,6 +3116,112 @@ function App() {
         <ConfirmModal dialog={confirmDialog} onClose={closeConfirmDialog} />
       )}
     </main>
+  );
+}
+
+function AppUpdateBanner({
+  state,
+  onDismiss,
+  onDownload,
+  onInstall,
+}: {
+  state: AppUpdateState;
+  onDismiss: () => void;
+  onDownload: () => void;
+  onInstall: () => void;
+}) {
+  if (state.bannerDismissed) return null;
+  if (state.phase === "idle" || state.phase === "checking" || state.phase === "uptodate" || state.phase === "error") {
+    return null;
+  }
+
+  return (
+    <div className="update-banner" role="status" aria-live="polite">
+      {state.phase === "available" && (
+        <>
+          <div className="update-banner-copy">
+            <strong>Nova versão {state.version}</strong>
+            <span>Atualização disponível para o ECO Native Studio.</span>
+          </div>
+          <div className="update-banner-actions">
+            <button className="primary" type="button" onClick={onDownload}>Baixar</button>
+            <button className="primary ghost" type="button" onClick={onDismiss}>Agora não</button>
+          </div>
+        </>
+      )}
+      {state.phase === "downloading" && (
+        <>
+          <div className="update-banner-copy">
+            <strong>Baixando {state.version ?? "atualização"}</strong>
+            <span>{state.message ?? "Aguarde o download terminar."}</span>
+          </div>
+          <div className="update-progress">
+            <div className="update-progress-track">
+              <span style={{ width: `${Math.min(100, Math.max(0, state.progress ?? 0))}%` }} />
+            </div>
+            <small>{Math.round(state.progress ?? 0)}%</small>
+          </div>
+        </>
+      )}
+      {state.phase === "downloaded" && (
+        <>
+          <div className="update-banner-copy">
+            <strong>Atualização pronta</strong>
+            <span>Versão {state.version} baixada. Instale ao reiniciar o app.</span>
+          </div>
+          <div className="update-banner-actions">
+            <button className="primary" type="button" onClick={onInstall}>Instalar e reiniciar</button>
+            <button className="primary ghost" type="button" onClick={onDismiss}>Depois</button>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+function AppUpdateControls({
+  state,
+  onCheck,
+  onDownload,
+  onInstall,
+}: {
+  state: AppUpdateState;
+  onCheck: () => void;
+  onDownload: () => void;
+  onInstall: () => void;
+}) {
+  const checking = state.phase === "checking";
+  const downloading = state.phase === "downloading";
+
+  return (
+    <div className="app-update-controls">
+      <div className="backup-actions">
+        <button className="primary" type="button" onClick={onCheck} disabled={checking || downloading}>
+          {checking ? <Loader2 className="spin" size={18} /> : <RefreshCw size={18} />} Verificar atualizações
+        </button>
+        {state.phase === "available" && (
+          <button className="primary ghost" type="button" onClick={onDownload}>
+            <Download size={18} /> Baixar versão {state.version}
+          </button>
+        )}
+        {state.phase === "downloaded" && (
+          <button className="primary" type="button" onClick={onInstall}>
+            <RefreshCw size={18} /> Instalar e reiniciar
+          </button>
+        )}
+      </div>
+      {downloading && (
+        <div className="update-progress">
+          <div className="update-progress-track">
+            <span style={{ width: `${Math.min(100, Math.max(0, state.progress ?? 0))}%` }} />
+          </div>
+          <small>Baixando... {Math.round(state.progress ?? 0)}%</small>
+        </div>
+      )}
+      {state.message && state.phase !== "downloading" && (
+        <span className="update-status">{state.message}</span>
+      )}
+    </div>
   );
 }
 
@@ -6130,6 +6384,10 @@ function SettingsTab({
   onPrintersSaved,
   printers,
   onWrapAction,
+  appUpdate,
+  onCheckAppUpdates,
+  onDownloadAppUpdate,
+  onInstallAppUpdate,
 }: {
   imageOptions: ImageOptions;
   openRouterApiKeyDraft: string;
@@ -6186,6 +6444,10 @@ function SettingsTab({
   onPrintersSaved: () => Promise<Printer3D[] | void>;
   printers: Printer3D[];
   onWrapAction: <T,>(label: string, action: () => Promise<T>) => Promise<T | undefined>;
+  appUpdate: AppUpdateState;
+  onCheckAppUpdates: () => Promise<void>;
+  onDownloadAppUpdate: () => Promise<void>;
+  onInstallAppUpdate: () => Promise<void>;
 }) {
   const [profileEditorOpen, setProfileEditorOpen] = useState(false);
   const [integrationEditorOpen, setIntegrationEditorOpen] = useState(false);
@@ -6194,8 +6456,6 @@ function SettingsTab({
   const [settingsSection, setSettingsSection] = useState<SettingsSection>("store");
   const [colorDrafts, setColorDrafts] = useState<ImageOptions["colors"]>(imageOptions.colors);
   const [appInfo, setAppInfo] = useState<AppInfo>(DEFAULT_APP_INFO);
-  const [updateStatus, setUpdateStatus] = useState("");
-  const [checkingUpdates, setCheckingUpdates] = useState(false);
   const [filamentDrafts, setFilamentDrafts] = useState<FilamentSpool[]>(filaments);
   const [printerDrafts, setPrinterDrafts] = useState<Printer3D[]>(printers);
   const [electricityPrice, setElectricityPrice] = useState("0.85");
@@ -6293,20 +6553,6 @@ function SettingsTab({
   function openIntegrationEditor() {
     setIntegrationEditorOpen(true);
     setIntegrationSecretsVisible(false);
-  }
-
-  async function checkForAppUpdates() {
-    if (!window.ecoNative?.checkForUpdates) {
-      setUpdateStatus("Atualizações automáticas ficam disponíveis no app instalado.");
-      return;
-    }
-    setCheckingUpdates(true);
-    try {
-      const result = await window.ecoNative.checkForUpdates();
-      setUpdateStatus(result.message);
-    } finally {
-      setCheckingUpdates(false);
-    }
   }
 
   function updateStoreDraft<K extends keyof StoreProfile>(key: K, value: StoreProfile[K]) {
@@ -6824,15 +7070,15 @@ function SettingsTab({
           </div>
         </div>
         <p className="settings-note">
-          A versão acima é a do app que você está usando agora. No app instalado, o botão abaixo consulta o GitHub Releases;
-          se houver uma versão mais nova, o download ocorre em segundo plano e a instalação ao fechar o aplicativo.
+          A versão acima é a do app que você está usando agora. O app verifica novas versões ao abrir e avisa discretamente;
+          o download só começa quando você confirmar, aqui ou no aviso na tela.
         </p>
-        <div className="backup-actions">
-          <button className="primary" onClick={checkForAppUpdates} disabled={checkingUpdates}>
-            {checkingUpdates ? <Loader2 className="spin" size={18} /> : <RefreshCw size={18} />} Verificar atualizações
-          </button>
-          {updateStatus && <span className="update-status">{updateStatus}</span>}
-        </div>
+        <AppUpdateControls
+          state={appUpdate}
+          onCheck={onCheckAppUpdates}
+          onDownload={onDownloadAppUpdate}
+          onInstall={onInstallAppUpdate}
+        />
       </div>
 
       <div className="panel paths-settings-panel">

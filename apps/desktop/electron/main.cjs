@@ -74,6 +74,56 @@ function startBackend() {
   });
 }
 
+function sendUpdateEvent(payload) {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send("updates:event", payload);
+  }
+}
+
+function setupAutoUpdater() {
+  autoUpdater.autoDownload = false;
+  autoUpdater.autoInstallOnAppQuit = false;
+
+  autoUpdater.on("update-available", (info) => {
+    sendUpdateEvent({
+      type: "available",
+      version: info.version,
+      currentVersion: app.getVersion(),
+    });
+  });
+
+  autoUpdater.on("update-not-available", (info) => {
+    sendUpdateEvent({
+      type: "not-available",
+      version: info.version,
+      currentVersion: app.getVersion(),
+    });
+  });
+
+  autoUpdater.on("download-progress", (progress) => {
+    sendUpdateEvent({
+      type: "progress",
+      percent: progress.percent,
+      transferred: progress.transferred,
+      total: progress.total,
+    });
+  });
+
+  autoUpdater.on("update-downloaded", (info) => {
+    sendUpdateEvent({
+      type: "downloaded",
+      version: info.version,
+    });
+  });
+
+  autoUpdater.on("error", (error) => {
+    sendUpdateEvent({
+      type: "error",
+      message: error instanceof Error ? error.message : "Erro ao atualizar.",
+    });
+  });
+}
+
 async function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1280,
@@ -104,39 +154,72 @@ ipcMain.handle("app:info", () => ({
 
 ipcMain.handle("updates:check", async () => {
   if (!app.isPackaged) {
-    return { ok: false, message: "Atualizações automáticas só funcionam no aplicativo instalado." };
+    return {
+      ok: false,
+      status: "error",
+      message: "Atualizações automáticas só funcionam no aplicativo instalado.",
+    };
   }
 
   try {
-    const result = await autoUpdater.checkForUpdatesAndNotify();
+    const result = await autoUpdater.checkForUpdates();
     const currentVersion = app.getVersion();
     const latestVersion = result?.updateInfo?.version;
     if (latestVersion && semver.gt(latestVersion, currentVersion)) {
       return {
         ok: true,
-        message: `Nova versão ${latestVersion} encontrada. O download começa em segundo plano e a instalação ocorre ao fechar o app.`,
+        status: "available",
+        version: latestVersion,
+        currentVersion,
+        message: `Nova versão ${latestVersion} disponível.`,
       };
     }
     return {
       ok: true,
+      status: "uptodate",
+      currentVersion,
       message: `Você já está na versão mais recente (${currentVersion}).`,
     };
   } catch (error) {
     return {
       ok: false,
+      status: "error",
       message: error instanceof Error ? error.message : "Não foi possível verificar atualizações.",
     };
   }
 });
 
-app.whenReady().then(async () => {
-  autoUpdater.autoDownload = true;
-  autoUpdater.autoInstallOnAppQuit = true;
+ipcMain.handle("updates:download", async () => {
+  if (!app.isPackaged) {
+    return { ok: false, message: "Atualizações automáticas só funcionam no aplicativo instalado." };
+  }
 
+  try {
+    await autoUpdater.downloadUpdate();
+    return { ok: true };
+  } catch (error) {
+    return {
+      ok: false,
+      message: error instanceof Error ? error.message : "Não foi possível baixar a atualização.",
+    };
+  }
+});
+
+ipcMain.handle("updates:install", async () => {
+  if (!app.isPackaged) {
+    return { ok: false, message: "Atualizações automáticas só funcionam no aplicativo instalado." };
+  }
+
+  autoUpdater.quitAndInstall();
+  return { ok: true };
+});
+
+app.whenReady().then(async () => {
+  setupAutoUpdater();
   await createWindow();
 
   if (app.isPackaged) {
-    autoUpdater.checkForUpdatesAndNotify().catch(() => undefined);
+    autoUpdater.checkForUpdates().catch(() => undefined);
   }
 
   app.on("activate", () => {
