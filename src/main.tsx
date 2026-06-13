@@ -980,6 +980,11 @@ function listingsEqual(left: Listing, right: Listing): boolean {
     && left.keywords.join("\n") === right.keywords.join("\n");
 }
 
+function listingFingerprint(listing?: Listing | null): string {
+  if (!listing) return "";
+  return JSON.stringify(listing);
+}
+
 function storeProfilesEqual(left: StoreProfile, right: StoreProfile): boolean {
   return left.name === right.name
     && left.marketplace === right.marketplace
@@ -1902,7 +1907,7 @@ function App() {
       setListingDraft(null);
       setProductNameDraft("");
     }
-  }, [selectedProduct?.id]);
+  }, [selectedProduct?.id, selectedProduct?.name, listingFingerprint(selectedProduct?.listing)]);
 
   useEffect(() => {
     if (!activeProject?.id) {
