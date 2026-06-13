@@ -3015,6 +3015,9 @@ function App() {
 
   return (
     <main className="app-shell">
+      {window.ecoNative?.platform === "win32" && (
+        <div className="window-drag-region" aria-hidden="true" />
+      )}
       <aside className="sidebar">
         <StorePicker
           activeStore={activeStoreProfile}

@@ -74,10 +74,48 @@ body {
 
 html.electron-win .sidebar {
   padding-top: calc(24px + var(--electron-titlebar-height, 36px));
+  -webkit-app-region: drag;
 }
 
 html.electron-win .workspace {
   padding-top: calc(28px + var(--electron-titlebar-height, 36px));
+}
+
+html.electron-win .window-drag-region {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: var(--electron-titlebar-height, 36px);
+  -webkit-app-region: drag;
+  z-index: 10000;
+}
+
+html.electron-win .topbar {
+  -webkit-app-region: drag;
+}
+
+html.electron-app button,
+html.electron-app input,
+html.electron-app select,
+html.electron-app textarea,
+html.electron-app a,
+html.electron-app label,
+html.electron-app .tab-button,
+html.electron-app .store-picker,
+html.electron-app .store-picker *,
+html.electron-app [role="button"],
+html.electron-app [role="listbox"],
+html.electron-app [role="option"],
+html.electron-app [role="dialog"],
+html.electron-app [role="dialog"] *,
+html.electron-app .modal-backdrop,
+html.electron-app .modal-backdrop *,
+html.electron-app .toast-notice,
+html.electron-app .toast-notice *,
+html.electron-app .update-banner,
+html.electron-app .update-banner * {
+  -webkit-app-region: no-drag;
 }
 
 #root {
