@@ -3,12 +3,11 @@ import time
 from pathlib import Path
 from urllib.parse import quote
 
-import requests
-
 from backend.app.core.settings import get_settings
 from backend.app.db.models import Asset, Product
 from backend.app.services.cloudflare_r2 import upload_file_to_r2
 from backend.app.services.cost_tracker import add_kie_image_cost
+from backend.app.services.http_client import HttpResponseError, download as http_download, read_response_json, read_response_text, request as http_request
 from backend.app.services.image_options import color_description_map
 from backend.app.services.product_paths import (
     color_variation_filename,
@@ -46,7 +45,8 @@ def existing_asset_public_url(product: Product, kind: str, path: Path) -> str | 
 
 
 def create_kie_task(prompt: str, image_url: str, api_key: str, model: str = "qwen/image-edit") -> str:
-    response = requests.post(
+    response = http_request(
+        "POST",
         "https://api.kie.ai/api/v1/jobs/createTask",
         headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
         json={
@@ -66,22 +66,29 @@ def create_kie_task(prompt: str, image_url: str, api_key: str, model: str = "qwe
         },
         timeout=40,
     )
-    data = response.json()
+    try:
+        data = read_response_json(response)
+    except HttpResponseError as exc:
+        raise RuntimeError(f"Falha ao criar task Kie.ai: {exc}") from exc
     task_id = data.get("data", {}).get("taskId")
     if response.status_code == 200 and data.get("code") == 200 and task_id:
         return task_id
-    raise RuntimeError(f"Falha ao criar task Kie.ai: {response.text[:300]}")
+    raise RuntimeError(f"Falha ao criar task Kie.ai: {read_response_text(response, limit=300)}")
 
 
 def poll_kie_task(task_id: str, api_key: str, max_wait_seconds: int = 300) -> str:
     started_at = time.time()
     while time.time() - started_at < max_wait_seconds:
-        response = requests.get(
+        response = http_request(
+            "GET",
             f"https://api.kie.ai/api/v1/jobs/recordInfo?taskId={quote(task_id)}",
             headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
             timeout=40,
         )
-        data = response.json()
+        try:
+            data = read_response_json(response)
+        except HttpResponseError as exc:
+            raise RuntimeError(f"Falha ao consultar task Kie.ai: {exc}") from exc
         record = data.get("data", {})
         state = record.get("state")
         if data.get("code") == 200 and state == "success":
@@ -97,11 +104,10 @@ def poll_kie_task(task_id: str, api_key: str, max_wait_seconds: int = 300) -> st
 
 
 def download_url(url: str, output_path: Path) -> None:
-    response = requests.get(url, stream=True, timeout=60)
-    response.raise_for_status()
-    with output_path.open("wb") as handle:
-        for chunk in response.iter_content(chunk_size=8192):
-            handle.write(chunk)
+    try:
+        http_download(url, output_path, timeout=60)
+    except HttpResponseError as exc:
+        raise RuntimeError(f"Falha ao baixar imagem gerada: {exc}") from exc
 
 
 def generate_studio_images(

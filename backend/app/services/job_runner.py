@@ -236,6 +236,7 @@ def run_image_job(
     state = store.load()
     project = next((item for item in state.projects if item.id == product.project_id), None)
     store_profile = get_store_profile(project.store_profile_id if project else None)
+    product = next((item for item in state.products if item.id == product.id), product)
 
     color_count = 0
     try:

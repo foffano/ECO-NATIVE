@@ -1,14 +1,11 @@
 import base64
-import json
 import mimetypes
 import time
 from dataclasses import dataclass
 from pathlib import Path
 
-import requests
-from requests.exceptions import ContentDecodingError
-
 from backend.app.core.settings import get_settings
+from backend.app.services.http_client import HttpResponseError, read_response_json, read_response_text, request
 
 OPENROUTER_CHAT_URL = "https://openrouter.ai/api/v1/chat/completions"
 DEFAULT_OPENROUTER_MODEL = "qwen/qwen3.5-flash-02-23"
@@ -45,7 +42,6 @@ def require_api_key() -> str:
 def _openrouter_headers(api_key: str, *, json_request: bool = True) -> dict[str, str]:
     headers = {
         "Authorization": f"Bearer {api_key}",
-        "Accept-Encoding": "identity",
         "HTTP-Referer": "http://127.0.0.1:5173",
         "X-Title": "ECO Native Studio",
     }
@@ -54,31 +50,13 @@ def _openrouter_headers(api_key: str, *, json_request: bool = True) -> dict[str,
     return headers
 
 
-def _decode_response_json(response: requests.Response) -> dict:
-    try:
-        return response.json()
-    except ContentDecodingError:
-        try:
-            return json.loads(response.content.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise OpenRouterUnavailable(
-                "Resposta OpenRouter ilegivel (falha ao decodificar conteudo comprimido)."
-            ) from exc
-
-
-def _request(method: str, url: str, *, api_key: str, **kwargs) -> requests.Response:
+def _request(method: str, url: str, *, api_key: str, **kwargs):
     headers = kwargs.pop("headers", {})
     headers = {**_openrouter_headers(api_key, json_request=method.upper() != "GET"), **headers}
-    kwargs.setdefault("timeout", 120)
     try:
-        response = requests.request(method, url, headers=headers, **kwargs)
-    except ContentDecodingError as exc:
-        raise OpenRouterUnavailable(
-            "Falha de rede ao decodificar resposta da OpenRouter. Tente novamente."
-        ) from exc
-    except requests.RequestException as exc:
-        raise OpenRouterUnavailable(f"Falha de rede OpenRouter: {exc}") from exc
-    return response
+        return request(method, url, headers=headers, **kwargs)
+    except HttpResponseError as exc:
+        raise OpenRouterUnavailable(str(exc)) from exc
 
 
 def _validate_image_bytes(data: bytes, path: Path) -> None:
@@ -138,9 +116,9 @@ def fetch_generation_cost(generation_id: str | None, api_key: str) -> float | No
             params={"id": generation_id},
             timeout=30,
         )
-        if not response.ok:
+        if response.status_code >= 400:
             return None
-        data = _decode_response_json(response).get("data", {})
+        data = read_response_json(response).get("data", {})
         for key in ("total_cost", "cost"):
             value = data.get(key)
             if value is not None:
@@ -171,13 +149,14 @@ def chat_completion_result(
         },
         timeout=120,
     )
-    try:
-        response.raise_for_status()
-    except requests.HTTPError as exc:
-        body = response.text[:600] if response.text else response.content[:600].decode("utf-8", errors="ignore")
-        raise OpenRouterUnavailable(f"Erro OpenRouter: {body}") from exc
+    if response.status_code >= 400:
+        raise OpenRouterUnavailable(f"Erro OpenRouter: {read_response_text(response)}")
 
-    data = _decode_response_json(response)
+    try:
+        data = read_response_json(response)
+    except HttpResponseError as exc:
+        raise OpenRouterUnavailable(str(exc)) from exc
+
     try:
         content = data["choices"][0]["message"]["content"]
     except (KeyError, IndexError, TypeError) as exc:
