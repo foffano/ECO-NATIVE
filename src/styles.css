@@ -89,6 +89,12 @@ html.electron-win .window-drag-region {
   height: var(--electron-titlebar-height, 36px);
   -webkit-app-region: drag;
   z-index: 10000;
+  background: linear-gradient(
+    to right,
+    var(--eco-forest) 240px,
+    var(--eco-page) 240px
+  );
+  pointer-events: auto;
 }
 
 html.electron-win .topbar {

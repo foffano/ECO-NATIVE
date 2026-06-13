@@ -9,8 +9,9 @@ const API_PORT = process.env.ECO_NATIVE_PORT || "8765";
 const API_HOST = process.env.ECO_NATIVE_HOST || "127.0.0.1";
 const API_URL = `http://${API_HOST}:${API_PORT}`;
 const TITLE_BAR_HEIGHT = 36;
-const DEFAULT_TITLE_BAR_COLOR = "#071f16";
-const DEFAULT_TITLE_BAR_SYMBOL_COLOR = "#edfbf0";
+const DEFAULT_TITLE_BAR_COLOR = "#00000000";
+const DEFAULT_TITLE_BAR_SYMBOL_COLOR = "#5f7167";
+const DEFAULT_WINDOW_BACKGROUND = "#f4f8f0";
 
 let mainWindow = null;
 let backendProcess = null;
@@ -147,11 +148,12 @@ async function createWindow() {
     minHeight: 700,
     show: false,
     title: "ECO Native Studio",
-    backgroundColor: DEFAULT_TITLE_BAR_COLOR,
+    backgroundColor: DEFAULT_WINDOW_BACKGROUND,
     autoHideMenuBar: true,
     ...(isWindows
       ? {
           titleBarStyle: "hidden",
+          backgroundMaterial: "mica",
           titleBarOverlay: {
             color: DEFAULT_TITLE_BAR_COLOR,
             symbolColor: DEFAULT_TITLE_BAR_SYMBOL_COLOR,

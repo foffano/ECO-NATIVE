@@ -261,10 +261,9 @@ export function applyUiTheme(tokens: UiThemeTokens) {
   }
   root.dataset.uiTheme = tokens.greenDark;
   if (typeof window !== "undefined" && window.ecoNative?.setTitleBarOverlay) {
-    const sidebarText = mixHex(tokens.mint, "#ffffff", 0.72);
     window.ecoNative.setTitleBarOverlay({
-      color: tokens.forest,
-      symbolColor: sidebarText,
+      color: "#00000000",
+      symbolColor: tokens.muted,
     }).catch(() => undefined);
   }
 }
