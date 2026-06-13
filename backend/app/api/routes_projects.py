@@ -1,7 +1,7 @@
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from backend.app.db.models import BlockedSourceUrl, Marketplace, Product, Project
+from backend.app.db.models import BlockedSourceUrl, Marketplace, Product, Project, StudioState
 from backend.app.db.store import store
 from backend.app.services.source_url_blacklist import remove_blocked_source_url
 
@@ -48,12 +48,20 @@ def list_blocked_urls(project_id: str) -> list[BlockedSourceUrl]:
 
 @router.delete("/{project_id}/blocked-urls/{entry_id}")
 def delete_blocked_url(project_id: str, entry_id: str) -> dict:
-    state = store.load()
-    project = next((item for item in state.projects if item.id == project_id), None)
+    preview = store.load()
+    project = next((item for item in preview.projects if item.id == project_id), None)
     if not project:
         raise HTTPException(status_code=404, detail="Projeto nao encontrado")
-    removed = remove_blocked_source_url(state, project_id, entry_id)
-    if not removed:
+    if not next((entry for entry in preview.blocked_source_urls if entry.project_id == project_id and entry.id == entry_id), None):
         raise HTTPException(status_code=404, detail="URL bloqueada nao encontrada")
-    store.save(state)
-    return {"status": "removed", "entry": removed}
+
+    def apply(state: StudioState) -> dict:
+        project = next((item for item in state.projects if item.id == project_id), None)
+        if not project:
+            raise HTTPException(status_code=404, detail="Projeto nao encontrado")
+        removed = remove_blocked_source_url(state, project_id, entry_id)
+        if not removed:
+            raise HTTPException(status_code=404, detail="URL bloqueada nao encontrada")
+        return {"status": "removed", "entry": removed}
+
+    return store.mutate(apply)

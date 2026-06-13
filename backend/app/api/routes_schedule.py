@@ -1,7 +1,7 @@
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
-from backend.app.db.models import PrintScheduleStatus, PrintScheduleTask, now_iso
+from backend.app.db.models import PrintScheduleStatus, PrintScheduleTask, StudioState, now_iso
 from backend.app.db.store import store
 from backend.app.services.print_plates import read_print_plates
 
@@ -79,65 +79,79 @@ def list_schedule_tasks(
 
 @router.post("")
 def create_schedule_task(payload: ScheduleTaskCreate) -> PrintScheduleTask:
-    state = store.load()
-    _ensure_printer(state, payload.printer_id)
-    duration = _resolve_duration(
-        state,
-        payload.product_id,
-        payload.plate_id,
-        payload.quantity,
-        payload.duration_minutes,
-    )
-    task = PrintScheduleTask(
-        printer_id=payload.printer_id,
-        scheduled_date=payload.scheduled_date,
-        start_time=payload.start_time,
-        duration_minutes=duration,
-        product_id=payload.product_id,
-        plate_id=payload.plate_id,
-        title=payload.title.strip() or "Impressão",
-        quantity=payload.quantity,
-        notes=payload.notes,
-        status=payload.status,
-    )
-    state.print_schedule_tasks.append(task)
-    store.save(state)
-    return task
+    preview = store.load()
+    _ensure_printer(preview, payload.printer_id)
+
+    def apply(state: StudioState) -> PrintScheduleTask:
+        _ensure_printer(state, payload.printer_id)
+        duration = _resolve_duration(
+            state,
+            payload.product_id,
+            payload.plate_id,
+            payload.quantity,
+            payload.duration_minutes,
+        )
+        task = PrintScheduleTask(
+            printer_id=payload.printer_id,
+            scheduled_date=payload.scheduled_date,
+            start_time=payload.start_time,
+            duration_minutes=duration,
+            product_id=payload.product_id,
+            plate_id=payload.plate_id,
+            title=payload.title.strip() or "Impressão",
+            quantity=payload.quantity,
+            notes=payload.notes,
+            status=payload.status,
+        )
+        state.print_schedule_tasks.append(task)
+        return task
+
+    return store.mutate(apply)
 
 
 @router.patch("/{task_id}")
 def update_schedule_task(task_id: str, payload: ScheduleTaskUpdate) -> PrintScheduleTask:
-    state = store.load()
-    task = next((item for item in state.print_schedule_tasks if item.id == task_id), None)
-    if not task:
+    preview = store.load()
+    if not next((item for item in preview.print_schedule_tasks if item.id == task_id), None):
         raise HTTPException(status_code=404, detail="Tarefa de impressao nao encontrada")
 
-    updates = payload.model_dump(exclude_unset=True)
-    if "printer_id" in updates:
-        _ensure_printer(state, updates["printer_id"])
-    for key, value in updates.items():
-        setattr(task, key, value)
+    def apply(state: StudioState) -> PrintScheduleTask:
+        task = next((item for item in state.print_schedule_tasks if item.id == task_id), None)
+        if not task:
+            raise HTTPException(status_code=404, detail="Tarefa de impressao nao encontrada")
 
-    if task.duration_minutes <= 0:
-        task.duration_minutes = _resolve_duration(
-            state,
-            task.product_id,
-            task.plate_id,
-            task.quantity,
-            0,
-        )
+        updates = payload.model_dump(exclude_unset=True)
+        if "printer_id" in updates:
+            _ensure_printer(state, updates["printer_id"])
+        for key, value in updates.items():
+            setattr(task, key, value)
 
-    task.updated_at = now_iso()
-    store.save(state)
-    return task
+        if task.duration_minutes <= 0:
+            task.duration_minutes = _resolve_duration(
+                state,
+                task.product_id,
+                task.plate_id,
+                task.quantity,
+                0,
+            )
+
+        task.updated_at = now_iso()
+        return task
+
+    return store.mutate(apply)
 
 
 @router.delete("/{task_id}")
 def delete_schedule_task(task_id: str) -> dict:
-    state = store.load()
-    task = next((item for item in state.print_schedule_tasks if item.id == task_id), None)
-    if not task:
+    preview = store.load()
+    if not next((item for item in preview.print_schedule_tasks if item.id == task_id), None):
         raise HTTPException(status_code=404, detail="Tarefa de impressao nao encontrada")
-    state.print_schedule_tasks = [item for item in state.print_schedule_tasks if item.id != task_id]
-    store.save(state)
-    return {"status": "deleted", "task_id": task_id}
+
+    def apply(state: StudioState) -> dict:
+        task = next((item for item in state.print_schedule_tasks if item.id == task_id), None)
+        if not task:
+            raise HTTPException(status_code=404, detail="Tarefa de impressao nao encontrada")
+        state.print_schedule_tasks = [item for item in state.print_schedule_tasks if item.id != task_id]
+        return {"status": "deleted", "task_id": task_id}
+
+    return store.mutate(apply)

@@ -7,7 +7,7 @@ from pathlib import Path
 from fastapi import APIRouter, File, HTTPException, UploadFile
 from pydantic import BaseModel
 
-from backend.app.db.models import Asset, Listing, PrintPlate, Product, ProductStatus, now_iso
+from backend.app.db.models import Asset, Listing, PrintPlate, Product, ProductStatus, StudioState, now_iso
 from backend.app.db.store import store
 from backend.app.services.product_paths import (
     MODEL_FILE_SUFFIXES,
@@ -77,22 +77,33 @@ def open_folder(path: Path) -> None:
 
 
 def ensure_skus_for_state_products() -> list[Product]:
-    state = store.load()
-    changed = False
-    for product in state.products:
-        project = next((item for item in state.projects if item.id == product.project_id), None)
-        store_profile = get_store_profile(project.store_profile_id if project else None)
-        if not product.metadata.get("sku"):
-            ensure_product_sku(product, state.products, project, store_profile)
-            changed = True
-        color_names = [asset.kind.replace("color_", "", 1) for asset in product.assets if asset.kind.startswith("color_")]
-        color_skus = product.metadata.get("color_skus")
-        if color_names and (not isinstance(color_skus, dict) or any(color_name not in color_skus for color_name in color_names)):
-            ensure_color_skus(product, color_names)
-            changed = True
-    if changed:
-        store.save(state)
-    return state.products
+    preview = store.load()
+
+    def needs_sku_updates(state: StudioState) -> bool:
+        for product in state.products:
+            if not product.metadata.get("sku"):
+                return True
+            color_names = [asset.kind.replace("color_", "", 1) for asset in product.assets if asset.kind.startswith("color_")]
+            color_skus = product.metadata.get("color_skus")
+            if color_names and (not isinstance(color_skus, dict) or any(color_name not in color_skus for color_name in color_names)):
+                return True
+        return False
+
+    if not needs_sku_updates(preview):
+        return preview.products
+
+    def apply(state: StudioState) -> list[Product]:
+        for product in state.products:
+            project = next((item for item in state.projects if item.id == product.project_id), None)
+            store_profile = get_store_profile(project.store_profile_id if project else None)
+            if not product.metadata.get("sku"):
+                ensure_product_sku(product, state.products, project, store_profile)
+            color_names = [asset.kind.replace("color_", "", 1) for asset in product.assets if asset.kind.startswith("color_")]
+            if color_names:
+                ensure_color_skus(product, color_names)
+        return state.products
+
+    return store.mutate(apply)
 
 
 @router.get("")
@@ -150,27 +161,30 @@ def batch_update_production_costs(payload: ProductionCostBatchRequest) -> dict:
     if not payload.items:
         return {"updated": 0, "product_ids": []}
 
-    state = store.load()
-    updated_ids: list[str] = []
-    missing_ids: list[str] = []
-
-    for item in payload.items:
-        product = next((entry for entry in state.products if entry.id == item.product_id), None)
-        if not product:
-            missing_ids.append(item.product_id)
-            continue
-        write_production_cost(product, normalize_production_cost(item.production_cost))
-        product.updated_at = now_iso()
-        updated_ids.append(product.id)
-
+    preview = store.load()
+    missing_ids = [
+        item.product_id
+        for item in payload.items
+        if not next((entry for entry in preview.products if entry.id == item.product_id), None)
+    ]
     if missing_ids:
         raise HTTPException(
             status_code=404,
-            detail=f"Produto(s) nao encontrado(s): {', '.join(missing_ids)}",
+            detail=f"Produto(s) nao encontrado(s): {', '.join(dict.fromkeys(missing_ids))}",
         )
 
-    store.save(state)
-    return {"updated": len(updated_ids), "product_ids": updated_ids}
+    def apply(state: StudioState) -> dict:
+        updated_ids: list[str] = []
+        for item in payload.items:
+            product = next((entry for entry in state.products if entry.id == item.product_id), None)
+            if not product:
+                continue
+            write_production_cost(product, normalize_production_cost(item.production_cost))
+            product.updated_at = now_iso()
+            updated_ids.append(product.id)
+        return {"updated": len(updated_ids), "product_ids": updated_ids}
+
+    return store.mutate(apply)
 
 
 @router.get("/{product_id}/production-cost")
@@ -321,22 +335,28 @@ def delete_product_asset(product_id: str, asset_id: str) -> Product:
 
 @router.delete("/{product_id}")
 def delete_product(product_id: str) -> dict:
-    state = store.load()
-    product = next((item for item in state.products if item.id == product_id), None)
+    preview = store.load()
+    product = next((item for item in preview.products if item.id == product_id), None)
     if not product:
         raise HTTPException(status_code=404, detail="Produto nao encontrado")
 
     cleanup = purge_product_data(product)
-    blocked = block_product_source_url(state, product)
-    state.products = [item for item in state.products if item.id != product_id]
-    state.jobs = [job for job in state.jobs if job.product_id != product_id]
-    state.print_schedule_tasks = [
-        task for task in state.print_schedule_tasks if task.product_id != product_id
-    ]
-    store.save(state)
-    return {
-        "status": "deleted",
-        "product_id": product_id,
-        "cleanup": cleanup,
-        "blocked_url": blocked.model_dump() if blocked else None,
-    }
+
+    def apply(state: StudioState) -> dict:
+        target = next((item for item in state.products if item.id == product_id), None)
+        if not target:
+            raise HTTPException(status_code=404, detail="Produto nao encontrado")
+        blocked = block_product_source_url(state, target)
+        state.products = [item for item in state.products if item.id != product_id]
+        state.jobs = [job for job in state.jobs if job.product_id != product_id]
+        state.print_schedule_tasks = [
+            task for task in state.print_schedule_tasks if task.product_id != product_id
+        ]
+        return {
+            "status": "deleted",
+            "product_id": product_id,
+            "cleanup": cleanup,
+            "blocked_url": blocked.model_dump() if blocked else None,
+        }
+
+    return store.mutate(apply, allow_product_shrink=True)

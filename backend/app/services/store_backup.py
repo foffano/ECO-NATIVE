@@ -246,7 +246,7 @@ def restore_app_backup(zip_bytes: bytes) -> dict:
             env_restored = True
 
         remap_restored_paths(state)
-        store.save(state)
+        store.replace(state)
     except (BadZipFile, json.JSONDecodeError, ValueError) as exc:
         if isinstance(exc, ValueError) and "Versao" in str(exc):
             raise
@@ -294,13 +294,14 @@ def restore_store_backup(zip_bytes: bytes) -> dict:
             if path:
                 asset.path = path
 
-    state = store.load()
-    state.store_profiles = upsert_many(state.store_profiles, restored_profiles)
-    state.ai_profiles = upsert_many(state.ai_profiles, restored_ai_profiles)
-    state.projects = upsert_many(state.projects, restored_projects)
-    state.products = upsert_many(state.products, restored_products)
-    state.jobs = upsert_many(state.jobs, restored_jobs)
-    store.save(state)
+    def apply(state: StudioState) -> None:
+        state.store_profiles = upsert_many(state.store_profiles, restored_profiles)
+        state.ai_profiles = upsert_many(state.ai_profiles, restored_ai_profiles)
+        state.projects = upsert_many(state.projects, restored_projects)
+        state.products = upsert_many(state.products, restored_products)
+        state.jobs = upsert_many(state.jobs, restored_jobs)
+
+    store.mutate(apply)
 
     return {
         "kind": "legacy_store",
