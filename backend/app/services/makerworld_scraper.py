@@ -1,7 +1,6 @@
 import re
 import time
 import urllib.parse
-import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -13,8 +12,8 @@ from backend.app.core.playwright_env import configure_playwright_browsers, playw
 
 from backend.app.core.paths import DATA_DIR
 from backend.app.db.models import Product, Project, StoreProfile
+from backend.app.services.cover_image import download_cover_file
 from backend.app.services.product_paths import (
-    cover_image_filename,
     model_filename,
     product_assets_dir,
     resolve_sku_for_capture,
@@ -246,12 +245,8 @@ def scrape_current_product_page(
 
 
 def download_cover_image(project_id: str, sku: str, image_url: str) -> str | None:
-    product_dir = product_assets_dir(project_id, sku)
-    product_dir.mkdir(parents=True, exist_ok=True)
-    output_path = product_dir / cover_image_filename(sku)
-
     try:
-        urllib.request.urlretrieve(image_url, output_path)
+        output_path = download_cover_file(project_id, sku, image_url)
         return str(output_path)
     except Exception:
         return None

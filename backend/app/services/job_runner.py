@@ -7,7 +7,9 @@ from backend.app.services.image_generation import (
     regenerate_color_variation_with_kie,
     regenerate_studio_image,
 )
+from backend.app.services.cover_image import CoverImageError, ensure_product_cover
 from backend.app.services.listing_generator import generate_listing_with_openrouter
+from backend.app.services.openrouter_client import OpenRouterUnavailable
 from backend.app.services.sku import ensure_color_skus, ensure_product_sku
 from backend.app.services.store_profiles import get_store_profile
 from backend.app.services.makerworld_scraper import (
@@ -201,12 +203,24 @@ def run_listing_job(job: Job, product: Product) -> Job:
     store.upsert_job(job)
 
     try:
+        ensure_product_cover(product)
+        store.upsert_product(product)
         result = generate_listing_with_openrouter(product, store_profile.listing_prompt)
         product.listing = result.listing
         event = add_openrouter_cost(product, "Geração de anúncio", result.usage)
         job.logs.append(f"Custo IA registrado: OpenRouter ${event['cost_usd']:.6f} ({event['source']})")
-    except OpenRouterUnavailable:
-        raise
+    except CoverImageError as exc:
+        job.status = JobStatus.failed
+        job.progress = 100
+        job.message = "Falha ao preparar capa do produto"
+        job.logs.append(f"{exc.__class__.__name__}: {exc}")
+        return store.upsert_job(job)
+    except OpenRouterUnavailable as exc:
+        job.status = JobStatus.failed
+        job.progress = 100
+        job.message = "Falha ao gerar anúncio com IA"
+        job.logs.append(f"{exc.__class__.__name__}: {exc}")
+        return store.upsert_job(job)
     except Exception as exc:
         job.status = JobStatus.failed
         job.progress = 100
@@ -277,6 +291,12 @@ def run_image_job(
                 color_count = len(color_assets)
             else:
                 raise RuntimeError("Gere as imagens base antes de criar variações de cor.")
+    except CoverImageError as exc:
+        job.status = JobStatus.failed
+        job.progress = 100
+        job.message = "Falha ao preparar capa do produto"
+        job.logs.append(f"{exc.__class__.__name__}: {exc}")
+        return store.upsert_job(job)
     except Exception as exc:
         job.status = JobStatus.failed
         job.progress = 100

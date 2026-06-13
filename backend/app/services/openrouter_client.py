@@ -1,10 +1,10 @@
 import base64
-import mimetypes
 import time
 from dataclasses import dataclass
 from pathlib import Path
 
 from backend.app.core.settings import get_settings
+from backend.app.services.cover_image import CoverImageError, mime_type_for_image, validate_cover_bytes
 from backend.app.services.http_client import HttpResponseError, read_response_json, read_response_text, request
 
 OPENROUTER_CHAT_URL = "https://openrouter.ai/api/v1/chat/completions"
@@ -60,19 +60,10 @@ def _request(method: str, url: str, *, api_key: str, **kwargs):
 
 
 def _validate_image_bytes(data: bytes, path: Path) -> None:
-    if not data:
-        raise OpenRouterUnavailable(f"Imagem vazia: {path}")
-    if data[:2] == b"\x1f\x8b":
-        raise OpenRouterUnavailable(
-            f"A capa do produto parece corrompida ({path.name}). Baixe a imagem novamente na coleta."
-        )
-    if data[:3] == b"\xff\xd8\xff" or data[:8] == b"\x89PNG\r\n\x1a\n":
-        return
-    if data[:4] == b"RIFF" and len(data) >= 12 and data[8:12] == b"WEBP":
-        return
-    raise OpenRouterUnavailable(
-        f"Formato de imagem nao suportado para anuncio ({path.name}). Use JPG ou PNG."
-    )
+    try:
+        validate_cover_bytes(data, path)
+    except CoverImageError as exc:
+        raise OpenRouterUnavailable(str(exc)) from exc
 
 
 def image_to_data_url(path: str) -> str:
@@ -81,7 +72,7 @@ def image_to_data_url(path: str) -> str:
         raise OpenRouterUnavailable(f"Imagem nao encontrada: {path}")
     data = image_path.read_bytes()
     _validate_image_bytes(data, image_path)
-    mime_type = mimetypes.guess_type(image_path.name)[0] or "image/jpeg"
+    mime_type = mime_type_for_image(data, image_path)
     encoded = base64.b64encode(data).decode("ascii")
     return f"data:{mime_type};base64,{encoded}"
 

@@ -7,6 +7,7 @@ from backend.app.core.settings import get_settings
 from backend.app.db.models import Asset, Product
 from backend.app.services.cloudflare_r2 import upload_file_to_r2
 from backend.app.services.cost_tracker import add_kie_image_cost
+from backend.app.services.cover_image import ensure_product_cover
 from backend.app.services.http_client import HttpResponseError, download as http_download, read_response_json, read_response_text, request as http_request
 from backend.app.services.image_options import color_description_map
 from backend.app.services.product_paths import (
@@ -122,6 +123,7 @@ def generate_studio_images(
     cover = next((asset for asset in product.assets if asset.kind == "cover_image"), None)
     if not cover:
         raise RuntimeError("Produto sem imagem base capturada.")
+    cover = ensure_product_cover(product)
 
     sku = product_sku(product)
     if not sku:
@@ -171,6 +173,7 @@ def regenerate_studio_image(
     cover = next((asset for asset in product.assets if asset.kind == "cover_image"), None)
     if not cover:
         raise RuntimeError("Produto sem imagem base capturada.")
+    cover = ensure_product_cover(product)
 
     sku = product_sku(product)
     if not sku:
