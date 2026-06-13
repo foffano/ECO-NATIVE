@@ -17,6 +17,7 @@ from backend.app.services.product_paths import (
     product_dir_for,
 )
 from backend.app.services.print_plates import plate_totals, read_print_plates, write_print_plates
+from backend.app.services.product_cleanup import purge_product_data
 from backend.app.services.production_cost import (
     ProductionCost,
     build_production_cost_breakdown,
@@ -329,6 +330,9 @@ def delete_product(product_id: str) -> dict:
     blocked = block_product_source_url(state, product)
     state.products = [item for item in state.products if item.id != product_id]
     state.jobs = [job for job in state.jobs if job.product_id != product_id]
+    state.print_schedule_tasks = [
+        task for task in state.print_schedule_tasks if task.product_id != product_id
+    ]
     store.save(state)
     return {
         "status": "deleted",

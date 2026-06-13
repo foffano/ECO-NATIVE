@@ -3994,13 +3994,32 @@ function CollectTab({
   );
 }
 
-function CostsProductCell({ product }: { product: Product }) {
+const THUMB_PREVIEW_LAYOUT = {
+  costs: {
+    previewClass: "costs-thumb-preview",
+    captionClass: "costs-thumb-preview-caption",
+    width: 236,
+    height: 248,
+    delayMs: 500,
+  },
+  products: {
+    previewClass: "product-thumb-preview",
+    captionClass: "product-thumb-preview-caption",
+    width: 380,
+    height: 400,
+    delayMs: 500,
+  },
+} as const;
+
+type ThumbPreviewVariant = keyof typeof THUMB_PREVIEW_LAYOUT;
+
+function useProductThumbPreview(product: Product, variant: ThumbPreviewVariant) {
   const coverAsset = getCoverAsset(product);
-  const sku = productSku(product) || "—";
+  const layout = THUMB_PREVIEW_LAYOUT[variant];
   const [previewOpen, setPreviewOpen] = useState(false);
   const [previewPos, setPreviewPos] = useState({ top: 0, left: 0 });
   const hoverTimerRef = useRef<number | null>(null);
-  const anchorRef = useRef<HTMLDivElement>(null);
+  const anchorRef = useRef<HTMLElement>(null);
 
   useEffect(() => () => {
     if (hoverTimerRef.current !== null) {
@@ -4019,16 +4038,14 @@ function CostsProductCell({ product }: { product: Product }) {
     const anchor = anchorRef.current;
     if (!anchor || !coverAsset) return;
     const rect = anchor.getBoundingClientRect();
-    const previewWidth = 236;
-    const previewHeight = 248;
     const gap = 10;
     let left = rect.right + gap;
-    if (left + previewWidth > window.innerWidth - 8) {
-      left = rect.left - previewWidth - gap;
+    if (left + layout.width > window.innerWidth - 8) {
+      left = rect.left - layout.width - gap;
     }
     left = Math.max(8, left);
-    let top = rect.top + rect.height / 2 - previewHeight / 2;
-    top = Math.max(8, Math.min(top, window.innerHeight - previewHeight - 8));
+    let top = rect.top + rect.height / 2 - layout.height / 2;
+    top = Math.max(8, Math.min(top, window.innerHeight - layout.height - 8));
     setPreviewPos({ top, left });
     setPreviewOpen(true);
   }
@@ -4036,7 +4053,7 @@ function CostsProductCell({ product }: { product: Product }) {
   function handleMouseEnter() {
     if (!coverAsset) return;
     clearHoverTimer();
-    hoverTimerRef.current = window.setTimeout(openPreview, 500);
+    hoverTimerRef.current = window.setTimeout(openPreview, layout.delayMs);
   }
 
   function handleMouseLeave() {
@@ -4044,10 +4061,98 @@ function CostsProductCell({ product }: { product: Product }) {
     setPreviewOpen(false);
   }
 
+  return {
+    anchorRef,
+    coverAsset,
+    handleMouseEnter,
+    handleMouseLeave,
+    layout,
+    previewOpen,
+    previewPos,
+  };
+}
+
+function ProductThumbPreviewPortal({
+  coverAsset,
+  layout,
+  open,
+  position,
+  productName,
+}: {
+  coverAsset: Asset;
+  layout: (typeof THUMB_PREVIEW_LAYOUT)[ThumbPreviewVariant];
+  open: boolean;
+  position: { top: number; left: number };
+  productName: string;
+}) {
+  if (!open) return null;
+  return createPortal(
+    <div className={layout.previewClass} style={{ top: position.top, left: position.left }}>
+      <img src={assetUrl(coverAsset)} alt={productName} />
+      <span className={layout.captionClass} title={productName}>{productName}</span>
+    </div>,
+    document.body,
+  );
+}
+
+function ProductCardThumb({
+  product,
+  onOpen,
+}: {
+  product: Product;
+  onOpen: () => void;
+}) {
+  const {
+    anchorRef,
+    coverAsset,
+    handleMouseEnter,
+    handleMouseLeave,
+    layout,
+    previewOpen,
+    previewPos,
+  } = useProductThumbPreview(product, "products");
+
+  return (
+    <>
+      <button
+        ref={anchorRef as React.RefObject<HTMLButtonElement>}
+        className="product-card-thumb"
+        onClick={onOpen}
+        aria-label={`Abrir ${product.name}`}
+        onMouseEnter={handleMouseEnter}
+        onMouseLeave={handleMouseLeave}
+      >
+        {coverAsset ? <img src={assetUrl(coverAsset)} alt="" /> : <ShoppingBag size={22} />}
+      </button>
+      {coverAsset && (
+        <ProductThumbPreviewPortal
+          coverAsset={coverAsset}
+          layout={layout}
+          open={previewOpen}
+          position={previewPos}
+          productName={product.name}
+        />
+      )}
+    </>
+  );
+}
+
+function CostsProductCell({ product }: { product: Product }) {
+  const sku = productSku(product) || "—";
+  const {
+    anchorRef,
+    coverAsset,
+    handleMouseEnter,
+    handleMouseLeave,
+    layout,
+    previewOpen,
+    previewPos,
+  } = useProductThumbPreview(product, "costs");
+
   return (
     <>
       <div
-        ref={anchorRef}
+        ref={anchorRef as React.RefObject<HTMLDivElement>}
         className="costs-product-cell-inner"
         onMouseEnter={handleMouseEnter}
         onMouseLeave={handleMouseLeave}
@@ -4064,12 +4169,14 @@ function CostsProductCell({ product }: { product: Product }) {
         </div>
         <code className="costs-product-sku">{sku}</code>
       </div>
-      {previewOpen && coverAsset && createPortal(
-        <div className="costs-thumb-preview" style={{ top: previewPos.top, left: previewPos.left }}>
-          <img src={assetUrl(coverAsset)} alt={product.name} />
-          <span className="costs-thumb-preview-caption" title={product.name}>{product.name}</span>
-        </div>,
-        document.body,
+      {coverAsset && (
+        <ProductThumbPreviewPortal
+          coverAsset={coverAsset}
+          layout={layout}
+          open={previewOpen}
+          position={previewPos}
+          productName={product.name}
+        />
       )}
     </>
   );
@@ -4693,7 +4800,6 @@ function ProductsTab({
         )}
         <div className="product-card-list">
           {paginatedProducts.map((product) => {
-            const coverAsset = getCoverAsset(product);
             const subtitle = productCardSubtitle(product);
             const pipeline = productPipelineBadges(product);
             const isSelected = selectedProductIds.includes(product.id);
@@ -4711,9 +4817,7 @@ function ProductsTab({
                     disabled={busy}
                   />
                 </label>
-                <button className="product-card-thumb" onClick={() => onOpenDetails(product.id)} aria-label={`Abrir ${product.name}`}>
-                  {coverAsset ? <img src={assetUrl(coverAsset)} alt="" /> : <ShoppingBag size={22} />}
-                </button>
+                <ProductCardThumb product={product} onOpen={() => onOpenDetails(product.id)} />
                 <button className="product-card-main" onClick={() => onOpenDetails(product.id)}>
                   <strong>{product.name}</strong>
                   {subtitle ? <span className="product-card-subtitle">{subtitle}</span> : (
