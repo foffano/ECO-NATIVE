@@ -196,6 +196,7 @@ def run_listing_job(job: Job, product: Product) -> Job:
     state = store.load()
     project = next((item for item in state.projects if item.id == product.project_id), None)
     store_profile = get_store_profile(project.store_profile_id if project else None)
+    product = next((item for item in state.products if item.id == product.id), product)
     job.logs.append(f"Usando perfil de loja: {store_profile.name}")
     store.upsert_job(job)
 
@@ -204,6 +205,8 @@ def run_listing_job(job: Job, product: Product) -> Job:
         product.listing = result.listing
         event = add_openrouter_cost(product, "Geração de anúncio", result.usage)
         job.logs.append(f"Custo IA registrado: OpenRouter ${event['cost_usd']:.6f} ({event['source']})")
+    except OpenRouterUnavailable:
+        raise
     except Exception as exc:
         job.status = JobStatus.failed
         job.progress = 100

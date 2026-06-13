@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import re
 import zipfile
+import zlib
 from dataclasses import dataclass
+from pathlib import Path
 
 
 @dataclass
@@ -37,15 +39,31 @@ def format_print_time(seconds: int | None) -> str:
     return f"{minutes}min"
 
 
-def read_3mf_slice_info(path: str) -> SliceInfo:
+def _looks_like_zip(path: Path) -> bool:
     try:
-        with zipfile.ZipFile(path, "r") as archive:
+        signature = path.read_bytes()[:4]
+    except OSError:
+        return False
+    return signature in {b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08"}
+
+
+def read_3mf_slice_info(path: str) -> SliceInfo:
+    source = Path(path)
+    if not source.is_file():
+        return SliceInfo(raw_excerpt=f"Arquivo 3MF nao encontrado: {path}")
+    if not _looks_like_zip(source):
+        return SliceInfo(raw_excerpt=f"Arquivo 3MF invalido ou corrompido: {source.name}")
+
+    try:
+        with zipfile.ZipFile(source, "r") as archive:
             if "Metadata/slice_info.config" not in archive.namelist():
                 return SliceInfo(raw_excerpt="slice_info.config não encontrado no 3MF.")
             content = archive.read("Metadata/slice_info.config").decode("utf-8", errors="ignore")
             return parse_slice_info(content)
+    except (zipfile.BadZipFile, zlib.error, OSError, UnicodeDecodeError) as exc:
+        return SliceInfo(raw_excerpt=f"Erro ao ler 3MF ({source.name}): {exc}")
     except Exception as exc:
-        return SliceInfo(raw_excerpt=f"Erro ao ler 3MF: {exc}")
+        return SliceInfo(raw_excerpt=f"Erro ao ler 3MF ({source.name}): {exc}")
 
 
 def slice_info_to_prompt_text(info: SliceInfo) -> str:
