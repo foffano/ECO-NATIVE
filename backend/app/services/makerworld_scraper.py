@@ -80,7 +80,12 @@ def open_makerworld_context(playwright, headless: bool):
         raise
 
 
-def discover_model_urls(keyword: str, limit: int, scrolls: int = 8, headless: bool = False) -> list[str]:
+def discover_model_urls(
+    keyword: str,
+    scrolls: int = 8,
+    headless: bool = False,
+    max_urls: int = 200,
+) -> list[str]:
     target_url = build_search_url(keyword)
     urls: list[str] = []
 
@@ -115,7 +120,7 @@ def discover_model_urls(keyword: str, limit: int, scrolls: int = 8, headless: bo
         normalized = clean_makerworld_url(href)
         if normalized not in urls:
             urls.append(normalized)
-        if len(urls) >= limit:
+        if len(urls) >= max_urls:
             break
 
     return urls

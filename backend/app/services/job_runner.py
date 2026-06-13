@@ -66,17 +66,18 @@ def run_collect_job(job: Job, payload) -> Job:
             store.upsert_job(job)
             urls = discover_model_urls(
                 keyword=payload.keyword,
-                limit=payload.limit,
                 scrolls=payload.scrolls,
                 headless=not payload.visible_browser,
             )
+            job.logs.append(f"{len(urls)} link(s) candidato(s) encontrado(s) na busca.")
 
         job.progress = 60
         job.message = "Lendo páginas de produtos"
         filtered_urls: list[str] = []
         skipped_existing = 0
         skipped_blocked = 0
-        for url in urls[: payload.limit]:
+        target_count = payload.limit if not manual_links else len(urls)
+        for url in urls:
             clean_url = clean_makerworld_url(url)
             if not clean_url:
                 continue
@@ -87,11 +88,17 @@ def run_collect_job(job: Job, payload) -> Job:
                 skipped_blocked += 1
                 continue
             filtered_urls.append(clean_url)
+            if not manual_links and len(filtered_urls) >= target_count:
+                break
         urls = filtered_urls
         if skipped_existing:
             job.logs.append(f"{skipped_existing} link(s) já coletado(s) ignorado(s).")
         if skipped_blocked:
             job.logs.append(f"{skipped_blocked} link(s) ignorado(s) pela lista de bloqueio.")
+        if not manual_links and len(urls) < target_count:
+            job.logs.append(
+                f"Apenas {len(urls)} link(s) novo(s) de {target_count} solicitado(s) após varrer a busca."
+            )
         job.logs.append(f"{len(urls)} link(s) novo(s) para extração direta.")
         store.upsert_job(job)
 
