@@ -2640,11 +2640,16 @@ textarea {
   font-size: 13px;
 }
 
-.costs-table .col-product { width: 14%; }
-.costs-table .col-filament { width: 17%; }
-.costs-table .col-grams { width: 8%; }
-.costs-table .col-time { width: 8%; }
-.costs-table .col-money { width: 9%; }
+.costs-table-detailed {
+  min-width: 1480px;
+}
+
+.costs-table .col-product { width: 12%; }
+.costs-table .col-plates { width: 5%; }
+.costs-table .col-filament { width: 11%; }
+.costs-table .col-grams { width: 6%; }
+.costs-table .col-time { width: 7%; }
+.costs-table .col-money { width: 6.5%; }
 
 .costs-table th,
 .costs-table td {
@@ -2726,6 +2731,14 @@ textarea {
   font-size: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.costs-plates-hint {
+  display: block;
+  margin-top: 0.35rem;
+  font-size: 11px;
+  color: var(--eco-muted);
+  line-height: 1.35;
 }
 
 .costs-thumb-preview {

@@ -4,6 +4,7 @@ from pydantic import BaseModel, Field
 
 from backend.app.db.models import FilamentSpool, ProductionSettings, Product
 from backend.app.services.cost_tracker import product_ai_cost_usd
+from backend.app.services.print_plates import filament_usage_from_plates, plate_totals, read_print_plates
 from backend.app.services.runtime_status import get_exchange_status
 from backend.app.services.slice_info import format_print_time
 
@@ -43,13 +44,19 @@ class ProductionCostBreakdown(BaseModel):
     filament_lines: list[FilamentCostLine] = Field(default_factory=list)
     filament_total_brl: float = 0
     energy_cost_brl: float = 0
+    depreciation_cost_brl: float = 0
+    maintenance_cost_brl: float = 0
+    labor_cost_brl: float = 0
     other_costs_brl: float = 0
     extra_total_brl: float = 0
+    production_subtotal_brl: float = 0
     ai_cost_usd: float = 0
     ai_cost_brl: float | None = None
     total_brl: float | None = None
     print_time_minutes: int = 0
     print_time_label: str = "—"
+    plate_count: int = 0
+    cost_per_hour_brl: float | None = None
 
 
 def filament_cost_per_gram(spool: FilamentSpool) -> float:
@@ -85,6 +92,27 @@ def read_production_cost(product: Product) -> ProductionCost:
     return normalize_production_cost(ProductionCost.model_validate(raw))
 
 
+def resolve_production_cost(product: Product) -> ProductionCost:
+    stored = read_production_cost(product)
+    plates = read_print_plates(product)
+    if not plates:
+        return stored
+
+    totals = plate_totals(plates)
+    grams_by_filament = filament_usage_from_plates(plates)
+    filaments = [FilamentUsage(filament_id=filament_id, grams=grams) for filament_id, grams in grams_by_filament.items()]
+    single = filaments[0] if len(filaments) == 1 else None
+    return ProductionCost(
+        filament_id=single.filament_id if single else None,
+        grams=single.grams if single else 0,
+        print_time_minutes=int(totals["total_print_time_minutes"]),
+        other_costs_brl=stored.other_costs_brl,
+        filaments=filaments,
+        extra_costs=stored.extra_costs,
+        notes=stored.notes,
+    )
+
+
 def write_production_cost(product: Product, production_cost: ProductionCost) -> None:
     normalized = normalize_production_cost(production_cost)
     if normalized.filament_id:
@@ -111,6 +139,27 @@ def energy_cost_brl(print_time_minutes: int, settings: ProductionSettings) -> fl
     return round(kwh * settings.electricity_kwh_price_brl, 2)
 
 
+def hourly_cost_brl(print_time_minutes: int, hourly_rate: float) -> float:
+    if print_time_minutes <= 0 or hourly_rate <= 0:
+        return 0
+    return round((print_time_minutes / 60) * hourly_rate, 2)
+
+
+def depreciation_cost_brl(print_time_minutes: int, settings: ProductionSettings) -> float:
+    if settings.printer_purchase_price_brl <= 0 or settings.printer_useful_life_hours <= 0:
+        return 0
+    hourly_rate = settings.printer_purchase_price_brl / settings.printer_useful_life_hours
+    return hourly_cost_brl(print_time_minutes, hourly_rate)
+
+
+def maintenance_cost_brl(print_time_minutes: int, settings: ProductionSettings) -> float:
+    return hourly_cost_brl(print_time_minutes, settings.maintenance_cost_per_hour_brl)
+
+
+def labor_cost_brl(print_time_minutes: int, settings: ProductionSettings) -> float:
+    return hourly_cost_brl(print_time_minutes, settings.labor_cost_per_hour_brl)
+
+
 def usd_to_brl(usd: float) -> float | None:
     if usd <= 0:
         return 0
@@ -126,7 +175,7 @@ def build_production_cost_breakdown(
     filaments: list[FilamentSpool],
     settings: ProductionSettings,
 ) -> ProductionCostBreakdown:
-    production_cost = read_production_cost(product)
+    production_cost = resolve_production_cost(product)
     filament_map = {item.id: item for item in filaments}
     lines: list[FilamentCostLine] = []
     filament_total = 0.0
@@ -169,27 +218,40 @@ def build_production_cost_breakdown(
             filament_total += line_cost
 
     energy_total = energy_cost_brl(production_cost.print_time_minutes, settings)
+    depreciation_total = depreciation_cost_brl(production_cost.print_time_minutes, settings)
+    maintenance_total = maintenance_cost_brl(production_cost.print_time_minutes, settings)
+    labor_total = labor_cost_brl(production_cost.print_time_minutes, settings)
     other_total = round(production_cost.other_costs_brl, 2)
     legacy_extra = round(sum(item.amount_brl for item in production_cost.extra_costs), 2)
     if other_total <= 0 and legacy_extra > 0:
         other_total = legacy_extra
     ai_cost_usd = round(product_ai_cost_usd(product), 4)
     ai_cost_brl = usd_to_brl(ai_cost_usd)
-    production_subtotal = round(filament_total + energy_total + other_total, 2)
+    production_subtotal = round(
+        filament_total + energy_total + depreciation_total + maintenance_total + labor_total + other_total,
+        2,
+    )
     total_brl = round(production_subtotal + (ai_cost_brl or 0), 2) if ai_cost_brl is not None else None
+    print_minutes = production_cost.print_time_minutes
+    cost_per_hour = round((production_subtotal / (print_minutes / 60)), 2) if print_minutes > 0 else None
+    plates = read_print_plates(product)
 
     return ProductionCostBreakdown(
         production_cost=production_cost,
         filament_lines=lines,
         filament_total_brl=round(filament_total, 2),
         energy_cost_brl=energy_total,
+        depreciation_cost_brl=depreciation_total,
+        maintenance_cost_brl=maintenance_total,
+        labor_cost_brl=labor_total,
         other_costs_brl=other_total,
         extra_total_brl=other_total,
+        production_subtotal_brl=production_subtotal,
         ai_cost_usd=ai_cost_usd,
         ai_cost_brl=ai_cost_brl,
         total_brl=total_brl,
-        print_time_minutes=production_cost.print_time_minutes,
-        print_time_label=format_print_time(
-            production_cost.print_time_minutes * 60 if production_cost.print_time_minutes else None
-        ),
+        print_time_minutes=print_minutes,
+        print_time_label=format_print_time(print_minutes * 60 if print_minutes else None),
+        plate_count=len(plates),
+        cost_per_hour_brl=cost_per_hour,
     )

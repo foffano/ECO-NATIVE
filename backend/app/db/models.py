@@ -138,6 +138,10 @@ class ProductionSettings(BaseModel):
     store_profile_id: str
     electricity_kwh_price_brl: float = Field(default=0.85, ge=0)
     printer_power_watts: float = Field(default=200, ge=0)
+    printer_purchase_price_brl: float = Field(default=0, ge=0)
+    printer_useful_life_hours: float = Field(default=5000, gt=0)
+    maintenance_cost_per_hour_brl: float = Field(default=0, ge=0)
+    labor_cost_per_hour_brl: float = Field(default=0, ge=0)
     updated_at: str = Field(default_factory=now_iso)
 
 

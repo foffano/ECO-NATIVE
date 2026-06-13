@@ -26,3 +26,14 @@ def plate_totals(plates: list[PrintPlate]) -> dict[str, float | int]:
         "total_print_time_minutes": total_time,
         "total_filament_grams": round(total_grams, 2),
     }
+
+
+def filament_usage_from_plates(plates: list[PrintPlate]) -> dict[str, float]:
+    grams_by_filament: dict[str, float] = {}
+    for plate in plates:
+        if not plate.filament_id or plate.filament_grams <= 0:
+            continue
+        grams_by_filament[plate.filament_id] = grams_by_filament.get(plate.filament_id, 0) + (
+            plate.filament_grams * plate.quantity
+        )
+    return {filament_id: round(grams, 2) for filament_id, grams in grams_by_filament.items()}

@@ -11,6 +11,10 @@ router = APIRouter()
 class ProductionSettingsUpdate(BaseModel):
     electricity_kwh_price_brl: float = Field(ge=0)
     printer_power_watts: float = Field(ge=0)
+    printer_purchase_price_brl: float = Field(ge=0)
+    printer_useful_life_hours: float = Field(gt=0)
+    maintenance_cost_per_hour_brl: float = Field(ge=0)
+    labor_cost_per_hour_brl: float = Field(ge=0)
 
 
 class FilamentCreate(BaseModel):
@@ -107,6 +111,10 @@ def update_production_settings(store_profile_id: str, payload: ProductionSetting
         state.production_settings.append(settings)
     settings.electricity_kwh_price_brl = payload.electricity_kwh_price_brl
     settings.printer_power_watts = payload.printer_power_watts
+    settings.printer_purchase_price_brl = payload.printer_purchase_price_brl
+    settings.printer_useful_life_hours = payload.printer_useful_life_hours
+    settings.maintenance_cost_per_hour_brl = payload.maintenance_cost_per_hour_brl
+    settings.labor_cost_per_hour_brl = payload.labor_cost_per_hour_brl
     settings.updated_at = now_iso()
     store.save(state)
     return settings

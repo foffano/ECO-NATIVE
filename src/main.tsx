@@ -147,6 +147,10 @@ type ProductionSettings = {
   store_profile_id: string;
   electricity_kwh_price_brl: number;
   printer_power_watts: number;
+  printer_purchase_price_brl: number;
+  printer_useful_life_hours: number;
+  maintenance_cost_per_hour_brl: number;
+  labor_cost_per_hour_brl: number;
   updated_at: string;
 };
 
@@ -203,13 +207,19 @@ type ProductionCostBreakdown = {
   }>;
   filament_total_brl: number;
   energy_cost_brl: number;
+  depreciation_cost_brl: number;
+  maintenance_cost_brl: number;
+  labor_cost_brl: number;
   other_costs_brl: number;
   extra_total_brl: number;
+  production_subtotal_brl: number;
   ai_cost_usd: number;
   ai_cost_brl: number | null;
   total_brl: number | null;
   print_time_minutes: number;
   print_time_label: string;
+  plate_count: number;
+  cost_per_hour_brl: number | null;
 };
 
 type Project = {
@@ -689,6 +699,10 @@ function defaultProductionSettings(storeProfileId: string): ProductionSettings {
     store_profile_id: storeProfileId,
     electricity_kwh_price_brl: 0.85,
     printer_power_watts: 200,
+    printer_purchase_price_brl: 0,
+    printer_useful_life_hours: 5000,
+    maintenance_cost_per_hour_brl: 0,
+    labor_cost_per_hour_brl: 0,
     updated_at: "",
   };
 }
@@ -716,11 +730,60 @@ function readProductionCost(product?: Product): ProductionCost {
   };
 }
 
+function resolveProductionCostFromProduct(product: Product, otherCostsOverride?: number): ProductionCost {
+  const stored = readProductionCost(product);
+  const other_costs_brl = otherCostsOverride ?? stored.other_costs_brl;
+  const plates = readPrintPlates(product);
+  if (!plates.length) {
+    return { ...stored, other_costs_brl };
+  }
+
+  const totals = plateTotals(plates);
+  const gramsByFilament = new Map<string, number>();
+  for (const plate of plates) {
+    if (!plate.filament_id || plate.filament_grams <= 0) continue;
+    const add = plate.filament_grams * plate.quantity;
+    gramsByFilament.set(plate.filament_id, (gramsByFilament.get(plate.filament_id) || 0) + add);
+  }
+  const filaments: FilamentUsage[] = [...gramsByFilament.entries()].map(([filament_id, grams]) => ({
+    filament_id,
+    grams: Math.round(grams * 100) / 100,
+  }));
+  const single = filaments.length === 1 ? filaments[0] : null;
+  return {
+    filament_id: single?.filament_id ?? null,
+    grams: single?.grams ?? 0,
+    print_time_minutes: totals.total_print_time_minutes,
+    other_costs_brl,
+    notes: stored.notes,
+    filaments,
+  };
+}
+
 function energyCostBrl(printTimeMinutes: number, settings: ProductionSettings): number {
   if (printTimeMinutes <= 0 || settings.printer_power_watts <= 0 || settings.electricity_kwh_price_brl <= 0) return 0;
   const hours = printTimeMinutes / 60;
   const kwh = hours * (settings.printer_power_watts / 1000);
   return Math.round(kwh * settings.electricity_kwh_price_brl * 100) / 100;
+}
+
+function hourlyCostBrl(printTimeMinutes: number, hourlyRate: number): number {
+  if (printTimeMinutes <= 0 || hourlyRate <= 0) return 0;
+  return Math.round((printTimeMinutes / 60) * hourlyRate * 100) / 100;
+}
+
+function depreciationCostBrl(printTimeMinutes: number, settings: ProductionSettings): number {
+  if (settings.printer_purchase_price_brl <= 0 || settings.printer_useful_life_hours <= 0) return 0;
+  const hourlyRate = settings.printer_purchase_price_brl / settings.printer_useful_life_hours;
+  return hourlyCostBrl(printTimeMinutes, hourlyRate);
+}
+
+function maintenanceCostBrl(printTimeMinutes: number, settings: ProductionSettings): number {
+  return hourlyCostBrl(printTimeMinutes, settings.maintenance_cost_per_hour_brl);
+}
+
+function laborCostBrl(printTimeMinutes: number, settings: ProductionSettings): number {
+  return hourlyCostBrl(printTimeMinutes, settings.labor_cost_per_hour_brl);
 }
 
 function filamentCostPerGram(spool: FilamentSpool): number {
@@ -741,8 +804,9 @@ function computeProductionBreakdown(
   filaments: FilamentSpool[],
   settings: ProductionSettings,
   usdBrl: number | null,
+  otherCostsOverride?: number,
 ): ProductionCostBreakdown {
-  const production_cost = readProductionCost(product);
+  const production_cost = resolveProductionCostFromProduct(product, otherCostsOverride);
   const filamentMap = new Map(filaments.map((item) => [item.id, item]));
   const filament_lines: ProductionCostBreakdown["filament_lines"] = [];
   let filament_total_brl = 0;
@@ -763,14 +827,42 @@ function computeProductionBreakdown(
       });
       filament_total_brl = cost_brl;
     }
+  } else if (production_cost.filaments?.length) {
+    for (const usage of production_cost.filaments) {
+      const spool = filamentMap.get(usage.filament_id);
+      if (!spool || usage.grams <= 0) continue;
+      const cost_per_gram_brl = filamentCostPerGram(spool);
+      const cost_brl = Math.round(usage.grams * cost_per_gram_brl * 100) / 100;
+      filament_lines.push({
+        filament_id: spool.id,
+        name: spool.name,
+        material: spool.material,
+        color: spool.color,
+        grams: usage.grams,
+        cost_per_gram_brl: Math.round(cost_per_gram_brl * 10000) / 10000,
+        cost_brl,
+      });
+      filament_total_brl += cost_brl;
+    }
+    filament_total_brl = Math.round(filament_total_brl * 100) / 100;
   }
 
   const energy_cost_brl = energyCostBrl(production_cost.print_time_minutes, settings);
+  const depreciation_cost_brl = depreciationCostBrl(production_cost.print_time_minutes, settings);
+  const maintenance_cost_brl = maintenanceCostBrl(production_cost.print_time_minutes, settings);
+  const labor_cost_brl = laborCostBrl(production_cost.print_time_minutes, settings);
   const other_costs_brl = Math.round(production_cost.other_costs_brl * 100) / 100;
+  const production_subtotal_brl = Math.round(
+    (filament_total_brl + energy_cost_brl + depreciation_cost_brl + maintenance_cost_brl + labor_cost_brl + other_costs_brl) * 100,
+  ) / 100;
   const ai_cost_usd = productCostTotal(product);
   const ai_cost_brl = usdBrl && usdBrl > 0 ? Math.round(ai_cost_usd * usdBrl * 100) / 100 : null;
   const total_brl = ai_cost_brl !== null
-    ? Math.round((filament_total_brl + energy_cost_brl + other_costs_brl + ai_cost_brl) * 100) / 100
+    ? Math.round((production_subtotal_brl + ai_cost_brl) * 100) / 100
+    : null;
+  const print_time_minutes = production_cost.print_time_minutes;
+  const cost_per_hour_brl = print_time_minutes > 0
+    ? Math.round((production_subtotal_brl / (print_time_minutes / 60)) * 100) / 100
     : null;
 
   return {
@@ -778,13 +870,19 @@ function computeProductionBreakdown(
     filament_lines,
     filament_total_brl,
     energy_cost_brl,
+    depreciation_cost_brl,
+    maintenance_cost_brl,
+    labor_cost_brl,
     other_costs_brl,
     extra_total_brl: other_costs_brl,
+    production_subtotal_brl,
     ai_cost_usd,
     ai_cost_brl,
     total_brl,
-    print_time_minutes: production_cost.print_time_minutes,
-    print_time_label: formatPrintMinutes(production_cost.print_time_minutes),
+    print_time_minutes,
+    print_time_label: formatPrintMinutes(print_time_minutes),
+    plate_count: readPrintPlates(product).length,
+    cost_per_hour_brl,
   };
 }
 
@@ -802,13 +900,19 @@ function productionCostPayloadFromDraft(draft: ProductionCost): ProductionCost {
   };
 }
 
-function productionCostsEqual(left: ProductionCost, right: ProductionCost): boolean {
-  return (
-    (left.filament_id || null) === (right.filament_id || null)
-    && Number(left.grams || 0) === Number(right.grams || 0)
-    && Number(left.print_time_minutes || 0) === Number(right.print_time_minutes || 0)
-    && Number(left.other_costs_brl || 0) === Number(right.other_costs_brl || 0)
-  );
+function formatFilamentSummary(breakdown: ProductionCostBreakdown): string {
+  if (!breakdown.filament_lines.length) return "—";
+  if (breakdown.filament_lines.length === 1) return breakdown.filament_lines[0].name;
+  return `${breakdown.filament_lines.length} filamentos`;
+}
+
+function totalFilamentGrams(breakdown: ProductionCostBreakdown, product: Product): number {
+  if (breakdown.filament_lines.length) {
+    return Math.round(breakdown.filament_lines.reduce((sum, line) => sum + line.grams, 0) * 100) / 100;
+  }
+  const plates = readPrintPlates(product);
+  if (!plates.length) return 0;
+  return plateTotals(plates).total_filament_grams;
 }
 
 function todayDateString(): string {
@@ -929,12 +1033,21 @@ function printerDraftsEqual(drafts: Printer3D[], saved: Printer3D[]): boolean {
 function productionSettingsDraftEqual(
   electricityPrice: string,
   printerPower: string,
+  printerPurchasePrice: string,
+  printerUsefulLifeHours: string,
+  maintenanceCostPerHour: string,
+  laborCostPerHour: string,
   settings: ProductionSettings | null,
 ): boolean {
   const fallback = defaultProductionSettings("");
   const target = settings ?? fallback;
-  return Number(electricityPrice.replace(",", ".")) === Number(target.electricity_kwh_price_brl)
-    && Number(printerPower.replace(",", ".")) === Number(target.printer_power_watts);
+  const parse = (value: string) => Number(value.replace(",", ".")) || 0;
+  return parse(electricityPrice) === Number(target.electricity_kwh_price_brl)
+    && parse(printerPower) === Number(target.printer_power_watts)
+    && parse(printerPurchasePrice) === Number(target.printer_purchase_price_brl)
+    && parse(printerUsefulLifeHours) === Number(target.printer_useful_life_hours)
+    && parse(maintenanceCostPerHour) === Number(target.maintenance_cost_per_hour_brl)
+    && parse(laborCostPerHour) === Number(target.labor_cost_per_hour_brl);
 }
 
 function useAutosave({
@@ -1926,7 +2039,14 @@ function App() {
     setFilaments((current) => current.filter((item) => item.id !== filamentId));
   }
 
-  async function saveProductionSettings(payload: { electricity_kwh_price_brl: number; printer_power_watts: number }) {
+  async function saveProductionSettings(payload: {
+    electricity_kwh_price_brl: number;
+    printer_power_watts: number;
+    printer_purchase_price_brl: number;
+    printer_useful_life_hours: number;
+    maintenance_cost_per_hour_brl: number;
+    labor_cost_per_hour_brl: number;
+  }) {
     if (!activeStoreProfile?.id) return;
     const updated = await api<ProductionSettings>(`/api/store-profiles/${activeStoreProfile.id}/production-settings`, {
       method: "PUT",
@@ -4204,49 +4324,59 @@ function CostsTab({
   const settings = productionSettings ?? defaultProductionSettings(activeStoreProfile?.id || "");
   const usdBrl = Number(runtimeStatus?.exchange.usd_brl);
   const exchangeReady = Number.isFinite(usdBrl) && usdBrl > 0;
-  const [rows, setRows] = useState<Record<string, ProductionCost>>({});
-  const [savedRows, setSavedRows] = useState<Record<string, ProductionCost>>({});
+  const [otherCostsRows, setOtherCostsRows] = useState<Record<string, number>>({});
+  const [savedOtherCostsRows, setSavedOtherCostsRows] = useState<Record<string, number>>({});
   const [searchQuery, setSearchQuery] = useState("");
   const [saveStatus, setSaveStatus] = useState<"saved" | "pending" | "saving" | "error">("saved");
-  const rowsRef = useRef(rows);
-  const savedRowsRef = useRef(savedRows);
+  const otherCostsRowsRef = useRef(otherCostsRows);
+  const savedOtherCostsRowsRef = useRef(savedOtherCostsRows);
   const savingRef = useRef(false);
-  rowsRef.current = rows;
-  savedRowsRef.current = savedRows;
+  otherCostsRowsRef.current = otherCostsRows;
+  savedOtherCostsRowsRef.current = savedOtherCostsRows;
 
   const filteredProducts = useMemo(
     () => filterProducts(products, { query: searchQuery, status: "all", characteristic: "all" }),
     [products, searchQuery],
   );
 
+  function readOtherCosts(product: Product): number {
+    return readProductionCost(product).other_costs_brl;
+  }
+
   function dirtyEntriesFromState() {
     return products
       .map((product) => {
-        const draft = rowsRef.current[product.id] || defaultProductionCost();
-        const saved = savedRowsRef.current[product.id] || readProductionCost(product);
-        return productionCostsEqual(draft, saved) ? null : { productId: product.id, productionCost: draft };
+        const draft = otherCostsRowsRef.current[product.id] ?? readOtherCosts(product);
+        const saved = savedOtherCostsRowsRef.current[product.id] ?? readOtherCosts(product);
+        return draft === saved
+          ? null
+          : {
+            productId: product.id,
+            productionCost: productionCostPayloadFromDraft({
+              ...readProductionCost(product),
+              other_costs_brl: draft,
+            }),
+          };
       })
       .filter((entry): entry is { productId: string; productionCost: ProductionCost } => Boolean(entry));
   }
 
   useEffect(() => {
-    const nextRows: Record<string, ProductionCost> = {};
-    const nextSaved: Record<string, ProductionCost> = {};
+    const nextRows: Record<string, number> = {};
+    const nextSaved: Record<string, number> = {};
     products.forEach((product) => {
-      const fromProduct = readProductionCost(product);
-      const draft = rowsRef.current[product.id] || fromProduct;
-      const previousSaved = savedRowsRef.current[product.id] || fromProduct;
-      const isDirty = !productionCostsEqual(draft, previousSaved);
+      const fromProduct = readOtherCosts(product);
+      const draft = otherCostsRowsRef.current[product.id] ?? fromProduct;
+      const previousSaved = savedOtherCostsRowsRef.current[product.id] ?? fromProduct;
+      const isDirty = draft !== previousSaved;
       nextSaved[product.id] = fromProduct;
       nextRows[product.id] = isDirty ? draft : fromProduct;
     });
-    savedRowsRef.current = nextSaved;
-    rowsRef.current = nextRows;
-    setSavedRows(nextSaved);
-    setRows(nextRows);
+    savedOtherCostsRowsRef.current = nextSaved;
+    otherCostsRowsRef.current = nextRows;
+    setSavedOtherCostsRows(nextSaved);
+    setOtherCostsRows(nextRows);
   }, [products]);
-
-  const dirtyEntries = dirtyEntriesFromState();
 
   useEffect(() => {
     const pending = dirtyEntriesFromState();
@@ -4264,16 +4394,16 @@ function CostsTab({
       try {
         await onSaveAllProductionCosts(entries);
         onProductionCostsSaved(entries);
-        const nextSaved = { ...savedRowsRef.current };
+        const nextSaved = { ...savedOtherCostsRowsRef.current };
         entries.forEach(({ productId, productionCost }) => {
-          nextSaved[productId] = productionCost;
+          nextSaved[productId] = productionCost.other_costs_brl;
         });
-        savedRowsRef.current = nextSaved;
-        setSavedRows(nextSaved);
+        savedOtherCostsRowsRef.current = nextSaved;
+        setSavedOtherCostsRows(nextSaved);
         const stillDirty = products.some((product) => {
-          const draft = rowsRef.current[product.id] || defaultProductionCost();
-          const saved = nextSaved[product.id] || readProductionCost(product);
-          return !productionCostsEqual(draft, saved);
+          const draft = otherCostsRowsRef.current[product.id] ?? readOtherCosts(product);
+          const saved = nextSaved[product.id] ?? readOtherCosts(product);
+          return draft !== saved;
         });
         setSaveStatus(stillDirty ? "pending" : "saved");
       } catch {
@@ -4283,41 +4413,50 @@ function CostsTab({
       }
     }, 800);
     return () => window.clearTimeout(timer);
-  }, [rows, savedRows, products, onSaveAllProductionCosts, onProductionCostsSaved]);
+  }, [otherCostsRows, savedOtherCostsRows, products, onSaveAllProductionCosts, onProductionCostsSaved]);
 
-  function updateRow(productId: string, update: Partial<ProductionCost>) {
-    setRows((current) => ({
+  function updateOtherCosts(productId: string, other_costs_brl: number) {
+    setOtherCostsRows((current) => ({
       ...current,
-      [productId]: { ...(current[productId] || defaultProductionCost()), ...update },
+      [productId]: other_costs_brl,
     }));
   }
 
   const tableRows = filteredProducts.map((product) => {
-    const draft = rows[product.id] || readProductionCost(product);
-    const saved = savedRows[product.id] || readProductionCost(product);
-    const isDirty = !productionCostsEqual(draft, saved);
-    const previewProduct: Product = {
-      ...product,
-      metadata: { ...product.metadata, production_cost: productionCostPayloadFromDraft(draft) },
-    };
+    const otherDraft = otherCostsRows[product.id] ?? readOtherCosts(product);
+    const savedOther = savedOtherCostsRows[product.id] ?? readOtherCosts(product);
+    const isDirty = otherDraft !== savedOther;
+    const plates = readPrintPlates(product);
     const breakdown = computeProductionBreakdown(
-      previewProduct,
+      product,
       filaments,
       settings,
       exchangeReady ? usdBrl : null,
+      otherDraft,
     );
-    return { product, draft, breakdown, isDirty };
+    return {
+      product,
+      plates,
+      breakdown,
+      otherDraft,
+      isDirty,
+      totalGrams: totalFilamentGrams(breakdown, product),
+    };
   });
 
   const totals = tableRows.reduce(
     (acc, row) => ({
       filament: acc.filament + row.breakdown.filament_total_brl,
       energy: acc.energy + row.breakdown.energy_cost_brl,
+      depreciation: acc.depreciation + row.breakdown.depreciation_cost_brl,
+      maintenance: acc.maintenance + row.breakdown.maintenance_cost_brl,
+      labor: acc.labor + row.breakdown.labor_cost_brl,
       other: acc.other + row.breakdown.other_costs_brl,
+      production: acc.production + row.breakdown.production_subtotal_brl,
       ai: acc.ai + (row.breakdown.ai_cost_brl || 0),
       total: acc.total + (row.breakdown.total_brl || 0),
     }),
-    { filament: 0, energy: 0, other: 0, ai: 0, total: 0 },
+    { filament: 0, energy: 0, depreciation: 0, maintenance: 0, labor: 0, other: 0, production: 0, ai: 0, total: 0 },
   );
 
   return (
@@ -4328,10 +4467,13 @@ function CostsTab({
           <h2>Custos de produção</h2>
         </div>
         <p className="settings-note section-intro">
-          Edite filamento, gramas, tempo e outros custos por produto. As alterações são salvas automaticamente. Configurações fixas ficam em Ajustes → Produção.
+          Filamento, gramas e tempo vêm das placas em Produtos → Impressão. Depreciação, manutenção e mão de obra usam as tarifas de Ajustes → Produção. Ajuste aqui apenas outros custos (embalagem, extras).
         </p>
         {!filaments.length && (
           <p className="settings-note">Cadastre filamentos em Ajustes → Produção para calcular o custo de material.</p>
+        )}
+        {settings.printer_purchase_price_brl <= 0 && (
+          <p className="settings-note">Depreciação zerada: informe o valor da impressora em Ajustes → Produção.</p>
         )}
         {!exchangeReady && (
           <p className="settings-note">Câmbio indisponível: coluna IA pode aparecer só em dólar.</p>
@@ -4360,12 +4502,18 @@ function CostsTab({
           <AutosaveIndicator status={saveStatus} />
         </div>
         <div className="costs-table-wrap">
-          <table className="costs-table">
+          <table className="costs-table costs-table-detailed">
             <colgroup>
               <col className="col-product" />
-              <col className="col-filament" />
-              <col className="col-grams" />
+              <col className="col-plates" />
               <col className="col-time" />
+              <col className="col-grams" />
+              <col className="col-filament" />
+              <col className="col-money" />
+              <col className="col-money" />
+              <col className="col-money" />
+              <col className="col-money" />
+              <col className="col-money" />
               <col className="col-money" />
               <col className="col-money" />
               <col className="col-money" />
@@ -4375,54 +4523,42 @@ function CostsTab({
             <thead>
               <tr>
                 <th>Produto</th>
-                <th>Filamento</th>
+                <th>Placas</th>
+                <th>Tempo</th>
                 <th>Gramas</th>
-                <th>Tempo (min)</th>
-                <th>Filamento R$</th>
-                <th>Energia R$</th>
+                <th>Filamento</th>
+                <th>Mat. R$</th>
+                <th>Energ. R$</th>
+                <th>Deprec. R$</th>
+                <th>Manut. R$</th>
+                <th>M.O. R$</th>
                 <th>Outros R$</th>
                 <th>IA</th>
+                <th>Produção R$</th>
+                <th>R$/h</th>
                 <th>Total R$</th>
               </tr>
             </thead>
             <tbody>
-              {tableRows.map(({ product, draft, breakdown, isDirty }) => (
+              {tableRows.map(({ product, plates, breakdown, otherDraft, isDirty, totalGrams }) => (
                 <tr key={product.id} className={isDirty ? "costs-row-dirty" : undefined}>
                   <td className="costs-product-cell">
                     <CostsProductCell product={product} />
+                    {!plates.length && (
+                      <small className="costs-plates-hint">Sem placas — cadastre em Produtos → Impressão</small>
+                    )}
                   </td>
-                  <td>
-                    <select
-                      value={draft.filament_id || ""}
-                      onChange={(event) => updateRow(product.id, { filament_id: event.target.value || null })}
-                      disabled={busy || !filaments.length}
-                    >
-                      <option value="">—</option>
-                      {filaments.map((spool) => (
-                        <option key={spool.id} value={spool.id}>
-                          {spool.name}
-                        </option>
-                      ))}
-                    </select>
+                  <td className="costs-readonly costs-num">
+                    {breakdown.plate_count > 0 ? breakdown.plate_count : "—"}
                   </td>
-                  <td>
-                    <input
-                      type="number"
-                      min="0"
-                      step="0.1"
-                      value={draft.grams || ""}
-                      onChange={(event) => updateRow(product.id, { grams: Number(event.target.value) || 0 })}
-                      disabled={busy}
-                    />
+                  <td className="costs-readonly">
+                    {breakdown.print_time_label}
                   </td>
-                  <td>
-                    <input
-                      type="number"
-                      min="0"
-                      value={draft.print_time_minutes || ""}
-                      onChange={(event) => updateRow(product.id, { print_time_minutes: Number(event.target.value) || 0 })}
-                      disabled={busy}
-                    />
+                  <td className="costs-readonly costs-num">
+                    {totalGrams > 0 ? `${totalGrams} g` : "—"}
+                  </td>
+                  <td className="costs-readonly">
+                    {formatFilamentSummary(breakdown)}
                   </td>
                   <td className="costs-readonly costs-num">
                     {formatBrl(breakdown.filament_total_brl)}
@@ -4430,18 +4566,33 @@ function CostsTab({
                   <td className="costs-readonly costs-num">
                     {formatBrl(breakdown.energy_cost_brl)}
                   </td>
+                  <td className="costs-readonly costs-num">
+                    {formatBrl(breakdown.depreciation_cost_brl)}
+                  </td>
+                  <td className="costs-readonly costs-num">
+                    {formatBrl(breakdown.maintenance_cost_brl)}
+                  </td>
+                  <td className="costs-readonly costs-num">
+                    {formatBrl(breakdown.labor_cost_brl)}
+                  </td>
                   <td className="costs-input-num">
                     <input
                       type="number"
                       min="0"
                       step="0.01"
-                      value={draft.other_costs_brl || ""}
-                      onChange={(event) => updateRow(product.id, { other_costs_brl: Number(event.target.value) || 0 })}
+                      value={otherDraft || ""}
+                      onChange={(event) => updateOtherCosts(product.id, Number(event.target.value) || 0)}
                       disabled={busy}
                     />
                   </td>
                   <td className="costs-readonly costs-num">
                     {breakdown.ai_cost_brl !== null ? formatBrl(breakdown.ai_cost_brl) : formatUsd(breakdown.ai_cost_usd)}
+                  </td>
+                  <td className="costs-readonly costs-num">
+                    {formatBrl(breakdown.production_subtotal_brl)}
+                  </td>
+                  <td className="costs-readonly costs-num">
+                    {breakdown.cost_per_hour_brl !== null ? formatBrl(breakdown.cost_per_hour_brl) : "—"}
                   </td>
                   <td className="costs-readonly costs-num costs-total-cell">
                     <strong>{breakdown.total_brl !== null ? formatBrl(breakdown.total_brl) : "—"}</strong>
@@ -4451,11 +4602,16 @@ function CostsTab({
             </tbody>
             <tfoot>
               <tr>
-                <th colSpan={4}>Totais</th>
+                <th colSpan={5}>Totais</th>
                 <th className="costs-num">{formatBrl(Math.round(totals.filament * 100) / 100)}</th>
                 <th className="costs-num">{formatBrl(Math.round(totals.energy * 100) / 100)}</th>
+                <th className="costs-num">{formatBrl(Math.round(totals.depreciation * 100) / 100)}</th>
+                <th className="costs-num">{formatBrl(Math.round(totals.maintenance * 100) / 100)}</th>
+                <th className="costs-num">{formatBrl(Math.round(totals.labor * 100) / 100)}</th>
                 <th className="costs-num">{formatBrl(Math.round(totals.other * 100) / 100)}</th>
                 <th className="costs-num">{formatBrl(Math.round(totals.ai * 100) / 100)}</th>
+                <th className="costs-num">{formatBrl(Math.round(totals.production * 100) / 100)}</th>
+                <th />
                 <th className="costs-num">{formatBrl(Math.round(totals.total * 100) / 100)}</th>
               </tr>
             </tfoot>
@@ -5158,7 +5314,7 @@ function ProductsTab({
             {detailSection === "printing" && selectedProduct && (
               <div className="detail-section">
                 <p className="settings-note section-intro">
-                  Configure as placas de impressão deste produto. As alterações são salvas automaticamente.
+                  Configure as placas de impressão deste produto. Filamento, gramas e tempo aqui alimentam automaticamente a aba Custos. As alterações são salvas automaticamente.
                 </p>
                 <div className="print-plates-summary">
                   <span>{plateDraftTotals.plate_count} placa(s)</span>
@@ -6536,7 +6692,14 @@ function SettingsTab({
     spool_weight_g: number;
     notes: string;
   }) => Promise<unknown>;
-  onSaveProductionSettings: (payload: { electricity_kwh_price_brl: number; printer_power_watts: number }) => Promise<unknown>;
+  onSaveProductionSettings: (payload: {
+    electricity_kwh_price_brl: number;
+    printer_power_watts: number;
+    printer_purchase_price_brl: number;
+    printer_useful_life_hours: number;
+    maintenance_cost_per_hour_brl: number;
+    labor_cost_per_hour_brl: number;
+  }) => Promise<unknown>;
   onSavePrinter: (payload: {
     id?: string;
     name: string;
@@ -6564,6 +6727,10 @@ function SettingsTab({
   const [printerDrafts, setPrinterDrafts] = useState<Printer3D[]>(printers);
   const [electricityPrice, setElectricityPrice] = useState("0.85");
   const [printerPower, setPrinterPower] = useState("200");
+  const [printerPurchasePrice, setPrinterPurchasePrice] = useState("0");
+  const [printerUsefulLifeHours, setPrinterUsefulLifeHours] = useState("5000");
+  const [maintenanceCostPerHour, setMaintenanceCostPerHour] = useState("0");
+  const [laborCostPerHour, setLaborCostPerHour] = useState("0");
   const [uiThemePreference, setUiThemePreference] = useState<UiThemePreference>(() => readUiThemePreference());
   const [customAccentDraft, setCustomAccentDraft] = useState(
     () => readUiThemePreference().accent ?? UI_THEME_PRESETS[0].tokens.greenDark,
@@ -6598,6 +6765,10 @@ function SettingsTab({
     if (!productionSettings) return;
     setElectricityPrice(String(productionSettings.electricity_kwh_price_brl));
     setPrinterPower(String(productionSettings.printer_power_watts));
+    setPrinterPurchasePrice(String(productionSettings.printer_purchase_price_brl ?? 0));
+    setPrinterUsefulLifeHours(String(productionSettings.printer_useful_life_hours ?? 5000));
+    setMaintenanceCostPerHour(String(productionSettings.maintenance_cost_per_hour_brl ?? 0));
+    setLaborCostPerHour(String(productionSettings.labor_cost_per_hour_brl ?? 0));
   }, [productionSettings]);
 
   useEffect(() => {
@@ -6770,6 +6941,10 @@ function SettingsTab({
     await onSaveProductionSettings({
       electricity_kwh_price_brl: Number(electricityPrice.replace(",", ".")) || 0,
       printer_power_watts: Number(printerPower.replace(",", ".")) || 0,
+      printer_purchase_price_brl: Number(printerPurchasePrice.replace(",", ".")) || 0,
+      printer_useful_life_hours: Math.max(1, Number(printerUsefulLifeHours.replace(",", ".")) || 5000),
+      maintenance_cost_per_hour_brl: Number(maintenanceCostPerHour.replace(",", ".")) || 0,
+      labor_cost_per_hour_brl: Number(laborCostPerHour.replace(",", ".")) || 0,
     });
     for (const draft of filamentDrafts) {
       if (!draft.name.trim()) continue;
@@ -6804,7 +6979,15 @@ function SettingsTab({
   );
   const colorsDirty = settingsSection === "colors" && !imageColorsEqual(colorDrafts, imageOptions.colors);
   const productionDirty = settingsSection === "production" && (
-    !productionSettingsDraftEqual(electricityPrice, printerPower, productionSettings)
+    !productionSettingsDraftEqual(
+      electricityPrice,
+      printerPower,
+      printerPurchasePrice,
+      printerUsefulLifeHours,
+      maintenanceCostPerHour,
+      laborCostPerHour,
+      productionSettings,
+    )
     || !filamentDraftsEqual(filamentDrafts, filaments)
   );
   const printingDirty = settingsSection === "printing" && !printerDraftsEqual(printerDrafts, printers);
@@ -7022,7 +7205,7 @@ function SettingsTab({
           <h2>Custos fixos de produção</h2>
         </div>
         <p className="settings-note section-intro">
-          Configure energia elétrica e filamentos por loja. As alterações são salvas automaticamente.
+          Configure energia, depreciação, manutenção, mão de obra e filamentos por loja. Depreciação = valor da impressora ÷ vida útil em horas × tempo de impressão.
         </p>
         <div className="form-grid">
           <label>
@@ -7032,6 +7215,22 @@ function SettingsTab({
           <label>
             Potência da impressora (W)
             <input value={printerPower} onChange={(event) => setPrinterPower(event.target.value)} />
+          </label>
+          <label>
+            Valor da impressora (R$)
+            <input value={printerPurchasePrice} onChange={(event) => setPrinterPurchasePrice(event.target.value)} />
+          </label>
+          <label>
+            Vida útil da impressora (h de impressão)
+            <input value={printerUsefulLifeHours} onChange={(event) => setPrinterUsefulLifeHours(event.target.value)} />
+          </label>
+          <label>
+            Manutenção / consumíveis (R$/h)
+            <input value={maintenanceCostPerHour} onChange={(event) => setMaintenanceCostPerHour(event.target.value)} />
+          </label>
+          <label>
+            Mão de obra (R$/h)
+            <input value={laborCostPerHour} onChange={(event) => setLaborCostPerHour(event.target.value)} />
           </label>
         </div>
 
