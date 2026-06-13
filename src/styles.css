@@ -72,6 +72,14 @@ body {
   overflow: hidden;
 }
 
+html.electron-win .sidebar {
+  padding-top: calc(24px + var(--electron-titlebar-height, 36px));
+}
+
+html.electron-win .workspace {
+  padding-top: calc(28px + var(--electron-titlebar-height, 36px));
+}
+
 #root {
   height: 100%;
 }

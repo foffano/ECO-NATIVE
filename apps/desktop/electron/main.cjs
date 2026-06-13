@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain } = require("electron");
+const { app, BrowserWindow, ipcMain, Menu } = require("electron");
 const { autoUpdater } = require("electron-updater");
 const semver = require("semver");
 const { spawn } = require("child_process");
@@ -8,6 +8,9 @@ const path = require("path");
 const API_PORT = process.env.ECO_NATIVE_PORT || "8765";
 const API_HOST = process.env.ECO_NATIVE_HOST || "127.0.0.1";
 const API_URL = `http://${API_HOST}:${API_PORT}`;
+const TITLE_BAR_HEIGHT = 36;
+const DEFAULT_TITLE_BAR_COLOR = "#071f16";
+const DEFAULT_TITLE_BAR_SYMBOL_COLOR = "#edfbf0";
 
 let mainWindow = null;
 let backendProcess = null;
@@ -124,18 +127,48 @@ function setupAutoUpdater() {
   });
 }
 
+function applyTitleBarOverlay(window, options = {}) {
+  if (process.platform !== "win32" || !window || window.isDestroyed()) return;
+  if (typeof window.setTitleBarOverlay !== "function") return;
+  window.setTitleBarOverlay({
+    color: options.color || DEFAULT_TITLE_BAR_COLOR,
+    symbolColor: options.symbolColor || DEFAULT_TITLE_BAR_SYMBOL_COLOR,
+    height: TITLE_BAR_HEIGHT,
+  });
+}
+
 async function createWindow() {
+  const isWindows = process.platform === "win32";
+
   mainWindow = new BrowserWindow({
     width: 1280,
     height: 820,
     minWidth: 1040,
     minHeight: 700,
-    backgroundColor: "#f6f4ef",
+    show: false,
+    title: "ECO Native Studio",
+    backgroundColor: DEFAULT_TITLE_BAR_COLOR,
+    autoHideMenuBar: true,
+    ...(isWindows
+      ? {
+          titleBarStyle: "hidden",
+          titleBarOverlay: {
+            color: DEFAULT_TITLE_BAR_COLOR,
+            symbolColor: DEFAULT_TITLE_BAR_SYMBOL_COLOR,
+            height: TITLE_BAR_HEIGHT,
+          },
+        }
+      : {}),
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
       preload: path.join(__dirname, "preload.cjs"),
     },
+  });
+
+  mainWindow.setMenuBarVisibility(false);
+  mainWindow.once("ready-to-show", () => {
+    mainWindow.show();
   });
 
   if (app.isPackaged) {
@@ -145,12 +178,24 @@ async function createWindow() {
   } else {
     await mainWindow.loadURL(process.env.ECO_NATIVE_FRONTEND_URL || "http://127.0.0.1:5173");
   }
+
+  if (isWindows) {
+    applyTitleBarOverlay(mainWindow);
+  }
 }
 
 ipcMain.handle("app:info", () => ({
   name: app.getName(),
   version: app.getVersion(),
+  platform: process.platform,
+  titleBarHeight: process.platform === "win32" ? TITLE_BAR_HEIGHT : 0,
 }));
+
+ipcMain.handle("window:set-titlebar-overlay", (_event, options) => {
+  if (!mainWindow || mainWindow.isDestroyed()) return { ok: false };
+  applyTitleBarOverlay(mainWindow, options);
+  return { ok: true };
+});
 
 ipcMain.handle("updates:check", async () => {
   if (!app.isPackaged) {
@@ -215,6 +260,10 @@ ipcMain.handle("updates:install", async () => {
 });
 
 app.whenReady().then(async () => {
+  if (process.platform === "win32") {
+    app.setAppUserModelId("com.econative.studio");
+  }
+  Menu.setApplicationMenu(null);
   setupAutoUpdater();
   await createWindow();
 

@@ -52,12 +52,29 @@ declare global {
     ecoNative?: {
       checkForUpdates: () => Promise<AppUpdateCheckResult>;
       downloadUpdate: () => Promise<{ ok: boolean; message?: string }>;
-      getAppInfo: () => Promise<{ name: string; version: string }>;
+      getAppInfo: () => Promise<{ name: string; version: string; platform?: string; titleBarHeight?: number }>;
       installUpdate: () => Promise<{ ok: boolean; message?: string }>;
       onUpdateEvent: (callback: (event: AppUpdateEvent) => void) => () => void;
+      platform?: string;
+      titleBarHeight?: number;
+      setTitleBarOverlay?: (options: { color: string; symbolColor: string }) => Promise<{ ok: boolean }>;
     };
   }
 }
+
+function initElectronChrome() {
+  if (typeof window === "undefined" || !window.ecoNative) return;
+  document.documentElement.classList.add("electron-app");
+  if (window.ecoNative.platform === "win32") {
+    document.documentElement.classList.add("electron-win");
+    document.documentElement.style.setProperty(
+      "--electron-titlebar-height",
+      `${window.ecoNative.titleBarHeight ?? 36}px`,
+    );
+  }
+}
+
+initElectronChrome();
 
 type AppUpdatePhase = "idle" | "checking" | "available" | "uptodate" | "downloading" | "downloaded" | "error";
 

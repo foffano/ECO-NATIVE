@@ -260,6 +260,13 @@ export function applyUiTheme(tokens: UiThemeTokens) {
     root.style.setProperty(key, value);
   }
   root.dataset.uiTheme = tokens.greenDark;
+  if (typeof window !== "undefined" && window.ecoNative?.setTitleBarOverlay) {
+    const sidebarText = mixHex(tokens.mint, "#ffffff", 0.72);
+    window.ecoNative.setTitleBarOverlay({
+      color: tokens.forest,
+      symbolColor: sidebarText,
+    }).catch(() => undefined);
+  }
 }
 
 export function buildDerivedThemeVariables(tokens: UiThemeTokens): Record<string, string> {
