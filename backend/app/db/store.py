@@ -161,6 +161,7 @@ class JsonStore:
     def upsert_product(self, product: Product) -> Product:
         def apply(state: StudioState) -> Product:
             product.updated_at = now_iso()
+            product.metadata.pop("file_warnings", None)
             state.products = [p for p in state.products if p.id != product.id]
             state.products.append(product)
             return product

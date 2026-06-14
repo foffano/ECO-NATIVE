@@ -1,6 +1,7 @@
 from backend.app.db.models import Asset, Job, JobStatus, Product, ProductStatus
 from backend.app.db.store import store
 from backend.app.services.cost_tracker import add_openrouter_cost
+from backend.app.services.http_client import HttpResponseError, compression_error_message, is_compression_error
 from backend.app.services.image_generation import (
     generate_color_variations_with_kie,
     generate_studio_images,
@@ -26,6 +27,14 @@ def _finish_job(job: Job, message: str) -> Job:
     job.message = message
     job.logs.append(message)
     return store.upsert_job(job)
+
+
+def _job_error_log(exc: Exception) -> str:
+    if is_compression_error(exc):
+        return f"HttpResponseError: {compression_error_message()}"
+    if isinstance(exc, HttpResponseError):
+        return f"HttpResponseError: {exc}"
+    return f"{exc.__class__.__name__}: {exc}"
 
 
 def _extend_unique_assets(product: Product, assets: list[Asset]) -> list[Asset]:
@@ -118,7 +127,7 @@ def run_collect_job(job: Job, payload) -> Job:
         job.status = JobStatus.failed
         job.progress = 100
         job.message = "Falha na coleta MakerWorld"
-        job.logs.append(f"{exc.__class__.__name__}: {exc}")
+        job.logs.append(_job_error_log(exc))
         return store.upsert_job(job)
 
     created = 0
@@ -219,13 +228,13 @@ def run_listing_job(job: Job, product: Product) -> Job:
         job.status = JobStatus.failed
         job.progress = 100
         job.message = "Falha ao gerar anúncio com IA"
-        job.logs.append(f"{exc.__class__.__name__}: {exc}")
+        job.logs.append(_job_error_log(exc))
         return store.upsert_job(job)
     except Exception as exc:
         job.status = JobStatus.failed
         job.progress = 100
         job.message = "Falha ao gerar anúncio com IA"
-        job.logs.append(f"{exc.__class__.__name__}: {exc}")
+        job.logs.append(_job_error_log(exc))
         return store.upsert_job(job)
 
     product.status = ProductStatus.in_edit
@@ -301,7 +310,7 @@ def run_image_job(
         job.status = JobStatus.failed
         job.progress = 100
         job.message = "Falha ao gerar imagens"
-        job.logs.append(f"{exc.__class__.__name__}: {exc}")
+        job.logs.append(_job_error_log(exc))
         return store.upsert_job(job)
 
     product.status = ProductStatus.in_edit

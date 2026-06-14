@@ -8,6 +8,13 @@ from botocore.exceptions import ClientError
 
 from backend.app.core.settings import AppSettings, get_settings
 
+R2_CLIENT_CONFIG = Config(
+    signature_version="s3v4",
+    connect_timeout=10,
+    read_timeout=30,
+    retries={"max_attempts": 2, "mode": "standard"},
+)
+
 
 def r2_configured(settings: AppSettings | None = None) -> bool:
     settings = settings or get_settings()
@@ -52,7 +59,7 @@ def upload_file_to_r2(local_path: str | Path, key_prefix: str = "eco-native", fo
         endpoint_url=f"https://{settings.cloudflare_account_id}.r2.cloudflarestorage.com",
         aws_access_key_id=settings.cloudflare_r2_access_key,
         aws_secret_access_key=settings.cloudflare_r2_secret_key,
-        config=Config(signature_version="s3v4"),
+        config=R2_CLIENT_CONFIG,
     )
 
     if not force:
@@ -82,7 +89,7 @@ def get_r2_client(settings: AppSettings | None = None):
         endpoint_url=f"https://{settings.cloudflare_account_id}.r2.cloudflarestorage.com",
         aws_access_key_id=settings.cloudflare_r2_access_key,
         aws_secret_access_key=settings.cloudflare_r2_secret_key,
-        config=Config(signature_version="s3v4"),
+        config=R2_CLIENT_CONFIG,
     )
 
 

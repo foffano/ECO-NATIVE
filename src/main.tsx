@@ -622,6 +622,20 @@ function productListed(product?: Product): boolean {
   return Boolean(product?.metadata?.listed);
 }
 
+function productFileWarnings(product?: Product): string[] {
+  const value = product?.metadata?.file_warnings;
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
+}
+
+function productFileWarningLabel(product: Product): string | null {
+  const warnings = productFileWarnings(product);
+  if (!warnings.length) return null;
+  if (warnings.includes("empty_folder")) return "Pasta do produto vazia no disco";
+  if (warnings.some((warning) => warning.startsWith("missing_"))) return "Arquivos locais ausentes";
+  if (warnings.includes("remote_only")) return "Somente imagem remota disponível";
+  return "Arquivos locais inconsistentes";
+}
+
 type PipelineBadge = {
   key: string;
   label: string;
@@ -638,6 +652,7 @@ function productPipelineBadges(product: Product): PipelineBadge[] {
   const studioImages = baseImages + colorImages;
   const cover = getCoverAsset(product);
   const models = product.assets.filter(isModelAsset).length;
+  const fileWarning = productFileWarningLabel(product);
 
   let publicationDetail = "Aguardando";
   let publicationState: PipelineBadge["state"] = "pending";
@@ -674,6 +689,12 @@ function productPipelineBadges(product: Product): PipelineBadge[] {
       state: models > 0 ? "done" : "pending",
       detail: models > 0 ? `${models} arquivo${models > 1 ? "s" : ""}` : "Sem modelo",
     },
+    ...(fileWarning ? [{
+      key: "files",
+      label: "Arquivos",
+      state: "partial" as const,
+      detail: fileWarning,
+    }] : []),
     {
       key: "publish",
       label: "Publicação",

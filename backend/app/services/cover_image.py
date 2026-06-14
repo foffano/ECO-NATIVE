@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import mimetypes
+import zlib
 from pathlib import Path
 
 from PIL import Image
@@ -97,9 +98,16 @@ def normalize_cover_to_jpeg(path: Path) -> bool:
     if detected not in {"png", "webp"}:
         return False
 
-    with Image.open(path) as image:
-        rgb = image.convert("RGB")
-        rgb.save(path, format="JPEG", quality=92)
+    try:
+        with Image.open(path) as image:
+            rgb = image.convert("RGB")
+            rgb.save(path, format="JPEG", quality=92)
+    except zlib.error as exc:
+        raise CoverImageError(
+            f"Imagem corrompida ({path.name}). O app vai tentar baixar novamente da URL original."
+        ) from exc
+    except OSError as exc:
+        raise CoverImageError(f"Nao foi possivel ler a imagem ({path.name}): {exc}") from exc
     return True
 
 
@@ -109,11 +117,24 @@ def repair_cover_file(path: Path, image_url: str | None, *, project_id: str, sku
         detected = sniff_image_format(path.read_bytes())
         needs_download = detected in {None, "gzip"}
         if detected == "webp":
-            normalize_cover_to_jpeg(path)
-            return
+            try:
+                normalize_cover_to_jpeg(path)
+                return
+            except CoverImageError:
+                path.unlink(missing_ok=True)
+                needs_download = True
 
     if not needs_download:
-        validate_cover_bytes(path.read_bytes(), path)
+        try:
+            validate_cover_bytes(path.read_bytes(), path)
+            if sniff_image_format(path.read_bytes()) in {"png", "webp"}:
+                normalize_cover_to_jpeg(path)
+            return
+        except CoverImageError:
+            path.unlink(missing_ok=True)
+            needs_download = True
+
+    if not needs_download:
         return
 
     if not image_url:
@@ -167,3 +188,20 @@ def ensure_product_cover(product: Product) -> Asset:
                     cover.public_url = source_url
 
     return cover
+
+
+def repair_product_cover(product: Product) -> Asset:
+    return ensure_product_cover(product)
+
+
+def repair_all_product_covers(products: list[Product]) -> dict[str, int | list[str]]:
+    repaired = 0
+    failed: list[str] = []
+    for product in products:
+        sku = str(product.metadata.get("sku") or product.id).strip()
+        try:
+            repair_product_cover(product)
+            repaired += 1
+        except CoverImageError as exc:
+            failed.append(f"{sku}: {exc}")
+    return {"repaired": repaired, "failed": failed, "failed_count": len(failed)}

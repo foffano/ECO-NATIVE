@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import shutil
 from pathlib import Path
 
@@ -7,6 +8,8 @@ from backend.app.core.paths import PROJECTS_DIR
 from backend.app.db.models import Product
 from backend.app.services.cloudflare_r2 import delete_r2_keys, delete_r2_prefix, public_url_to_r2_key, r2_configured
 from backend.app.services.product_paths import product_dir_for
+
+logger = logging.getLogger(__name__)
 
 
 def r2_key_prefix(product: Product) -> str:
@@ -63,6 +66,18 @@ def delete_product_r2_files(product: Product) -> dict[str, int | list[str] | str
 
 
 def purge_product_data(product: Product) -> dict:
-    local = delete_local_product_files(product)
-    remote = delete_product_r2_files(product)
-    return {"local": local, "r2": remote}
+    result: dict = {"local": None, "r2": None, "errors": []}
+
+    try:
+        result["local"] = delete_local_product_files(product)
+    except Exception as exc:
+        logger.warning("Falha ao apagar arquivos locais do produto %s: %s", product.id, exc)
+        result["errors"].append(f"local: {exc}")
+
+    try:
+        result["r2"] = delete_product_r2_files(product)
+    except Exception as exc:
+        logger.warning("Falha ao apagar arquivos R2 do produto %s: %s", product.id, exc)
+        result["errors"].append(f"r2: {exc}")
+
+    return result

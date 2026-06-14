@@ -18,6 +18,7 @@ from backend.app.services.product_paths import (
 )
 from backend.app.services.print_plates import plate_totals, read_print_plates, write_print_plates
 from backend.app.services.product_cleanup import purge_product_data
+from backend.app.services.product_health import product_file_warnings
 from backend.app.services.production_cost import (
     ProductionCost,
     build_production_cost_breakdown,
@@ -106,12 +107,21 @@ def ensure_skus_for_state_products() -> list[Product]:
     return store.mutate(apply)
 
 
+def _annotate_product_health(product: Product) -> Product:
+    warnings = product_file_warnings(product)
+    if warnings:
+        product.metadata["file_warnings"] = warnings
+    else:
+        product.metadata.pop("file_warnings", None)
+    return product
+
+
 @router.get("")
 def list_products(project_id: str | None = None) -> list[Product]:
     products = ensure_skus_for_state_products()
     if project_id:
         products = [p for p in products if p.project_id == project_id]
-    return sorted(products, key=lambda p: p.created_at, reverse=True)
+    return sorted((_annotate_product_health(p.model_copy(deep=True)) for p in products), key=lambda p: p.created_at, reverse=True)
 
 
 @router.post("")
@@ -335,28 +345,35 @@ def delete_product_asset(product_id: str, asset_id: str) -> Product:
 
 @router.delete("/{product_id}")
 def delete_product(product_id: str) -> dict:
-    preview = store.load()
-    product = next((item for item in preview.products if item.id == product_id), None)
-    if not product:
-        raise HTTPException(status_code=404, detail="Produto nao encontrado")
+    removed_product: Product | None = None
+    blocked_url: dict | None = None
 
-    cleanup = purge_product_data(product)
-
-    def apply(state: StudioState) -> dict:
+    def apply(state: StudioState) -> None:
+        nonlocal removed_product, blocked_url
         target = next((item for item in state.products if item.id == product_id), None)
         if not target:
             raise HTTPException(status_code=404, detail="Produto nao encontrado")
+        removed_product = target.model_copy(deep=True)
         blocked = block_product_source_url(state, target)
+        blocked_url = blocked.model_dump() if blocked else None
         state.products = [item for item in state.products if item.id != product_id]
         state.jobs = [job for job in state.jobs if job.product_id != product_id]
         state.print_schedule_tasks = [
             task for task in state.print_schedule_tasks if task.product_id != product_id
         ]
-        return {
-            "status": "deleted",
-            "product_id": product_id,
-            "cleanup": cleanup,
-            "blocked_url": blocked.model_dump() if blocked else None,
-        }
 
-    return store.mutate(apply, allow_product_shrink=True)
+    store.mutate(apply, allow_product_shrink=True)
+
+    cleanup: dict = {"local": None, "r2": None, "errors": []}
+    if removed_product:
+        try:
+            cleanup = purge_product_data(removed_product)
+        except Exception as exc:
+            cleanup["errors"].append(str(exc))
+
+    return {
+        "status": "deleted",
+        "product_id": product_id,
+        "cleanup": cleanup,
+        "blocked_url": blocked_url,
+    }
