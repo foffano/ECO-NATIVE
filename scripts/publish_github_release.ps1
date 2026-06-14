@@ -1,0 +1,80 @@
+param(
+    [string]$Version = "0.1.20",
+    [string]$ReleaseDir = "$env:USERPROFILE\ECO-NATIVE-release"
+)
+
+if (-not $env:GH_TOKEN) {
+    throw 'Defina GH_TOKEN com um Personal Access Token do GitHub (escopo repo).'
+}
+
+$tag = "v$Version"
+$headers = @{
+    Authorization              = "Bearer $env:GH_TOKEN"
+    Accept                       = "application/vnd.github+json"
+    "X-GitHub-Api-Version"       = "2022-11-28"
+}
+
+$releaseBody = @"
+## Resumo
+- Corrige erro de descompressao ao gerar anuncio ou imagem (cliente HTTP seguro com urllib)
+- Corrige apagar produto que falhava com Failed to fetch
+- Remove produto do catalogo antes da limpeza de arquivos/R2
+- Aviso de arquivos inconsistentes em produtos com pasta vazia ou capa remota
+- Fallback de imagem via URL remota quando arquivo local nao existe
+- Timeouts no R2 e reload do backend limitado a backend/ no dev
+
+## Test plan
+- [ ] Atualizar para v$Version
+- [ ] Gerar anuncio e imagem em qualquer produto
+- [ ] Apagar produto com pasta vazia
+- [ ] Verificar atualizacao automatica em Ajustes
+"@
+
+$releasePayload = @{
+    tag_name = $tag
+    name     = $Version
+    body     = $releaseBody
+    draft    = $false
+    prerelease = $false
+} | ConvertTo-Json
+
+$release = $null
+try {
+    $release = Invoke-RestMethod -Uri "https://api.github.com/repos/foffano/ECO-NATIVE/releases/tags/$tag" -Headers $headers -Method Get
+    Write-Host "Release $tag ja existe (id $($release.id))."
+} catch {
+    $release = Invoke-RestMethod -Uri "https://api.github.com/repos/foffano/ECO-NATIVE/releases" -Headers $headers -Method Post -Body $releasePayload -ContentType "application/json; charset=utf-8"
+    Write-Host "Release $tag criada (id $($release.id))."
+}
+
+function Upload-ReleaseAsset {
+    param(
+        [object]$Release,
+        [string]$FilePath
+    )
+    if (-not (Test-Path $FilePath)) {
+        throw "Arquivo nao encontrado: $FilePath"
+    }
+    $name = [System.IO.Path]::GetFileName($FilePath)
+    $existing = @($release.assets) | Where-Object { $_.name -eq $name }
+    foreach ($asset in $existing) {
+        Invoke-RestMethod -Uri "https://api.github.com/repos/foffano/ECO-NATIVE/releases/assets/$($asset.id)" -Headers $headers -Method Delete | Out-Null
+        Write-Host "Asset antigo removido: $name"
+    }
+    $uploadUrl = "https://uploads.github.com/repos/foffano/ECO-NATIVE/releases/$($release.id)/assets?name=$name"
+    Invoke-RestMethod -Uri $uploadUrl -Headers $headers -Method Post -InFile $FilePath -ContentType "application/octet-stream" | Out-Null
+    Write-Host "Asset enviado: $name"
+}
+
+$files = @(
+    Join-Path $ReleaseDir "ECO-Native-Studio-$Version-Windows-x64.exe"
+    Join-Path $ReleaseDir "ECO-Native-Studio-$Version-Windows-x64.exe.blockmap"
+    Join-Path $ReleaseDir "latest.yml"
+)
+
+foreach ($file in $files) {
+    Upload-ReleaseAsset -Release $release -FilePath $file
+}
+
+Write-Host ""
+Write-Host "Release publicada: $($release.html_url)"
