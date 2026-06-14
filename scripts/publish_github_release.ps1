@@ -16,13 +16,12 @@ $headers = @{
 
 $releaseBody = @"
 ## Resumo
-- Rolagem vertical dentro da tabela na aba Custos
-- Cabecalhos da tabela de custos sempre visiveis ao rolar
+- Mostra custo de producao discretamente abaixo do preco do anuncio
+- Exibe margem estimada quando o preco do anuncio esta preenchido
 
 ## Test plan
-- [ ] Abrir aba Custos com muitos produtos
-- [ ] Confirmar rolagem interna na tabela
-- [ ] Confirmar cabecalhos fixos ao rolar
+- [ ] Cadastrar placas em Impressao e conferir custo abaixo do preco
+- [ ] Preencher preco e verificar margem exibida
 "@
 
 $releasePayload = @{

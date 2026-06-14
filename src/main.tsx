@@ -1486,6 +1486,52 @@ function formatBrl(value: number): string {
   return value.toLocaleString("pt-BR", { style: "currency", currency: "BRL", minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
+function parseListingPrice(value: string): number | null {
+  const parsed = Number(String(value || "").trim().replace(",", "."));
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+}
+
+function ListingProductionHint({
+  product,
+  listingPrice,
+  filaments,
+  productionSettings,
+  storeProfileId,
+}: {
+  product: Product;
+  listingPrice: string;
+  filaments: FilamentSpool[];
+  productionSettings: ProductionSettings | null;
+  storeProfileId?: string;
+}) {
+  const settings = productionSettings ?? defaultProductionSettings(storeProfileId || "");
+  const breakdown = computeProductionBreakdown(product, filaments, settings, null);
+  const plates = readPrintPlates(product);
+  const productionCost = breakdown.production_subtotal_brl;
+
+  if (!plates.length) {
+    return (
+      <small className="listing-production-hint">
+        Custo de produção: cadastre placas em Impressão
+      </small>
+    );
+  }
+
+  const price = parseListingPrice(listingPrice);
+  const margin = price !== null ? Math.round((price - productionCost) * 100) / 100 : null;
+  const marginPct = price !== null && price > 0 && margin !== null
+    ? Math.round((margin / price) * 100)
+    : null;
+  const marginClass = margin !== null && margin < 0 ? "negative" : margin !== null && margin > 0 ? "positive" : "";
+
+  return (
+    <small className={`listing-production-hint ${marginClass}`.trim()}>
+      Produção {formatBrl(productionCost)}
+      {margin !== null && marginPct !== null ? ` · margem ${formatBrl(margin)} (${marginPct}%)` : ""}
+    </small>
+  );
+}
+
 function filenameFromDisposition(disposition: string | null, fallback: string): string {
   const utf8Match = disposition?.match(/filename\*=UTF-8''([^;]+)/i);
   if (utf8Match?.[1]) return decodeURIComponent(utf8Match[1]);
@@ -3157,6 +3203,8 @@ function App() {
             onUpdateProductListed={updateProductListed}
             onSavePrintPlates={(productId, plates) => runFluidAction("Salvando placas", () => savePrintPlates(productId, plates))}
             filaments={filaments}
+            productionSettings={productionSettings}
+            activeStoreProfile={activeStoreProfile}
             onSelectedProductIdsChange={setSelectedProductIds}
             onSelectedColorVariationsChange={setSelectedColorVariations}
             detailsOpen={detailsOpen}
@@ -4710,6 +4758,8 @@ function ProductsTab({
   onUploadModelFile,
   onSavePrintPlates,
   filaments,
+  productionSettings,
+  activeStoreProfile,
   onSelectedProductIdsChange,
   onSelectedColorVariationsChange,
   onSelectProduct,
@@ -4751,6 +4801,8 @@ function ProductsTab({
   onUploadModelFile: (productId: string, file: File) => void;
   onSavePrintPlates: (productId: string, plates: PrintPlate[]) => Promise<unknown>;
   filaments: FilamentSpool[];
+  productionSettings: ProductionSettings | null;
+  activeStoreProfile?: StoreProfile;
   onSelectedProductIdsChange: (ids: string[]) => void;
   onSelectedColorVariationsChange: (ids: string[]) => void;
   onSelectProduct: (id: string) => void;
@@ -5214,6 +5266,13 @@ function ProductsTab({
                   <label>
                     Preço (R$)
                     <input value={listingDraft.price} onChange={(event) => updateDraft("price", event.target.value)} />
+                    <ListingProductionHint
+                      product={selectedProduct}
+                      listingPrice={listingDraft.price}
+                      filaments={filaments}
+                      productionSettings={productionSettings}
+                      storeProfileId={activeStoreProfile?.id}
+                    />
                   </label>
                   <label>
                     Estoque
