@@ -16,18 +16,13 @@ $headers = @{
 
 $releaseBody = @"
 ## Resumo
-- Corrige erro de descompressao ao gerar anuncio ou imagem (cliente HTTP seguro com urllib)
-- Corrige apagar produto que falhava com Failed to fetch
-- Remove produto do catalogo antes da limpeza de arquivos/R2
-- Aviso de arquivos inconsistentes em produtos com pasta vazia ou capa remota
-- Fallback de imagem via URL remota quando arquivo local nao existe
-- Timeouts no R2 e reload do backend limitado a backend/ no dev
+- Rolagem vertical dentro da tabela na aba Custos
+- Cabecalhos da tabela de custos sempre visiveis ao rolar
 
 ## Test plan
-- [ ] Atualizar para v$Version
-- [ ] Gerar anuncio e imagem em qualquer produto
-- [ ] Apagar produto com pasta vazia
-- [ ] Verificar atualizacao automatica em Ajustes
+- [ ] Abrir aba Custos com muitos produtos
+- [ ] Confirmar rolagem interna na tabela
+- [ ] Confirmar cabecalhos fixos ao rolar
 "@
 
 $releasePayload = @{
