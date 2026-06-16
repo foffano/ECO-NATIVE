@@ -1,5 +1,5 @@
 param(
-    [string]$Version = "0.1.24",
+    [string]$Version = "0.1.25",
     [string]$ReleaseDir = "$env:USERPROFILE\ECO-NATIVE-release"
 )
 
@@ -16,14 +16,14 @@ $headers = @{
 
 $releaseBody = @"
 ## Resumo
-- Capa capturada sempre enviada ao R2 antes de gerar imagens com IA
-- Troca manual da foto de capa na aba Imagens do produto
-- Endpoint novo para upload de capa com normalizacao para JPEG
+- Corrige app que nao abria apos auto-update (processos eco-native-api orfaos)
+- Encerra API antiga antes de iniciar e antes de instalar atualizacao
+- Exibe mensagem de erro com caminho do log quando a API local falha
 
 ## Test plan
-- [ ] Trocar capa manualmente em Detalhes > Imagens e confirmar preview atualizado
-- [ ] Gerar imagens base com R2 configurado e validar job concluido
-- [ ] Confirmar auto-update em Ajustes > Verificar atualizacoes
+- [ ] Atualizar de 0.1.24 para 0.1.25 e confirmar que o app abre
+- [ ] Encerrar eco-native-api no Gerenciador de Tarefas e abrir o app novamente
+- [ ] Conferir backend.log em %APPDATA%\eco-native-studio se houver falha
 "@
 
 $releasePayload = @{

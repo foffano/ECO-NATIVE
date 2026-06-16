@@ -1,7 +1,8 @@
-const { app, BrowserWindow, ipcMain, Menu } = require("electron");
+const { app, BrowserWindow, dialog, ipcMain, Menu } = require("electron");
 const { autoUpdater } = require("electron-updater");
 const semver = require("semver");
-const { spawn } = require("child_process");
+const { spawn, spawnSync } = require("child_process");
+const fs = require("fs");
 const http = require("http");
 const path = require("path");
 
@@ -15,10 +16,15 @@ const DEFAULT_WINDOW_BACKGROUND = "#f4f8f0";
 
 let mainWindow = null;
 let backendProcess = null;
+let backendLogStream = null;
 
 function backendExecutablePath() {
   const executableName = process.platform === "win32" ? "eco-native-api.exe" : "eco-native-api";
   return path.join(process.resourcesPath, "backend", executableName);
+}
+
+function backendLogPath() {
+  return path.join(app.getPath("userData"), "backend.log");
 }
 
 function waitForBackend(timeoutMs = 30000) {
@@ -44,7 +50,7 @@ function waitForBackend(timeoutMs = 30000) {
 
     function retry() {
       if (Date.now() - startedAt > timeoutMs) {
-        reject(new Error("A API local não iniciou dentro do tempo esperado."));
+        reject(new Error("A API local nao iniciou dentro do tempo esperado."));
         return;
       }
       setTimeout(probe, 450);
@@ -52,6 +58,33 @@ function waitForBackend(timeoutMs = 30000) {
 
     probe();
   });
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function killOrphanBackendProcesses() {
+  if (process.platform === "win32") {
+    spawnSync("taskkill", ["/F", "/IM", "eco-native-api.exe", "/T"], {
+      stdio: "ignore",
+      windowsHide: true,
+    });
+    return;
+  }
+
+  spawnSync("pkill", ["-f", "eco-native-api"], { stdio: "ignore" });
+}
+
+function stopManagedBackend() {
+  if (backendLogStream) {
+    backendLogStream.end();
+    backendLogStream = null;
+  }
+  if (backendProcess) {
+    backendProcess.kill();
+    backendProcess = null;
+  }
 }
 
 function startBackend() {
@@ -67,15 +100,39 @@ function startBackend() {
     PLAYWRIGHT_BROWSERS_PATH: path.join(process.resourcesPath, "playwright-browsers"),
   };
 
+  backendLogStream = fs.createWriteStream(backendLogPath(), { flags: "a" });
+  backendLogStream.write(`\n--- backend start ${new Date().toISOString()} ---\n`);
+
   backendProcess = spawn(backendExecutablePath(), [], {
     env,
-    stdio: "ignore",
+    stdio: ["ignore", backendLogStream, backendLogStream],
     windowsHide: true,
   });
 
-  backendProcess.on("exit", () => {
+  backendProcess.on("exit", (code, signal) => {
+    if (backendLogStream) {
+      backendLogStream.write(`--- backend exit code=${code ?? "null"} signal=${signal ?? "null"} ---\n`);
+    }
     backendProcess = null;
   });
+}
+
+async function prepareBackend() {
+  if (!app.isPackaged) return;
+
+  killOrphanBackendProcesses();
+  await sleep(700);
+  startBackend();
+  await waitForBackend(45000);
+}
+
+function showStartupError(error) {
+  const message = error instanceof Error ? error.message : String(error);
+  const logHint = app.isPackaged ? `\n\nLog da API: ${backendLogPath()}` : "";
+  dialog.showErrorBox(
+    "ECO Native Studio",
+    `Nao foi possivel iniciar o aplicativo.\n\n${message}${logHint}`,
+  );
 }
 
 function sendUpdateEvent(payload) {
@@ -174,8 +231,7 @@ async function createWindow() {
   });
 
   if (app.isPackaged) {
-    startBackend();
-    await waitForBackend();
+    await prepareBackend();
     await mainWindow.loadFile(path.join(process.resourcesPath, "frontend", "index.html"));
   } else {
     await mainWindow.loadURL(process.env.ECO_NATIVE_FRONTEND_URL || "http://127.0.0.1:5173");
@@ -204,7 +260,7 @@ ipcMain.handle("updates:check", async () => {
     return {
       ok: false,
       status: "error",
-      message: "Atualizações automáticas só funcionam no aplicativo instalado.",
+      message: "Atualizacoes automaticas so funcionam no aplicativo instalado.",
     };
   }
 
@@ -218,27 +274,27 @@ ipcMain.handle("updates:check", async () => {
         status: "available",
         version: latestVersion,
         currentVersion,
-        message: `Nova versão ${latestVersion} disponível.`,
+        message: `Nova versao ${latestVersion} disponivel.`,
       };
     }
     return {
       ok: true,
       status: "uptodate",
       currentVersion,
-      message: `Você já está na versão mais recente (${currentVersion}).`,
+      message: `Voce ja esta na versao mais recente (${currentVersion}).`,
     };
   } catch (error) {
     return {
       ok: false,
       status: "error",
-      message: error instanceof Error ? error.message : "Não foi possível verificar atualizações.",
+      message: error instanceof Error ? error.message : "Nao foi possivel verificar atualizacoes.",
     };
   }
 });
 
 ipcMain.handle("updates:download", async () => {
   if (!app.isPackaged) {
-    return { ok: false, message: "Atualizações automáticas só funcionam no aplicativo instalado." };
+    return { ok: false, message: "Atualizacoes automaticas so funcionam no aplicativo instalado." };
   }
 
   try {
@@ -247,21 +303,23 @@ ipcMain.handle("updates:download", async () => {
   } catch (error) {
     return {
       ok: false,
-      message: error instanceof Error ? error.message : "Não foi possível baixar a atualização.",
+      message: error instanceof Error ? error.message : "Nao foi possivel baixar a atualizacao.",
     };
   }
 });
 
 ipcMain.handle("updates:install", async () => {
   if (!app.isPackaged) {
-    return { ok: false, message: "Atualizações automáticas só funcionam no aplicativo instalado." };
+    return { ok: false, message: "Atualizacoes automaticas so funcionam no aplicativo instalado." };
   }
 
+  stopManagedBackend();
+  killOrphanBackendProcesses();
   autoUpdater.quitAndInstall();
   return { ok: true };
 });
 
-app.whenReady().then(async () => {
+async function bootstrap() {
   if (process.platform === "win32") {
     app.setAppUserModelId("com.econative.studio");
   }
@@ -274,15 +332,23 @@ app.whenReady().then(async () => {
   }
 
   app.on("activate", () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow().catch(() => app.quit());
+    if (BrowserWindow.getAllWindows().length === 0) {
+      createWindow().catch((error) => {
+        showStartupError(error);
+        app.quit();
+      });
+    }
   });
+}
+
+app.whenReady().then(bootstrap).catch((error) => {
+  showStartupError(error);
+  app.quit();
 });
 
 app.on("before-quit", () => {
-  if (backendProcess) {
-    backendProcess.kill();
-    backendProcess = null;
-  }
+  stopManagedBackend();
+  killOrphanBackendProcesses();
 });
 
 app.on("window-all-closed", () => {
