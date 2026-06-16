@@ -1,5 +1,5 @@
 param(
-    [string]$Version = "0.1.20",
+    [string]$Version = "0.1.23",
     [string]$ReleaseDir = "$env:USERPROFILE\ECO-NATIVE-release"
 )
 
@@ -16,12 +16,13 @@ $headers = @{
 
 $releaseBody = @"
 ## Resumo
-- Mostra custo de producao discretamente abaixo do preco do anuncio
-- Exibe margem estimada quando o preco do anuncio esta preenchido
+- Seletor de projeto ativo nas abas Coleta e Produtos
+- Lista de bloqueio permanece vinculada ao projeto selecionado
+- Tabela de custos com scroll interno, cabecalho fixo e carregamento progressivo
 
 ## Test plan
-- [ ] Cadastrar placas em Impressao e conferir custo abaixo do preco
-- [ ] Preencher preco e verificar margem exibida
+- [ ] Criar dois projetos, bloquear URLs em um e alternar pelo seletor
+- [ ] Rolar a tabela de custos e conferir cabecalho fixo e linhas carregando aos poucos
 "@
 
 $releasePayload = @{

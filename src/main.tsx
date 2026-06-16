@@ -1766,6 +1766,7 @@ function App() {
       );
       if ((!activeProjectId || !nextStoreProjects.some((project) => project.id === activeProjectId)) && nextStoreProjects[0]) {
         setActiveProjectId(nextStoreProjects[0].id);
+        setProjectName(nextStoreProjects[0].name);
       }
     }
     if (nextStore && (!storeProfileDraft || nextStore.id === activeStoreProfileId)) setStoreProfileDraft(nextStore);
@@ -2411,7 +2412,7 @@ function App() {
         patchProject(project);
         return project;
       }, { refresh: false, blockUi: true, notifySuccess: true });
-      if (created) setActiveProjectId(created.id);
+      if (created) selectProject(created.id);
       return created;
     })();
   }
@@ -2565,11 +2566,19 @@ function App() {
       const nextProject = projects.find((project) =>
         project.store_profile_id ? project.store_profile_id === profile.id : project.store === profile.name,
       );
-      setActiveProjectId(nextProject?.id ?? "");
-      setSelectedProductId("");
-      setSelectedProductIds([]);
-      setDetailsOpen(false);
+      selectProject(nextProject?.id ?? "", { syncName: Boolean(nextProject) });
     }
+  }
+
+  function selectProject(projectId: string, options?: { syncName?: boolean }) {
+    setActiveProjectId(projectId);
+    if (options?.syncName !== false) {
+      const project = projects.find((item) => item.id === projectId);
+      if (project) setProjectName(project.name);
+    }
+    setSelectedProductId("");
+    setSelectedProductIds([]);
+    setDetailsOpen(false);
   }
 
   function saveStoreProfile() {
@@ -3147,8 +3156,9 @@ function App() {
             limit={collectLimit}
             loginStatus={makerWorldLogin}
             manualUrl={manualUrl}
-            productCount={projectProducts.length}
+            productCount={projectProducts.filter((product) => product.project_id === activeProject?.id).length}
             projectName={projectName}
+            projects={activeStoreProjects}
             scrolls={collectScrolls}
             visibleBrowser={visibleBrowser}
             onCollect={collectProducts}
@@ -3161,6 +3171,7 @@ function App() {
             onManualUrlChange={setManualUrl}
             onProjectNameChange={setProjectName}
             onScrollsChange={setCollectScrolls}
+            onSelectProject={selectProject}
             onVisibleBrowserChange={setVisibleBrowser}
             blockedSourceUrls={blockedSourceUrls}
             onRemoveBlockedUrl={removeBlockedUrl}
@@ -3214,6 +3225,8 @@ function App() {
               setDetailsOpen(true);
             }}
             onSelectProduct={setSelectedProductId}
+            projects={activeStoreProjects}
+            onSelectProject={selectProject}
           />
         )}
 
@@ -3981,6 +3994,90 @@ function StorePicker({
   );
 }
 
+function ProjectPicker({
+  activeProject,
+  projects,
+  onChange,
+  variant = "inline",
+}: {
+  activeProject?: Project;
+  projects: Project[];
+  onChange: (projectId: string) => void;
+  variant?: "inline" | "sidebar";
+}) {
+  const [open, setOpen] = useState(false);
+  const pickerRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    function handleDocumentClick(event: MouseEvent) {
+      if (!pickerRef.current?.contains(event.target as Node)) setOpen(false);
+    }
+    function handleEscape(event: KeyboardEvent) {
+      if (event.key === "Escape") setOpen(false);
+    }
+    document.addEventListener("mousedown", handleDocumentClick);
+    document.addEventListener("keydown", handleEscape);
+    return () => {
+      document.removeEventListener("mousedown", handleDocumentClick);
+      document.removeEventListener("keydown", handleEscape);
+    };
+  }, [open]);
+
+  return (
+    <div className={variant === "sidebar" ? "project-picker sidebar" : "project-picker inline"} ref={pickerRef}>
+      <div className="project-picker-control">
+        <button
+          className="project-picker-button"
+          type="button"
+          onClick={() => setOpen((value) => !value)}
+          aria-expanded={open}
+          disabled={!projects.length}
+        >
+          <FolderOpen size={16} aria-hidden="true" />
+          <span>{activeProject?.name ?? (projects.length ? "Selecionar projeto" : "Nenhum projeto")}</span>
+          <ChevronDown size={16} aria-hidden="true" />
+        </button>
+        {open && projects.length > 0 && (
+          <div className="project-picker-menu" role="listbox">
+            {projects.map((project) => {
+              const selected = project.id === activeProject?.id;
+              return (
+                <button
+                  className={selected ? "project-picker-option active" : "project-picker-option"}
+                  key={project.id}
+                  type="button"
+                  role="option"
+                  aria-selected={selected}
+                  onClick={() => {
+                    onChange(project.id);
+                    setOpen(false);
+                  }}
+                >
+                  <span className="project-picker-option-icon" aria-hidden="true">
+                    <FolderOpen size={15} />
+                  </span>
+                  <span className="project-picker-option-copy">
+                    <strong>{project.name}</strong>
+                    <small>{formatProjectDate(project.created_at)}</small>
+                  </span>
+                  {selected && <Check size={15} aria-hidden="true" />}
+                </button>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function formatProjectDate(value: string) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "Projeto";
+  return date.toLocaleDateString("pt-BR", { day: "2-digit", month: "short", year: "numeric" });
+}
+
 function CollectTab({
   activeProject,
   activeStoreProfile,
@@ -3992,6 +4089,7 @@ function CollectTab({
   manualUrl,
   productCount,
   projectName,
+  projects,
   scrolls,
   visibleBrowser,
   onCollect,
@@ -4004,6 +4102,7 @@ function CollectTab({
   onManualUrlChange,
   onProjectNameChange,
   onScrollsChange,
+  onSelectProject,
   onVisibleBrowserChange,
   blockedSourceUrls,
   onRemoveBlockedUrl,
@@ -4018,6 +4117,7 @@ function CollectTab({
   manualUrl: string;
   productCount: number;
   projectName: string;
+  projects: Project[];
   scrolls: number;
   visibleBrowser: boolean;
   onCollect: () => void;
@@ -4030,6 +4130,7 @@ function CollectTab({
   onManualUrlChange: (value: string) => void;
   onProjectNameChange: (value: string) => void;
   onScrollsChange: (value: number) => void;
+  onSelectProject: (projectId: string) => void;
   onVisibleBrowserChange: (value: boolean) => void;
   blockedSourceUrls: BlockedSourceUrl[];
   onRemoveBlockedUrl: (entryId: string) => void;
@@ -4047,8 +4148,18 @@ function CollectTab({
         </div>
 
         <div className="form-grid">
+          <label className="full-span project-active-field">
+            Projeto ativo
+            <ProjectPicker activeProject={activeProject} projects={projects} onChange={onSelectProject} />
+            <small>
+              {activeProject
+                ? `${productCount} produto(s) neste projeto · ${blockedSourceUrls.length} URL(s) bloqueada(s)`
+                : "Selecione ou crie um projeto para coletar."}
+            </small>
+          </label>
+
           <label>
-            Nome do projeto
+            Nome do novo projeto
             <input value={projectName} onChange={(event) => onProjectNameChange(event.target.value)} />
           </label>
 
@@ -4396,6 +4507,9 @@ function CostsProductCell({ product }: { product: Product }) {
   );
 }
 
+const COSTS_TABLE_ROW_BATCH = 28;
+const COSTS_TABLE_SCROLL_THRESHOLD = 160;
+
 function CostsTab({
   activeStoreProfile,
   busy,
@@ -4422,6 +4536,8 @@ function CostsTab({
   const [savedOtherCostsRows, setSavedOtherCostsRows] = useState<Record<string, number>>({});
   const [searchQuery, setSearchQuery] = useState("");
   const [saveStatus, setSaveStatus] = useState<"saved" | "pending" | "saving" | "error">("saved");
+  const [renderedRowCount, setRenderedRowCount] = useState(COSTS_TABLE_ROW_BATCH);
+  const tableScrollRef = useRef<HTMLDivElement>(null);
   const otherCostsRowsRef = useRef(otherCostsRows);
   const savedOtherCostsRowsRef = useRef(savedOtherCostsRows);
   const savingRef = useRef(false);
@@ -4537,6 +4653,39 @@ function CostsTab({
       totalGrams: totalFilamentGrams(breakdown, product),
     };
   });
+  const visibleTableRows = tableRows.slice(0, renderedRowCount);
+  const hasMoreRows = renderedRowCount < tableRows.length;
+
+  useEffect(() => {
+    setRenderedRowCount(COSTS_TABLE_ROW_BATCH);
+    tableScrollRef.current?.scrollTo({ top: 0 });
+  }, [searchQuery, products]);
+
+  useEffect(() => {
+    const container = tableScrollRef.current;
+    if (!container || !hasMoreRows) return;
+
+    function maybeLoadMore() {
+      const node = tableScrollRef.current;
+      if (!node) return;
+      const nearBottom = node.scrollTop + node.clientHeight >= node.scrollHeight - COSTS_TABLE_SCROLL_THRESHOLD;
+      if (nearBottom) {
+        setRenderedRowCount((count) => Math.min(tableRows.length, count + COSTS_TABLE_ROW_BATCH));
+      }
+    }
+
+    maybeLoadMore();
+    container.addEventListener("scroll", maybeLoadMore, { passive: true });
+    return () => container.removeEventListener("scroll", maybeLoadMore);
+  }, [hasMoreRows, renderedRowCount, tableRows.length]);
+
+  useEffect(() => {
+    const el = tableScrollRef.current;
+    if (!el || !hasMoreRows) return;
+    if (el.scrollHeight <= el.clientHeight + 1) {
+      setRenderedRowCount((count) => Math.min(tableRows.length, count + COSTS_TABLE_ROW_BATCH));
+    }
+  }, [hasMoreRows, renderedRowCount, tableRows.length, visibleTableRows.length]);
 
   const totals = tableRows.reduce(
     (acc, row) => ({
@@ -4590,12 +4739,13 @@ function CostsTab({
             {filteredProducts.length === products.length
               ? `${products.length} produto(s)`
               : `${filteredProducts.length} de ${products.length} produto(s)`}
+            {hasMoreRows ? ` · exibindo ${visibleTableRows.length}` : ""}
           </span>
         </div>
         <div className="costs-toolbar">
           <AutosaveIndicator status={saveStatus} />
         </div>
-        <div className="costs-table-wrap">
+        <div className="costs-table-scroll" ref={tableScrollRef}>
           <table className="costs-table costs-table-detailed">
             <colgroup>
               <col className="col-product" />
@@ -4634,7 +4784,7 @@ function CostsTab({
               </tr>
             </thead>
             <tbody>
-              {tableRows.map(({ product, plates, breakdown, otherDraft, isDirty, totalGrams }) => (
+              {visibleTableRows.map(({ product, plates, breakdown, otherDraft, isDirty, totalGrams }) => (
                 <tr key={product.id} className={isDirty ? "costs-row-dirty" : undefined}>
                   <td className="costs-product-cell">
                     <CostsProductCell product={product} />
@@ -4693,10 +4843,17 @@ function CostsTab({
                   </td>
                 </tr>
               ))}
+              {hasMoreRows && (
+                <tr className="costs-table-load-more">
+                  <td colSpan={15}>
+                    Role para carregar mais produtos ({visibleTableRows.length} de {tableRows.length})
+                  </td>
+                </tr>
+              )}
             </tbody>
             <tfoot>
               <tr>
-                <th colSpan={5}>Totais</th>
+                <th colSpan={5}>Totais ({tableRows.length} produto(s))</th>
                 <th className="costs-num">{formatBrl(Math.round(totals.filament * 100) / 100)}</th>
                 <th className="costs-num">{formatBrl(Math.round(totals.energy * 100) / 100)}</th>
                 <th className="costs-num">{formatBrl(Math.round(totals.depreciation * 100) / 100)}</th>
@@ -4763,6 +4920,8 @@ function ProductsTab({
   onSelectedProductIdsChange,
   onSelectedColorVariationsChange,
   onSelectProduct,
+  projects,
+  onSelectProject,
 }: {
   activeProject?: Project;
   batchProgress: BatchProgress;
@@ -4806,6 +4965,8 @@ function ProductsTab({
   onSelectedProductIdsChange: (ids: string[]) => void;
   onSelectedColorVariationsChange: (ids: string[]) => void;
   onSelectProduct: (id: string) => void;
+  projects: Project[];
+  onSelectProject: (projectId: string) => void;
 }) {
   const [fullscreenAsset, setFullscreenAsset] = useState<Asset | null>(null);
   const [imageExtraPrompts, setImageExtraPrompts] = useState<Record<string, string>>({});
@@ -4966,13 +5127,16 @@ function ProductsTab({
         <div className="panel-title">
           <ShoppingBag size={18} />
           <h2>Produtos capturados</h2>
-          <button
-            className="primary panel-title-action"
-            onClick={openManualProductDialog}
-            disabled={!activeProject || busy}
-          >
-            <Plus size={16} /> Novo produto
-          </button>
+          <div className="panel-title-actions">
+            <ProjectPicker activeProject={activeProject} projects={projects} onChange={onSelectProject} />
+            <button
+              className="primary panel-title-action"
+              onClick={openManualProductDialog}
+              disabled={!activeProject || busy}
+            >
+              <Plus size={16} /> Novo produto
+            </button>
+          </div>
         </div>
         <div className="product-filters">
           <label>
