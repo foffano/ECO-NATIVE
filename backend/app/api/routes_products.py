@@ -9,8 +9,11 @@ from pydantic import BaseModel
 
 from backend.app.db.models import Asset, Listing, PrintPlate, Product, ProductStatus, StudioState, now_iso
 from backend.app.db.store import store
+from backend.app.services.cover_image import CoverImageError, cover_r2_public_url, normalize_cover_to_jpeg, validate_cover_bytes
+from backend.app.services.cloudflare_r2 import r2_configured
 from backend.app.services.product_paths import (
     MODEL_FILE_SUFFIXES,
+    cover_image_filename,
     extra_model_filename,
     is_model_asset_kind,
     model_filename,
@@ -33,6 +36,8 @@ from backend.app.services.store_profiles import get_store_profile
 router = APIRouter()
 
 MAX_MODEL_FILE_BYTES = 50 * 1024 * 1024
+MAX_COVER_IMAGE_BYTES = 15 * 1024 * 1024
+COVER_IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp"}
 
 
 class ProductCreate(BaseModel):
@@ -319,6 +324,61 @@ async def upload_model_file(product_id: str, file: UploadFile = File(...)) -> Pr
     )
     if product.metadata.get("model_download_error"):
         product.metadata.pop("model_download_error", None)
+    return store.upsert_product(product)
+
+
+@router.post("/{product_id}/cover-image")
+async def upload_cover_image(product_id: str, file: UploadFile = File(...)) -> Product:
+    state = store.load()
+    product = next((p for p in state.products if p.id == product_id), None)
+    if not product:
+        raise HTTPException(status_code=404, detail="Produto nao encontrado")
+
+    original_name = Path(file.filename or "capa.jpg").name
+    suffix = Path(original_name).suffix.lower() or ".jpg"
+    if suffix not in COVER_IMAGE_SUFFIXES:
+        raise HTTPException(status_code=400, detail="Formato nao suportado. Use arquivos JPG, PNG ou WEBP.")
+
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="Arquivo vazio.")
+    if len(content) > MAX_COVER_IMAGE_BYTES:
+        raise HTTPException(status_code=400, detail="Imagem maior que 15MB.")
+
+    project = next((item for item in state.projects if item.id == product.project_id), None)
+    store_profile = get_store_profile(project.store_profile_id if project else None)
+    ensure_product_sku(product, state.products, project, store_profile)
+    sku = str(product.metadata.get("sku") or "").strip()
+    if not sku:
+        raise HTTPException(status_code=400, detail="SKU do produto nao encontrado.")
+
+    folder = product_folder(product)
+    folder.mkdir(parents=True, exist_ok=True)
+    output_path = folder / cover_image_filename(sku)
+    output_path.write_bytes(content)
+
+    try:
+        validate_cover_bytes(output_path.read_bytes(), output_path)
+        normalize_cover_to_jpeg(output_path)
+        validate_cover_bytes(output_path.read_bytes(), output_path)
+    except CoverImageError as exc:
+        output_path.unlink(missing_ok=True)
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    cover = next((asset for asset in product.assets if asset.kind == "cover_image"), None)
+    if cover:
+        cover.path = str(output_path)
+    else:
+        cover = Asset(product_id=product.id, kind="cover_image", path=str(output_path))
+        product.assets.append(cover)
+
+    if r2_configured():
+        try:
+            cover.public_url = cover_r2_public_url(product, cover)
+        except CoverImageError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    product.updated_at = now_iso()
     return store.upsert_product(product)
 
 

@@ -1,5 +1,5 @@
 param(
-    [string]$Version = "0.1.23",
+    [string]$Version = "0.1.24",
     [string]$ReleaseDir = "$env:USERPROFILE\ECO-NATIVE-release"
 )
 
@@ -16,13 +16,14 @@ $headers = @{
 
 $releaseBody = @"
 ## Resumo
-- Seletor de projeto ativo nas abas Coleta e Produtos
-- Lista de bloqueio permanece vinculada ao projeto selecionado
-- Tabela de custos com scroll interno, cabecalho fixo e carregamento progressivo
+- Capa capturada sempre enviada ao R2 antes de gerar imagens com IA
+- Troca manual da foto de capa na aba Imagens do produto
+- Endpoint novo para upload de capa com normalizacao para JPEG
 
 ## Test plan
-- [ ] Criar dois projetos, bloquear URLs em um e alternar pelo seletor
-- [ ] Rolar a tabela de custos e conferir cabecalho fixo e linhas carregando aos poucos
+- [ ] Trocar capa manualmente em Detalhes > Imagens e confirmar preview atualizado
+- [ ] Gerar imagens base com R2 configurado e validar job concluido
+- [ ] Confirmar auto-update em Ajustes > Verificar atualizacoes
 "@
 
 $releasePayload = @{

@@ -7,7 +7,7 @@ from backend.app.core.settings import get_settings
 from backend.app.db.models import Asset, Product
 from backend.app.services.cloudflare_r2 import upload_file_to_r2
 from backend.app.services.cost_tracker import add_kie_image_cost
-from backend.app.services.cover_image import ensure_product_cover
+from backend.app.services.cover_image import cover_r2_public_url, ensure_product_cover
 from backend.app.services.http_client import HttpResponseError, download as http_download, read_response_json, read_response_text, request as http_request
 from backend.app.services.image_options import color_description_map
 from backend.app.services.product_paths import (
@@ -31,11 +31,10 @@ def r2_key_prefix(product: Product) -> str:
 
 
 def asset_public_url(product: Product, asset: Asset) -> str:
+    if asset.kind == "cover_image":
+        return cover_r2_public_url(product, asset)
     if asset.public_url:
         return asset.public_url
-    metadata_url = product.metadata.get("image_url")
-    if asset.kind == "cover_image" and isinstance(metadata_url, str) and metadata_url.startswith("http"):
-        return metadata_url
     return upload_file_to_r2(asset.path, r2_key_prefix(product))
 
 

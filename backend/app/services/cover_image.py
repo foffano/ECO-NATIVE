@@ -175,19 +175,28 @@ def ensure_product_cover(product: Product) -> Asset:
         raise CoverImageError(f"Falha ao preparar capa ({path.name}): {exc}") from exc
 
     validate_cover_bytes(path.read_bytes(), path)
-
-    if r2_configured():
-        makerworld_url = source_url or ""
-        should_upload = not cover.public_url or "makerworld" in makerworld_url.lower()
-        if should_upload or "makerworld" in str(cover.public_url or "").lower():
-            try:
-                cover.public_url = upload_file_to_r2(path, r2_key_prefix(product))
-            except Exception as exc:
-                logger.warning("Falha ao publicar capa no R2 para %s: %s", sku, exc)
-                if source_url:
-                    cover.public_url = source_url
-
     return cover
+
+
+def cover_r2_public_url(product: Product, cover: Asset | None = None) -> str:
+    """Publica a capa local no R2 e retorna a URL publica usada pela IA."""
+    if not r2_configured():
+        raise CoverImageError(
+            "Cloudflare R2 nao configurado. Configure R2 em Ajustes para enviar a capa capturada a IA."
+        )
+
+    cover = cover or ensure_product_cover(product)
+    path = Path(cover.path)
+    if not path.is_file():
+        raise CoverImageError("Capa local nao encontrada no disco.")
+
+    try:
+        public_url = upload_file_to_r2(path, r2_key_prefix(product), force=True)
+    except Exception as exc:
+        raise CoverImageError(f"Falha ao publicar capa no R2: {exc}") from exc
+
+    cover.public_url = public_url
+    return public_url
 
 
 def repair_product_cover(product: Product) -> Asset:

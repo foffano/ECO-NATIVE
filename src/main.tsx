@@ -278,6 +278,7 @@ type Product = {
   listing: Listing;
   assets: Asset[];
   metadata: Record<string, unknown>;
+  updated_at?: string;
 };
 
 type CostEvent = {
@@ -484,8 +485,10 @@ function isJobResult(value: unknown): value is Job {
   return Boolean(value && typeof value === "object" && "status" in value && "message" in value);
 }
 
-function assetUrl(asset: Asset): string {
-  return `${API_BASE}/api/assets/${asset.id}`;
+function assetUrl(asset: Asset, version?: string): string {
+  const base = `${API_BASE}/api/assets/${asset.id}`;
+  if (!version) return base;
+  return `${base}?v=${encodeURIComponent(version)}`;
 }
 
 function storePhotoUrl(profile?: StoreProfile): string | undefined {
@@ -2839,6 +2842,14 @@ function App() {
     });
   }
 
+  function uploadCoverImage(productId: string, file: File) {
+    return runAction("Atualizando capa do produto", async () => {
+      const updated = await apiUpload<Product>(`/api/products/${productId}/cover-image`, file);
+      patchProduct(updated);
+      return updated;
+    }, { refresh: false, blockUi: true, notifySuccess: true });
+  }
+
   function uploadModelFile(productId: string, file: File) {
     return runAction("Enviando arquivo 3D", async () => {
       const updated = await apiUpload<Product>(`/api/products/${productId}/model-files`, file);
@@ -3210,6 +3221,7 @@ function App() {
             onListingDraftChange={setListingDraft}
             onProductNameDraftChange={setProductNameDraft}
             onSaveListing={saveListing}
+            onUploadCoverImage={uploadCoverImage}
             onUploadModelFile={uploadModelFile}
             onUpdateProductListed={updateProductListed}
             onSavePrintPlates={(productId, plates) => runFluidAction("Salvando placas", () => savePrintPlates(productId, plates))}
@@ -4912,6 +4924,7 @@ function ProductsTab({
   onRegenerateImage,
   onSaveListing,
   onUpdateProductListed,
+  onUploadCoverImage,
   onUploadModelFile,
   onSavePrintPlates,
   filaments,
@@ -4957,6 +4970,7 @@ function ProductsTab({
   onRegenerateImage: (productId: string, promptKey: string, extraPrompt: string) => void;
   onSaveListing: () => Promise<unknown> | void;
   onUpdateProductListed: (productId: string, listed: boolean) => void;
+  onUploadCoverImage: (productId: string, file: File) => void;
   onUploadModelFile: (productId: string, file: File) => void;
   onSavePrintPlates: (productId: string, plates: PrintPlate[]) => Promise<unknown>;
   filaments: FilamentSpool[];
@@ -5499,6 +5513,7 @@ function ProductsTab({
                   onExtraPromptChange={updateImageExtraPrompt}
                   onOpenImage={setFullscreenAsset}
                   onRegenerateImage={onRegenerateImage}
+                  onUploadCoverImage={onUploadCoverImage}
                 />
                 <div className="image-generation-options">
                   <div className="subsection-title">Variações de cor</div>
@@ -5829,6 +5844,7 @@ function ProductImageGallery({
   onExtraPromptChange,
   onOpenImage,
   onRegenerateImage,
+  onUploadCoverImage,
 }: {
   busy: boolean;
   extraPrompts: Record<string, string>;
@@ -5836,20 +5852,28 @@ function ProductImageGallery({
   onExtraPromptChange: (promptKey: string, value: string) => void;
   onOpenImage: (asset: Asset) => void;
   onRegenerateImage: (productId: string, promptKey: string, extraPrompt: string) => void;
+  onUploadCoverImage: (productId: string, file: File) => void;
 }) {
+  const coverFileInputRef = useRef<HTMLInputElement>(null);
   const images = getImageAssets(product);
   const capturedImages = images.filter((asset) => asset.kind === "cover_image");
   const baseImages = images.filter((asset) => asset.kind.startsWith("generated_"));
   const colorImages = images.filter((asset) => asset.kind.startsWith("color_"));
   const mainImage = baseImages[0] ?? capturedImages[0] ?? colorImages[0];
   const colorSkus = productColorSkus(product);
+  const imageVersion = product.updated_at;
+
+  function handleCoverFileSelected(file?: File) {
+    if (!file) return;
+    onUploadCoverImage(product.id, file);
+  }
 
   return (
     <div className="product-gallery">
       <div className="gallery-main">
         {mainImage ? (
           <button className="gallery-main-button" onClick={() => onOpenImage(mainImage)}>
-            <img src={assetUrl(mainImage)} alt="" />
+            <img src={assetUrl(mainImage, imageVersion)} alt="" />
           </button>
         ) : (
           <div className="gallery-placeholder">
@@ -5859,13 +5883,47 @@ function ProductImageGallery({
         )}
       </div>
       <div className="gallery-groups">
-        <GalleryGroup assets={capturedImages} emptyText="Imagem capturada aparecerá aqui." onOpenImage={onOpenImage} title="Capturada" />
+        <div className="gallery-group">
+          <div className="gallery-group-head">
+            <div className="gallery-group-title">Capturada</div>
+            <button
+              className="gallery-cover-upload"
+              disabled={busy}
+              onClick={() => coverFileInputRef.current?.click()}
+              title="Substituir a foto de capa capturada"
+            >
+              <Upload size={14} /> Trocar capa
+            </button>
+            <input
+              ref={coverFileInputRef}
+              accept="image/jpeg,image/png,image/webp,.jpg,.jpeg,.png,.webp"
+              hidden
+              type="file"
+              onChange={(event) => {
+                handleCoverFileSelected(event.target.files?.[0]);
+                event.currentTarget.value = "";
+              }}
+            />
+          </div>
+          <GalleryGroup
+            assets={capturedImages}
+            bare
+            emptyText="Envie uma capa ou colete o produto no MakerWorld."
+            imageVersion={imageVersion}
+            onOpenImage={onOpenImage}
+            title=""
+          />
+          <small className="gallery-cover-note">
+            A capa local é enviada ao R2 antes de gerar imagens com IA.
+          </small>
+        </div>
         <GalleryGroup
           allowRegenerate
           assets={baseImages}
           busy={busy}
           emptyText="Use o botão Imagens base para gerar."
           extraPrompts={extraPrompts}
+          imageVersion={imageVersion}
           productId={product.id}
           skuByKey={colorSkus}
           title="Imagens base IA"
@@ -5879,6 +5937,7 @@ function ProductImageGallery({
           busy={busy}
           emptyText="Escolha cores e use Gerar cores."
           extraPrompts={extraPrompts}
+          imageVersion={imageVersion}
           productId={product.id}
           skuByKey={colorSkus}
           title="Variações de cor"
@@ -5894,9 +5953,11 @@ function ProductImageGallery({
 function GalleryGroup({
   allowRegenerate = false,
   assets,
+  bare = false,
   busy = false,
   emptyText,
   extraPrompts = {},
+  imageVersion,
   productId,
   skuByKey = {},
   onExtraPromptChange,
@@ -5906,9 +5967,11 @@ function GalleryGroup({
 }: {
   allowRegenerate?: boolean;
   assets: Asset[];
+  bare?: boolean;
   busy?: boolean;
   emptyText: string;
   extraPrompts?: Record<string, string>;
+  imageVersion?: string;
   productId?: string;
   skuByKey?: Record<string, string>;
   onExtraPromptChange?: (promptKey: string, value: string) => void;
@@ -5918,9 +5981,9 @@ function GalleryGroup({
 }) {
   const [activeRegenerateKey, setActiveRegenerateKey] = useState("");
 
-  return (
-    <div className="gallery-group">
-      <div className="gallery-group-title">{title}</div>
+  const content = (
+    <>
+      {title ? <div className="gallery-group-title">{title}</div> : null}
       <div className="gallery-strip">
         {assets.map((asset) => {
           const promptKey = asset.kind.replace(/^generated_/, "");
@@ -5932,7 +5995,7 @@ function GalleryGroup({
             <div className="gallery-thumb" key={asset.id}>
               <div className="thumb-image-frame">
                 <button className="thumb-open" onClick={() => onOpenImage(asset)}>
-                  <img src={assetUrl(asset)} alt="" />
+                  <img src={assetUrl(asset, imageVersion)} alt="" />
                 </button>
                 {allowRegenerate && productId && onRegenerateImage && onExtraPromptChange && (
                   <button
@@ -5971,8 +6034,11 @@ function GalleryGroup({
         })}
         {!assets.length && <div className="gallery-note">{emptyText}</div>}
       </div>
-    </div>
+    </>
   );
+
+  if (bare) return content;
+  return <div className="gallery-group">{content}</div>;
 }
 
 function IconAction({

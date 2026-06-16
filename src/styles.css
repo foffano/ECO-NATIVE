@@ -3630,6 +3630,42 @@ textarea {
   font-weight: 800;
 }
 
+.gallery-group-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.gallery-cover-upload {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+  padding: 6px 10px;
+  color: var(--eco-forest-2);
+  font-size: 12px;
+  font-weight: 700;
+  background: var(--eco-soft-2);
+  border: 1px solid var(--eco-border);
+  border-radius: 8px;
+}
+
+.gallery-cover-upload:hover:not(:disabled) {
+  background: var(--eco-soft);
+}
+
+.gallery-cover-upload:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.gallery-cover-note {
+  color: var(--eco-muted);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
 .gallery-strip {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(104px, 1fr));
