@@ -1,5 +1,5 @@
 param(
-    [string]$Version = "0.1.25",
+    [string]$Version = "0.1.26",
     [string]$ReleaseDir = "$env:USERPROFILE\ECO-NATIVE-release"
 )
 
@@ -16,14 +16,13 @@ $headers = @{
 
 $releaseBody = @"
 ## Resumo
-- Corrige app que nao abria apos auto-update (processos eco-native-api orfaos)
-- Encerra API antiga antes de iniciar e antes de instalar atualizacao
-- Exibe mensagem de erro com caminho do log quando a API local falha
+- Corrige erro ao abrir: stdio invalido ao iniciar a API local (v0.1.25)
+- Mantem encerramento de processos eco-native-api orfaos e log em backend.log
 
 ## Test plan
-- [ ] Atualizar de 0.1.24 para 0.1.25 e confirmar que o app abre
-- [ ] Encerrar eco-native-api no Gerenciador de Tarefas e abrir o app novamente
-- [ ] Conferir backend.log em %APPDATA%\eco-native-studio se houver falha
+- [ ] Abrir o app instalado e confirmar que a janela aparece
+- [ ] Verificar health em http://127.0.0.1:8765/health
+- [ ] Atualizar via auto-update de 0.1.25 para 0.1.26
 "@
 
 $releasePayload = @{

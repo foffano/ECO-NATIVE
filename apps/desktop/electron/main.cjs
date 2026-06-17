@@ -16,7 +16,7 @@ const DEFAULT_WINDOW_BACKGROUND = "#f4f8f0";
 
 let mainWindow = null;
 let backendProcess = null;
-let backendLogStream = null;
+let backendLogFd = null;
 
 function backendExecutablePath() {
   const executableName = process.platform === "win32" ? "eco-native-api.exe" : "eco-native-api";
@@ -77,13 +77,17 @@ function killOrphanBackendProcesses() {
 }
 
 function stopManagedBackend() {
-  if (backendLogStream) {
-    backendLogStream.end();
-    backendLogStream = null;
-  }
   if (backendProcess) {
     backendProcess.kill();
     backendProcess = null;
+  }
+  if (backendLogFd !== null) {
+    try {
+      fs.closeSync(backendLogFd);
+    } catch {
+      // log file already closed
+    }
+    backendLogFd = null;
   }
 }
 
@@ -100,18 +104,29 @@ function startBackend() {
     PLAYWRIGHT_BROWSERS_PATH: path.join(process.resourcesPath, "playwright-browsers"),
   };
 
-  backendLogStream = fs.createWriteStream(backendLogPath(), { flags: "a" });
-  backendLogStream.write(`\n--- backend start ${new Date().toISOString()} ---\n`);
+  const logPath = backendLogPath();
+  fs.appendFileSync(logPath, `\n--- backend start ${new Date().toISOString()} ---\n`);
+  backendLogFd = fs.openSync(logPath, "a");
 
   backendProcess = spawn(backendExecutablePath(), [], {
     env,
-    stdio: ["ignore", backendLogStream, backendLogStream],
+    stdio: ["ignore", backendLogFd, backendLogFd],
     windowsHide: true,
   });
 
   backendProcess.on("exit", (code, signal) => {
-    if (backendLogStream) {
-      backendLogStream.write(`--- backend exit code=${code ?? "null"} signal=${signal ?? "null"} ---\n`);
+    try {
+      fs.appendFileSync(logPath, `--- backend exit code=${code ?? "null"} signal=${signal ?? "null"} ---\n`);
+    } catch {
+      // ignore log write errors on shutdown
+    }
+    if (backendLogFd !== null) {
+      try {
+        fs.closeSync(backendLogFd);
+      } catch {
+        // log file already closed
+      }
+      backendLogFd = null;
     }
     backendProcess = null;
   });
