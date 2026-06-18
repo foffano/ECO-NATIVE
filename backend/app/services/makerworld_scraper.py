@@ -87,6 +87,32 @@ def discover_model_urls(
 ) -> list[str]:
     target_url = build_search_url(keyword)
     urls: list[str] = []
+    seen: set[str] = set()
+    # Com muitos scrolls o usuario quer alcancar produtos mais abaixo na lista.
+    # O teto precisa escalar com os scrolls, senao os primeiros links (do topo,
+    # normalmente ja capturados) preenchem o limite e os novos nunca retornam.
+    effective_max = max(max_urls, max(scrolls, 1) * 30)
+
+    def harvest(page) -> int:
+        """Coleta os links visiveis no DOM agora, acumulando sem duplicar."""
+        hrefs = page.eval_on_selector_all(
+            "a[href*='/models/']",
+            """elements => elements
+                .map(element => element.getAttribute('href'))
+                .filter(Boolean)
+            """,
+        )
+        added = 0
+        for href in hrefs:
+            if not isinstance(href, str) or not re.search(r"/models/\d+", href):
+                continue
+            normalized = clean_makerworld_url(href)
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            urls.append(normalized)
+            added += 1
+        return added
 
     with sync_playwright() as playwright:
         browser = open_makerworld_context(playwright, headless=headless)
@@ -100,29 +126,27 @@ def discover_model_urls(
                 raise RuntimeError("MakerWorld bloqueou navegador headless com Cloudflare. Use navegador visivel.")
             page.wait_for_timeout(20_000)
 
+        # Coleta inicial (antes de rolar) e a cada rolagem, para nao perder
+        # itens que a lista virtualizada remove do DOM ao sair da tela.
+        harvest(page)
+        stagnant_rounds = 0
         for _ in range(max(scrolls, 1)):
-            page.keyboard.press("PageDown")
-            page.wait_for_timeout(900)
+            previous_height = page.evaluate("() => document.body.scrollHeight")
+            page.keyboard.press("End")
+            page.mouse.wheel(0, 5000)
+            page.wait_for_timeout(1200)
+            harvest(page)
+            new_height = page.evaluate("() => document.body.scrollHeight")
+            if new_height <= previous_height:
+                stagnant_rounds += 1
+            else:
+                stagnant_rounds = 0
+            if len(urls) >= effective_max or stagnant_rounds >= 5:
+                break
 
-        hrefs = page.eval_on_selector_all(
-            "a[href*='/models/']",
-            """elements => elements
-                .map(element => element.getAttribute('href'))
-                .filter(Boolean)
-            """,
-        )
         browser.close()
 
-    for href in hrefs:
-        if not isinstance(href, str) or not re.search(r"/models/\d+", href):
-            continue
-        normalized = clean_makerworld_url(href)
-        if normalized not in urls:
-            urls.append(normalized)
-        if len(urls) >= max_urls:
-            break
-
-    return urls
+    return urls[:effective_max]
 
 
 def scrape_product_urls(

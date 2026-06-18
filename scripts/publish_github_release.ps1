@@ -1,5 +1,5 @@
 param(
-    [string]$Version = "0.1.26",
+    [string]$Version = "0.1.27",
     [string]$ReleaseDir = "$env:USERPROFILE\ECO-NATIVE-release"
 )
 
@@ -16,13 +16,14 @@ $headers = @{
 
 $releaseBody = @"
 ## Resumo
-- Corrige erro ao abrir: stdio invalido ao iniciar a API local (v0.1.25)
-- Mantem encerramento de processos eco-native-api orfaos e log em backend.log
+- Corrige a busca de novos produtos: links agora sao coletados a cada rolagem (resistente a lista virtualizada do MakerWorld)
+- O teto de links descobertos escala com o numero de scrolls, entao rolagens profundas alcancam produtos novos em vez de retornar 0
+- Rolagem mais confiavel com parada automatica quando a lista deixa de crescer
 
 ## Test plan
-- [ ] Abrir o app instalado e confirmar que a janela aparece
-- [ ] Verificar health em http://127.0.0.1:8765/health
-- [ ] Atualizar via auto-update de 0.1.25 para 0.1.26
+- [ ] Rodar uma coleta com muitos scrolls em um projeto com varios produtos ja capturados
+- [ ] Confirmar que o log mostra links novos em vez de apenas "ja coletado(s) ignorado(s)"
+- [ ] Atualizar via auto-update de 0.1.26 para 0.1.27
 "@
 
 $releasePayload = @{
