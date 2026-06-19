@@ -1,5 +1,5 @@
 param(
-    [string]$Version = "0.1.27",
+    [string]$Version = "0.1.28",
     [string]$ReleaseDir = "$env:USERPROFILE\ECO-NATIVE-release"
 )
 
@@ -16,14 +16,15 @@ $headers = @{
 
 $releaseBody = @"
 ## Resumo
-- Corrige a busca de novos produtos: links agora sao coletados a cada rolagem (resistente a lista virtualizada do MakerWorld)
-- O teto de links descobertos escala com o numero de scrolls, entao rolagens profundas alcancam produtos novos em vez de retornar 0
-- Rolagem mais confiavel com parada automatica quando a lista deixa de crescer
+- Corrige a janela de login do MakerWorld no app instalado: o botao "logar" agora abre o navegador de verdade
+- No app empacotado o login reexecuta o proprio binario em modo login, em vez de tentar "-m modulo" (que abria um servidor backend orfao e nenhuma janela)
+- Elimina os processos eco-native-api orfaos gerados ao clicar em logar
 
 ## Test plan
-- [ ] Rodar uma coleta com muitos scrolls em um projeto com varios produtos ja capturados
-- [ ] Confirmar que o log mostra links novos em vez de apenas "ja coletado(s) ignorado(s)"
-- [ ] Atualizar via auto-update de 0.1.26 para 0.1.27
+- [ ] No app instalado, clicar em "logar no MakerWorld" e confirmar que o navegador abre
+- [ ] Concluir o login e verificar que a coleta reconhece a sessao
+- [ ] Conferir que nao sobram processos eco-native-api orfaos
+- [ ] Atualizar via auto-update de 0.1.27 para 0.1.28
 "@
 
 $releasePayload = @{

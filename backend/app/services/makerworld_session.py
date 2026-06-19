@@ -42,9 +42,21 @@ def open_login_session() -> MakerWorldSessionStatus:
             message="Sessão MakerWorld já está aberta em uma janela separada.",
         )
 
+    env = os.environ.copy()
+    if getattr(sys, "frozen", False):
+        # App empacotado: reexecuta o proprio binario em modo login, ja que ele
+        # nao suporta "-m modulo" e abriria outro servidor backend orfao.
+        args = [sys.executable, "--makerworld-login"]
+        env["ECO_NATIVE_MODE"] = "makerworld-login"
+        cwd = None
+    else:
+        args = [sys.executable, "-m", "backend.app.services.makerworld_login_window"]
+        cwd = str(PROJECT_ROOT) if PROJECT_ROOT else None
+
     process = subprocess.Popen(
-        [sys.executable, "-m", "backend.app.services.makerworld_login_window"],
-        cwd=str(PROJECT_ROOT) if PROJECT_ROOT else None,
+        args,
+        cwd=cwd,
+        env=env,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0,
