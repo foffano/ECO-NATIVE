@@ -1,5 +1,5 @@
 param(
-    [string]$Version = "0.1.28",
+    [string]$Version = "0.1.29",
     [string]$ReleaseDir = "$env:USERPROFILE\ECO-NATIVE-release"
 )
 
@@ -16,15 +16,15 @@ $headers = @{
 
 $releaseBody = @"
 ## Resumo
-- Corrige a janela de login do MakerWorld no app instalado: o botao "logar" agora abre o navegador de verdade
-- No app empacotado o login reexecuta o proprio binario em modo login, em vez de tentar "-m modulo" (que abria um servidor backend orfao e nenhuma janela)
-- Elimina os processos eco-native-api orfaos gerados ao clicar em logar
+- Corrige bug de URL no Cloudflare R2: a imagem enviada para a IA podia apontar para um objeto que nao existia mais (bucket esvaziado), fazendo a geracao receber uma URL sem imagem
+- asset_public_url agora re-publica a imagem a partir do arquivo local; o re-upload so acontece se o objeto tiver sumido do bucket (head_object antes)
+- Esvaziar o bucket (purge-bucket) agora limpa os public_url gravados no store para o estado persistido nao apontar para objetos inexistentes
 
 ## Test plan
-- [ ] No app instalado, clicar em "logar no MakerWorld" e confirmar que o navegador abre
-- [ ] Concluir o login e verificar que a coleta reconhece a sessao
-- [ ] Conferir que nao sobram processos eco-native-api orfaos
-- [ ] Atualizar via auto-update de 0.1.27 para 0.1.28
+- [ ] Gerar imagens/variacoes de cor normalmente com o bucket populado
+- [ ] Esvaziar o bucket R2 e gerar variacoes de cor: a imagem base deve ser reenviada automaticamente e a IA receber uma URL valida
+- [ ] Conferir que apos o purge os assets ficam sem public_url no store
+- [ ] Atualizar via auto-update de 0.1.28 para 0.1.29
 "@
 
 $releasePayload = @{

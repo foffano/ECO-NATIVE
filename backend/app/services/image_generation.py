@@ -33,9 +33,19 @@ def r2_key_prefix(product: Product) -> str:
 def asset_public_url(product: Product, asset: Asset) -> str:
     if asset.kind == "cover_image":
         return cover_r2_public_url(product, asset)
+    # Re-publica a partir do arquivo local sempre que ele existir. upload_file_to_r2
+    # faz head_object antes, entao so reenvia se o objeto tiver sumido do bucket
+    # (ex.: bucket esvaziado). Evita mandar para a IA uma URL apontando para um
+    # objeto que nao existe mais.
+    if asset.path and Path(asset.path).is_file():
+        public_url = upload_file_to_r2(asset.path, r2_key_prefix(product))
+        asset.public_url = public_url
+        return public_url
     if asset.public_url:
         return asset.public_url
-    return upload_file_to_r2(asset.path, r2_key_prefix(product))
+    raise RuntimeError(
+        "Asset sem arquivo local e sem URL publica valida para enviar a IA."
+    )
 
 
 def existing_asset_public_url(product: Product, kind: str, path: Path) -> str | None:
