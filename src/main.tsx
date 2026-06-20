@@ -4993,11 +4993,12 @@ function ProductsTab({
   const [plateDrafts, setPlateDrafts] = useState<PrintPlate[]>([]);
   const [savedPlates, setSavedPlates] = useState<PrintPlate[]>([]);
   const modelFileInputRef = useRef<HTMLInputElement>(null);
-  const [page, setPage] = useState(1);
-  const pageSize = 20;
-  const totalPages = Math.max(1, Math.ceil(products.length / pageSize));
-  const currentPage = Math.min(page, totalPages);
-  const paginatedProducts = products.slice((currentPage - 1) * pageSize, currentPage * pageSize);
+  const PRODUCT_CARD_BATCH = 20;
+  const [renderedCount, setRenderedCount] = useState(PRODUCT_CARD_BATCH);
+  const productListSentinelRef = useRef<HTMLDivElement>(null);
+  const visibleCount = Math.min(renderedCount, products.length);
+  const paginatedProducts = products.slice(0, visibleCount);
+  const hasMoreProducts = visibleCount < products.length;
   const visibleProductIds = paginatedProducts.map((product) => product.id);
   const allSelected = visibleProductIds.length > 0 && visibleProductIds.every((id) => selectedProductIds.includes(id));
   const progressValue = batchProgress ? Math.round((batchProgress.done / Math.max(batchProgress.total, 1)) * 100) : 0;
@@ -5012,12 +5013,24 @@ function ProductsTab({
   }, [selectedProduct?.id]);
 
   useEffect(() => {
-    setPage(1);
+    setRenderedCount(PRODUCT_CARD_BATCH);
   }, [filters.query, filters.status, filters.characteristic, totalProductCount]);
 
   useEffect(() => {
-    if (page > totalPages) setPage(totalPages);
-  }, [page, totalPages]);
+    if (!hasMoreProducts) return;
+    const sentinel = productListSentinelRef.current;
+    if (!sentinel) return;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) {
+          setRenderedCount((count) => Math.min(products.length, count + PRODUCT_CARD_BATCH));
+        }
+      },
+      { rootMargin: "200px" },
+    );
+    observer.observe(sentinel);
+    return () => observer.disconnect();
+  }, [hasMoreProducts, products.length, visibleCount]);
 
   useEffect(() => {
     if (!selectedProduct) {
@@ -5217,7 +5230,7 @@ function ProductsTab({
             </button>
           </div>
           <span className="selection-count">
-            {selectedProductIds.length} selecionado(s) - página {currentPage}/{totalPages} - {products.length}/{totalProductCount} visíveis
+            {selectedProductIds.length} selecionado(s) - {visibleCount}/{products.length} carregados - {products.length}/{totalProductCount} visíveis
           </span>
         </div>
         {batchProgress && (
@@ -5301,23 +5314,9 @@ function ProductsTab({
           })}
           {!products.length && <p className="empty table-empty">Nenhum produto encontrado com os filtros atuais.</p>}
         </div>
-        {products.length > pageSize && (
-          <div className="pagination-bar">
-            <button className="quiet-button" onClick={() => setPage(1)} disabled={currentPage === 1 || busy}>
-              Primeira
-            </button>
-            <button className="quiet-button" onClick={() => setPage((value) => Math.max(1, value - 1))} disabled={currentPage === 1 || busy}>
-              Anterior
-            </button>
-            <span>
-              Página {currentPage} de {totalPages} · {paginatedProducts.length} de {products.length} produto(s)
-            </span>
-            <button className="quiet-button" onClick={() => setPage((value) => Math.min(totalPages, value + 1))} disabled={currentPage === totalPages || busy}>
-              Próxima
-            </button>
-            <button className="quiet-button" onClick={() => setPage(totalPages)} disabled={currentPage === totalPages || busy}>
-              Última
-            </button>
+        {hasMoreProducts && (
+          <div className="product-list-load-more" ref={productListSentinelRef}>
+            Role para carregar mais produtos ({visibleCount} de {products.length})
           </div>
         )}
       </div>

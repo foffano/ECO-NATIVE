@@ -834,6 +834,16 @@ button:disabled {
   gap: 8px;
 }
 
+.product-list-load-more {
+  margin-top: 8px;
+  padding: 14px 10px;
+  text-align: center;
+  color: var(--eco-muted);
+  font-size: 12px;
+  background: var(--eco-soft);
+  border-radius: 10px;
+}
+
 .product-card {
   display: grid;
   grid-template-columns: auto 76px minmax(0, 1fr) minmax(88px, auto) auto;
