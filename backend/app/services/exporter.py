@@ -184,7 +184,7 @@ def _base_row(product: Product, gallery: list[str]) -> dict[str, str]:
     return row
 
 
-def build_product_rows(product: Product) -> list[dict[str, str]]:
+def build_product_rows(product: Product, integration_no: int) -> list[dict[str, str]]:
     gallery = gallery_image_urls(product)
     color_urls = color_image_map(product)
     colors = ordered_variation_colors(product, color_urls)
@@ -194,9 +194,10 @@ def build_product_rows(product: Product) -> list[dict[str, str]]:
 
     color_skus = ensure_color_skus(product, colors)
     rows: list[dict[str, str]] = []
-    for index, color_id in enumerate(colors, start=1):
+    for color_id in colors:
         row = _base_row(product, gallery)
-        row["Número de Integração de Variação"] = str(index)
+        # Mesmo numero de integracao para todas as variacoes do mesmo produto.
+        row["Número de Integração de Variação"] = str(integration_no)
         row["Nome da Variação 1"] = VARIATION_NAME
         row["Opção para Variação 1"] = color_display_name(color_id)
         row["Imagem por Variação"] = color_urls.get(color_id, "")
@@ -227,11 +228,11 @@ def export_marketplace_csv(
     with output.open("w", newline="", encoding="utf-8-sig") as handle:
         writer = csv.DictWriter(handle, fieldnames=SHOPEE_HEADERS, delimiter=";")
         writer.writeheader()
-        for product in ready:
+        for integration_no, product in enumerate(ready, start=1):
             project = next((item for item in state.projects if item.id == product.project_id), None)
             store_profile = get_store_profile(project.store_profile_id if project else None)
             ensure_product_sku(product, state.products, project, store_profile)
-            for row in build_product_rows(product):
+            for row in build_product_rows(product, integration_no):
                 writer.writerow(row)
 
             product.status = ProductStatus.exported
