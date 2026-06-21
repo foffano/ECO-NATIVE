@@ -1,5 +1,5 @@
 param(
-    [string]$Version = "0.1.31",
+    [string]$Version = "0.1.34",
     [string]$ReleaseDir = "$env:USERPROFILE\ECO-NATIVE-release"
 )
 
@@ -16,18 +16,15 @@ $headers = @{
 
 $releaseBody = @"
 ## Resumo
-- Geracao em lote de anuncios e imagens agora roda em paralelo (dispara todos os produtos de uma vez), em vez de uma fila sequencial
-- Novo limitador de taxa global thread-safe (janela deslizante) protege as APIs externas: Kie limitado a 18 novas geracoes/10s (margem do limite de 20) e OpenRouter a 20/10s
-- O limitador da Kie cobre todas as chamadas createTask (imagens base, variacoes de cor e regeneracoes); removidos os sleeps fixos de 3s entre imagens
-- Confirmacoes de regeneracao resolvidas uma unica vez antes do disparo, evitando varios dialogos simultaneos
-- Gravacao no store continua segura em paralelo (lock + merge por id); erros sao coletados por produto sem derrubar o lote
+- Novo botao "Colocar a venda" na barra de acoes em massa da aba Produtos: marca todos os produtos selecionados como a venda de uma vez
+- A acao grava metadata.listed e listed_at em cada produto selecionado e ignora os que ja estao a venda
+- Botao desabilitado quando nenhum produto esta selecionado, seguindo o padrao das demais acoes em lote
 
 ## Test plan
-- [ ] Selecionar varios produtos e gerar anuncios em lote: requisicoes em paralelo e progresso atualizado conforme concluem
-- [ ] Selecionar varios produtos e gerar imagens base em lote: nao estourar o rate limit da Kie (sem 429)
-- [ ] Confirmar que a confirmacao de regeneracao aparece uma unica vez no inicio do lote
-- [ ] Forcar falha em um produto e verificar que os demais concluem e o erro e reportado
-- [ ] Atualizar via auto-update de 0.1.30 para 0.1.31
+- [ ] Selecionar varios produtos e clicar em "Colocar a venda": todos passam a exibir o badge "A venda"
+- [ ] Selecionar produtos ja marcados e confirmar o aviso de que ja estao a venda
+- [ ] Filtrar por "A venda" e verificar que os produtos marcados aparecem
+- [ ] Atualizar via auto-update de 0.1.33 para 0.1.34
 "@
 
 $releasePayload = @{

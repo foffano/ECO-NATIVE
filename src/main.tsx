@@ -3078,6 +3078,38 @@ function App() {
     }
   }
 
+  async function markListedBatch(productIds = selectedProductIds) {
+    if (!productIds.length) {
+      setNotice("Selecione pelo menos um produto para marcar à venda.");
+      return;
+    }
+    const pendingIds = productIds.filter((id) => {
+      const product = projectProducts.find((item) => item.id === id);
+      return !productListed(product);
+    });
+    if (!pendingIds.length) {
+      setNotice("Produtos selecionados já estão à venda.");
+      return;
+    }
+    try {
+      setBusy(true);
+      setNotice(`Marcando ${pendingIds.length} produto(s) à venda...`);
+      const listedAt = new Date().toISOString();
+      for (const productId of pendingIds) {
+        const updated = await api<Product>(`/api/products/${productId}`, {
+          method: "PATCH",
+          body: JSON.stringify({ metadata: { listed: true, listed_at: listedAt } }),
+        });
+        patchProduct(updated);
+      }
+      setNotice(`${pendingIds.length} produto(s) marcado(s) à venda.`);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Erro ao marcar produtos à venda");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   function exportCsv(productIds = selectedProductIds) {
     if (!activeProject && !projectProducts.length) return Promise.resolve();
     if (!productIds.length) {
@@ -3215,6 +3247,7 @@ function App() {
             onBatchGenerateImages={generateImagesBatch}
             onBatchGenerateListings={generateListingsBatch}
             onBatchDeleteProducts={deleteProductsBatch}
+            onBatchMarkListed={markListedBatch}
             onDeleteProduct={deleteProduct}
             onFiltersChange={setProductFilters}
             onGenerateColorVariations={generateColorVariations}
@@ -4915,6 +4948,7 @@ function ProductsTab({
   onBatchGenerateImages,
   onBatchGenerateListings,
   onBatchDeleteProducts,
+  onBatchMarkListed,
   onCloseDetails,
   onDeleteModelAsset,
   onDeleteProduct,
@@ -4961,6 +4995,7 @@ function ProductsTab({
   onBatchGenerateImages: (ids?: string[]) => void;
   onBatchGenerateListings: (ids?: string[]) => void;
   onBatchDeleteProducts: (ids?: string[]) => void;
+  onBatchMarkListed: (ids?: string[]) => void;
   onCloseDetails: () => void;
   onDeleteModelAsset: (productId: string, assetId: string) => void;
   onDeleteProduct: (id?: string) => void;
@@ -5227,6 +5262,9 @@ function ProductsTab({
             </button>
             <button className="primary dark" onClick={() => onBatchGenerateImages()} disabled={busy || !selectedProductIds.length}>
               <ImagePlus size={16} /> Gerar imagens base
+            </button>
+            <button className="primary ghost" onClick={() => onBatchMarkListed(selectedProductIds)} disabled={busy || !selectedProductIds.length}>
+              <ShoppingBag size={16} /> Colocar à venda
             </button>
             <button className="primary ghost" onClick={() => onExportSelected(selectedProductIds)} disabled={busy || !selectedProductIds.length}>
               <Download size={16} /> Exportar CSV
