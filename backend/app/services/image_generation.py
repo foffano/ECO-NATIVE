@@ -16,6 +16,7 @@ from backend.app.services.product_paths import (
     studio_image_filename,
 )
 from backend.app.services.prompt_library import IMAGE_PROMPTS, render_color_variation_prompt
+from backend.app.services.rate_limiter import kie_generation_limiter
 
 
 def product_output_dir(product: Product) -> Path:
@@ -55,6 +56,8 @@ def existing_asset_public_url(product: Product, kind: str, path: Path) -> str | 
 
 
 def create_kie_task(prompt: str, image_url: str, api_key: str, model: str = "qwen/image-edit") -> str:
+    # Conta como "new generation request" na Kie (limite 20/10s). Throttle global.
+    kie_generation_limiter.acquire()
     response = http_request(
         "POST",
         "https://api.kie.ai/api/v1/jobs/createTask",
@@ -163,7 +166,6 @@ def generate_studio_images(
         download_url(result_url, output_path)
         public_url = upload_file_to_r2(output_path, r2_key_prefix(product))
         created_assets.append(Asset(product_id=product.id, kind=kind, path=str(output_path), public_url=public_url))
-        time.sleep(3)
 
     return created_assets
 
@@ -290,6 +292,5 @@ def generate_color_variations_with_kie(
         download_url(result_url, output_path)
         public_url = upload_file_to_r2(output_path, r2_key_prefix(product))
         created_assets.append(Asset(product_id=product.id, kind=kind, path=str(output_path), public_url=public_url))
-        time.sleep(3)
 
     return created_assets

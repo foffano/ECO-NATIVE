@@ -6,6 +6,7 @@ from pathlib import Path
 from backend.app.core.settings import get_settings
 from backend.app.services.cover_image import CoverImageError, mime_type_for_image, validate_cover_bytes
 from backend.app.services.http_client import HttpResponseError, read_response_json, read_response_text, request
+from backend.app.services.rate_limiter import openrouter_limiter
 
 OPENROUTER_CHAT_URL = "https://openrouter.ai/api/v1/chat/completions"
 DEFAULT_OPENROUTER_MODEL = "qwen/qwen3.5-flash-02-23"
@@ -128,6 +129,7 @@ def chat_completion_result(
 ) -> OpenRouterResult:
     api_key = require_api_key()
     selected_model = model or configured_model()
+    openrouter_limiter.acquire()
     response = _request(
         "POST",
         OPENROUTER_CHAT_URL,

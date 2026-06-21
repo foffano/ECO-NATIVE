@@ -1,5 +1,5 @@
 param(
-    [string]$Version = "0.1.29",
+    [string]$Version = "0.1.31",
     [string]$ReleaseDir = "$env:USERPROFILE\ECO-NATIVE-release"
 )
 
@@ -16,15 +16,18 @@ $headers = @{
 
 $releaseBody = @"
 ## Resumo
-- Corrige bug de URL no Cloudflare R2: a imagem enviada para a IA podia apontar para um objeto que nao existia mais (bucket esvaziado), fazendo a geracao receber uma URL sem imagem
-- asset_public_url agora re-publica a imagem a partir do arquivo local; o re-upload so acontece se o objeto tiver sumido do bucket (head_object antes)
-- Esvaziar o bucket (purge-bucket) agora limpa os public_url gravados no store para o estado persistido nao apontar para objetos inexistentes
+- Geracao em lote de anuncios e imagens agora roda em paralelo (dispara todos os produtos de uma vez), em vez de uma fila sequencial
+- Novo limitador de taxa global thread-safe (janela deslizante) protege as APIs externas: Kie limitado a 18 novas geracoes/10s (margem do limite de 20) e OpenRouter a 20/10s
+- O limitador da Kie cobre todas as chamadas createTask (imagens base, variacoes de cor e regeneracoes); removidos os sleeps fixos de 3s entre imagens
+- Confirmacoes de regeneracao resolvidas uma unica vez antes do disparo, evitando varios dialogos simultaneos
+- Gravacao no store continua segura em paralelo (lock + merge por id); erros sao coletados por produto sem derrubar o lote
 
 ## Test plan
-- [ ] Gerar imagens/variacoes de cor normalmente com o bucket populado
-- [ ] Esvaziar o bucket R2 e gerar variacoes de cor: a imagem base deve ser reenviada automaticamente e a IA receber uma URL valida
-- [ ] Conferir que apos o purge os assets ficam sem public_url no store
-- [ ] Atualizar via auto-update de 0.1.28 para 0.1.29
+- [ ] Selecionar varios produtos e gerar anuncios em lote: requisicoes em paralelo e progresso atualizado conforme concluem
+- [ ] Selecionar varios produtos e gerar imagens base em lote: nao estourar o rate limit da Kie (sem 429)
+- [ ] Confirmar que a confirmacao de regeneracao aparece uma unica vez no inicio do lote
+- [ ] Forcar falha em um produto e verificar que os demais concluem e o erro e reportado
+- [ ] Atualizar via auto-update de 0.1.30 para 0.1.31
 "@
 
 $releasePayload = @{

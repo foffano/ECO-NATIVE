@@ -2974,27 +2974,43 @@ function App() {
     }
     try {
       setBusy(true);
-      setBatchProgress({ label, total: productIds.length, done: 0, current: "Preparando..." });
-      for (let index = 0; index < productIds.length; index += 1) {
-        const productId = productIds[index];
-        const product = projectProducts.find((item) => item.id === productId);
-        const current = product?.name ?? productId;
-        setNotice(`${label}: ${index + 1}/${productIds.length}`);
-        setBatchProgress({ label, total: productIds.length, done: index, current });
-        const job = await action(productId);
-        await refreshCatalog();
-        if (job.status === "failed") {
-          const detail = job.logs?.length ? job.logs[job.logs.length - 1] : job.message;
-          throw new Error(detail || `Falha em ${current}`);
-        }
-        setBatchProgress({ label, total: productIds.length, done: index + 1, current });
+      const total = productIds.length;
+      let done = 0;
+      const errors: string[] = [];
+      setBatchProgress({ label, total, done: 0, current: "Processando em paralelo..." });
+      // Dispara todos os produtos de uma vez. O limitador global do backend
+      // (Kie/OpenRouter) controla o ritmo real das chamadas externas, então não
+      // precisamos serializar aqui. As gravações no store já são protegidas por
+      // lock + merge por id, então salvar em paralelo é seguro.
+      await Promise.all(
+        productIds.map(async (productId) => {
+          const product = projectProducts.find((item) => item.id === productId);
+          const current = product?.name ?? productId;
+          try {
+            const job = await action(productId);
+            if (job.status === "failed") {
+              const detail = job.logs?.length ? job.logs[job.logs.length - 1] : job.message;
+              errors.push(`${current}: ${detail || "falha"}`);
+            }
+          } catch (error) {
+            if (!(error instanceof Error && error.message === "__cancelled__")) {
+              errors.push(`${current}: ${error instanceof Error ? error.message : "erro inesperado"}`);
+            }
+          } finally {
+            done += 1;
+            setBatchProgress({ label, total, done, current });
+            setNotice(`${label}: ${done}/${total}`);
+            await refreshCatalog();
+          }
+        }),
+      );
+      if (errors.length) {
+        const extra = errors.length > 1 ? ` (+${errors.length - 1} outro(s))` : "";
+        setNotice(`${label} concluído com ${errors.length} erro(s). ${errors[0]}${extra}`);
+      } else {
+        setNotice(`${label} concluído para ${total} produto(s).`);
       }
-      setNotice(`${label} concluído para ${productIds.length} produto(s).`);
     } catch (error) {
-      if (error instanceof Error && error.message === "__cancelled__") {
-        setNotice("Ação cancelada.");
-        return;
-      }
       setNotice(error instanceof Error ? error.message : "Erro inesperado no lote");
     } finally {
       setBusy(false);
@@ -3007,20 +3023,15 @@ function App() {
       setNotice("Configure OPENROUTER_API_KEY em Ajustes para gerar anúncios com IA.");
       return Promise.resolve();
     }
-    return runBatchProductAction("Gerando anúncios em lote", productIds, (productId) =>
-      (async () => {
-        const product = projectProducts.find((item) => item.id === productId);
-        if (
-          hasListingContent(product)
-          && !(await confirmRegeneration(`"${product?.name ?? "Este produto"}" já possui descrição/anúncio gerado. Gerar novamente pode substituir o texto atual e somar novo custo de IA. Deseja continuar?`))
-        ) {
-          throw new Error("__cancelled__");
-        }
-        return api<Job>("/api/jobs/listing", {
-        method: "POST",
-        body: JSON.stringify({ product_id: productId }),
-        });
-      })(),
+    return runBatchProductAction(
+      "Gerando anúncios em lote",
+      productIds,
+      (productId) =>
+        api<Job>("/api/jobs/listing", {
+          method: "POST",
+          body: JSON.stringify({ product_id: productId }),
+        }),
+      "listing",
     );
   }
 
@@ -3033,20 +3044,15 @@ function App() {
       setNotice("Configure Cloudflare R2 em Ajustes para salvar imagens permanentes e enviar URLs ao Kie.ai/Qwen.");
       return Promise.resolve();
     }
-    return runBatchProductAction("Gerando imagens base em lote", productIds, (productId) =>
-      (async () => {
-        const product = projectProducts.find((item) => item.id === productId);
-        if (
-          hasBaseImages(product)
-          && !(await confirmRegeneration(`"${product?.name ?? "Este produto"}" já possui imagens base geradas. O sistema reutiliza arquivos existentes quando possível. Para recriar uma imagem específica, use o botão IA na miniatura. Deseja continuar?`))
-        ) {
-          throw new Error("__cancelled__");
-        }
-        return api<Job>("/api/jobs/images", {
-        method: "POST",
-        body: JSON.stringify({ product_id: productId, color_variations: [], generate_base_images: true }),
-        });
-      })(),
+    return runBatchProductAction(
+      "Gerando imagens base em lote",
+      productIds,
+      (productId) =>
+        api<Job>("/api/jobs/images", {
+          method: "POST",
+          body: JSON.stringify({ product_id: productId, color_variations: [], generate_base_images: true }),
+        }),
+      "images",
     );
   }
 
