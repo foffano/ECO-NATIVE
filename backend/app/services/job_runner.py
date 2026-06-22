@@ -11,6 +11,7 @@ from backend.app.services.image_generation import (
 from backend.app.services.cover_image import CoverImageError, ensure_product_cover
 from backend.app.services.listing_generator import generate_listing_with_openrouter
 from backend.app.services.openrouter_client import OpenRouterUnavailable
+from backend.app.services.prompt_library import IMAGE_PROMPTS
 from backend.app.services.sku import ensure_color_skus, ensure_product_sku
 from backend.app.services.store_profiles import get_store_profile
 from backend.app.services.makerworld_scraper import (
@@ -370,7 +371,7 @@ def run_regenerate_image_job(job: Job, product: Product, prompt_key: str, extra_
         store.upsert_product(product)
         return _finish_job(job, f"Variação {color_name} recriada")
 
-    prompt = store_profile.image_prompts.get(prompt_key)
+    prompt = store_profile.image_prompts.get(prompt_key) or IMAGE_PROMPTS.get(prompt_key)
     if not prompt:
         job.status = JobStatus.failed
         job.progress = 100

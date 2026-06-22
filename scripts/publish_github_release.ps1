@@ -1,5 +1,5 @@
 param(
-    [string]$Version = "0.1.34",
+    [string]$Version = "0.1.35",
     [string]$ReleaseDir = "$env:USERPROFILE\ECO-NATIVE-release"
 )
 
@@ -16,15 +16,17 @@ $headers = @{
 
 $releaseBody = @"
 ## Resumo
-- Novo botao "Colocar a venda" na barra de acoes em massa da aba Produtos: marca todos os produtos selecionados como a venda de uma vez
-- A acao grava metadata.listed e listed_at em cada produto selecionado e ignora os que ja estao a venda
-- Botao desabilitado quando nenhum produto esta selecionado, seguindo o padrao das demais acoes em lote
+- A secao "Imagens base IA" agora mostra os 6 slots fixos por estilo, mesmo antes de gerar qualquer imagem
+- Cada slot permite enviar/substituir a imagem manualmente (JPG/PNG/WEBP ate 15MB) ou gerar/recriar por IA
+- Novo endpoint de upload por estilo normaliza a imagem para PNG e publica no R2 (substitui o asset generated_<estilo>)
+- Recriacao por IA agora cai no prompt global quando o perfil da loja nao tem o estilo, permitindo "Gerar" em slot vazio
 
 ## Test plan
-- [ ] Selecionar varios produtos e clicar em "Colocar a venda": todos passam a exibir o badge "A venda"
-- [ ] Selecionar produtos ja marcados e confirmar o aviso de que ja estao a venda
-- [ ] Filtrar por "A venda" e verificar que os produtos marcados aparecem
-- [ ] Atualizar via auto-update de 0.1.33 para 0.1.34
+- [ ] Abrir um produto sem imagens base: ver os 6 slots vazios na secao Imagens base IA
+- [ ] Enviar uma imagem manual em um slot e confirmar que substitui aquele estilo
+- [ ] Gerar por IA em um slot vazio e confirmar que a imagem aparece
+- [ ] Recriar por IA um slot ja preenchido com prompt extra
+- [ ] Atualizar via auto-update de 0.1.34 para 0.1.35
 "@
 
 $releasePayload = @{

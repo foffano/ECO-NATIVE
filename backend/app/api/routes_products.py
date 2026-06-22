@@ -1,3 +1,4 @@
+import io
 import os
 import re
 import subprocess
@@ -5,12 +6,13 @@ import sys
 from pathlib import Path
 
 from fastapi import APIRouter, File, HTTPException, UploadFile
+from PIL import Image
 from pydantic import BaseModel
 
 from backend.app.db.models import Asset, Listing, PrintPlate, Product, ProductStatus, StudioState, now_iso
 from backend.app.db.store import store
 from backend.app.services.cover_image import CoverImageError, cover_r2_public_url, normalize_cover_to_jpeg, validate_cover_bytes
-from backend.app.services.cloudflare_r2 import r2_configured
+from backend.app.services.cloudflare_r2 import r2_configured, upload_file_to_r2
 from backend.app.services.product_paths import (
     MODEL_FILE_SUFFIXES,
     cover_image_filename,
@@ -18,7 +20,9 @@ from backend.app.services.product_paths import (
     is_model_asset_kind,
     model_filename,
     product_dir_for,
+    studio_image_filename,
 )
+from backend.app.services.prompt_library import IMAGE_PROMPTS
 from backend.app.services.print_plates import plate_totals, read_print_plates, write_print_plates
 from backend.app.services.product_cleanup import purge_product_data
 from backend.app.services.product_health import product_file_warnings
@@ -377,6 +381,67 @@ async def upload_cover_image(product_id: str, file: UploadFile = File(...)) -> P
             cover.public_url = cover_r2_public_url(product, cover)
         except CoverImageError as exc:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    product.updated_at = now_iso()
+    return store.upsert_product(product)
+
+
+@router.post("/{product_id}/style-image/{prompt_key}")
+async def upload_style_image(product_id: str, prompt_key: str, file: UploadFile = File(...)) -> Product:
+    if prompt_key not in IMAGE_PROMPTS:
+        raise HTTPException(status_code=400, detail="Estilo de imagem desconhecido.")
+
+    state = store.load()
+    product = next((p for p in state.products if p.id == product_id), None)
+    if not product:
+        raise HTTPException(status_code=404, detail="Produto nao encontrado")
+
+    original_name = Path(file.filename or "imagem.png").name
+    suffix = Path(original_name).suffix.lower() or ".png"
+    if suffix not in COVER_IMAGE_SUFFIXES:
+        raise HTTPException(status_code=400, detail="Formato nao suportado. Use arquivos JPG, PNG ou WEBP.")
+
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="Arquivo vazio.")
+    if len(content) > MAX_COVER_IMAGE_BYTES:
+        raise HTTPException(status_code=400, detail="Imagem maior que 15MB.")
+
+    project = next((item for item in state.projects if item.id == product.project_id), None)
+    store_profile = get_store_profile(project.store_profile_id if project else None)
+    ensure_product_sku(product, state.products, project, store_profile)
+    sku = str(product.metadata.get("sku") or "").strip()
+    if not sku:
+        raise HTTPException(status_code=400, detail="SKU do produto nao encontrado.")
+
+    folder = product_folder(product)
+    folder.mkdir(parents=True, exist_ok=True)
+    output_path = folder / studio_image_filename(sku, prompt_key)
+
+    try:
+        with Image.open(io.BytesIO(content)) as image:
+            image.convert("RGB").save(output_path, format="PNG")
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Imagem invalida: {exc}") from exc
+
+    kind = f"generated_{prompt_key}"
+    asset = next((item for item in product.assets if item.kind == kind), None)
+    if asset:
+        asset.path = str(output_path)
+        asset.public_url = None
+    else:
+        asset = Asset(product_id=product.id, kind=kind, path=str(output_path))
+        product.assets.append(asset)
+
+    if r2_configured():
+        try:
+            asset.public_url = upload_file_to_r2(
+                str(output_path),
+                f"eco-native/{product.project_id}/{product.id}",
+                force=True,
+            )
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Falha ao publicar imagem no R2: {exc}") from exc
 
     product.updated_at = now_iso()
     return store.upsert_product(product)

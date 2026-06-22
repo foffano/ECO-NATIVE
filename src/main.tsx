@@ -2858,6 +2858,14 @@ function App() {
     }, { refresh: false, blockUi: true, notifySuccess: true });
   }
 
+  function uploadStyleImage(productId: string, promptKey: string, file: File) {
+    return runAction("Enviando imagem do estilo", async () => {
+      const updated = await apiUpload<Product>(`/api/products/${productId}/style-image/${promptKey}`, file);
+      patchProduct(updated);
+      return updated;
+    }, { refresh: false, blockUi: true, notifySuccess: true });
+  }
+
   function deleteModelAsset(productId: string, assetId: string) {
     return runFluidAction("Removendo arquivo 3D", async () => {
       const updated = await api<Product>(`/api/products/${productId}/assets/${assetId}`, { method: "DELETE" });
@@ -3262,6 +3270,7 @@ function App() {
             onSaveListing={saveListing}
             onUploadCoverImage={uploadCoverImage}
             onUploadModelFile={uploadModelFile}
+            onUploadStyleImage={uploadStyleImage}
             onUpdateProductListed={updateProductListed}
             onSavePrintPlates={(productId, plates) => runFluidAction("Salvando placas", () => savePrintPlates(productId, plates))}
             filaments={filaments}
@@ -4966,6 +4975,7 @@ function ProductsTab({
   onUpdateProductListed,
   onUploadCoverImage,
   onUploadModelFile,
+  onUploadStyleImage,
   onSavePrintPlates,
   filaments,
   productionSettings,
@@ -5013,6 +5023,7 @@ function ProductsTab({
   onUpdateProductListed: (productId: string, listed: boolean) => void;
   onUploadCoverImage: (productId: string, file: File) => void;
   onUploadModelFile: (productId: string, file: File) => void;
+  onUploadStyleImage: (productId: string, promptKey: string, file: File) => void;
   onSavePrintPlates: (productId: string, plates: PrintPlate[]) => Promise<unknown>;
   filaments: FilamentSpool[];
   productionSettings: ProductionSettings | null;
@@ -5553,10 +5564,12 @@ function ProductsTab({
                   busy={busy}
                   extraPrompts={imageExtraPrompts}
                   product={selectedProduct}
+                  studioPrompts={imageOptions.studio_prompts}
                   onExtraPromptChange={updateImageExtraPrompt}
                   onOpenImage={setFullscreenAsset}
                   onRegenerateImage={onRegenerateImage}
                   onUploadCoverImage={onUploadCoverImage}
+                  onUploadStyleImage={onUploadStyleImage}
                 />
                 <div className="image-generation-options">
                   <div className="subsection-title">Variações de cor</div>
@@ -5884,18 +5897,22 @@ function ProductImageGallery({
   busy,
   extraPrompts,
   product,
+  studioPrompts,
   onExtraPromptChange,
   onOpenImage,
   onRegenerateImage,
   onUploadCoverImage,
+  onUploadStyleImage,
 }: {
   busy: boolean;
   extraPrompts: Record<string, string>;
   product: Product;
+  studioPrompts: Array<{ id: string; name: string }>;
   onExtraPromptChange: (promptKey: string, value: string) => void;
   onOpenImage: (asset: Asset) => void;
   onRegenerateImage: (productId: string, promptKey: string, extraPrompt: string) => void;
   onUploadCoverImage: (productId: string, file: File) => void;
+  onUploadStyleImage: (productId: string, promptKey: string, file: File) => void;
 }) {
   const coverFileInputRef = useRef<HTMLInputElement>(null);
   const images = getImageAssets(product);
@@ -5960,19 +5977,17 @@ function ProductImageGallery({
             A capa local é enviada ao R2 antes de gerar imagens com IA.
           </small>
         </div>
-        <GalleryGroup
-          allowRegenerate
+        <BaseStyleGallery
           assets={baseImages}
           busy={busy}
-          emptyText="Use o botão Imagens base para gerar."
           extraPrompts={extraPrompts}
           imageVersion={imageVersion}
           productId={product.id}
-          skuByKey={colorSkus}
-          title="Imagens base IA"
+          styles={studioPrompts}
           onExtraPromptChange={onExtraPromptChange}
           onOpenImage={onOpenImage}
           onRegenerateImage={onRegenerateImage}
+          onUploadStyleImage={onUploadStyleImage}
         />
         <GalleryGroup
           allowRegenerate
@@ -5988,6 +6003,110 @@ function ProductImageGallery({
           onOpenImage={onOpenImage}
           onRegenerateImage={onRegenerateImage}
         />
+      </div>
+    </div>
+  );
+}
+
+function BaseStyleGallery({
+  assets,
+  busy,
+  extraPrompts,
+  imageVersion,
+  productId,
+  styles,
+  onExtraPromptChange,
+  onOpenImage,
+  onRegenerateImage,
+  onUploadStyleImage,
+}: {
+  assets: Asset[];
+  busy: boolean;
+  extraPrompts: Record<string, string>;
+  imageVersion?: string;
+  productId: string;
+  styles: Array<{ id: string; name: string }>;
+  onExtraPromptChange: (promptKey: string, value: string) => void;
+  onOpenImage: (asset: Asset) => void;
+  onRegenerateImage: (productId: string, promptKey: string, extraPrompt: string) => void;
+  onUploadStyleImage: (productId: string, promptKey: string, file: File) => void;
+}) {
+  const [activeRegenerateKey, setActiveRegenerateKey] = useState("");
+  const slots = styles.length
+    ? styles
+    : assets.map((asset) => {
+        const id = asset.kind.replace(/^generated_/, "");
+        return { id, name: id.replace(/_/g, " ") };
+      });
+
+  return (
+    <div className="gallery-group">
+      <div className="gallery-group-title">Imagens base IA</div>
+      <div className="gallery-strip">
+        {slots.map((style) => {
+          const asset = assets.find((item) => item.kind === `generated_${style.id}`);
+          const regenerateOpen = activeRegenerateKey === style.id;
+          return (
+            <div className="gallery-thumb" key={style.id}>
+              <div className="thumb-image-frame">
+                {asset ? (
+                  <button className="thumb-open" onClick={() => onOpenImage(asset)}>
+                    <img src={assetUrl(asset, imageVersion)} alt="" />
+                  </button>
+                ) : (
+                  <div className="thumb-empty">
+                    <ImagePlus size={20} />
+                  </div>
+                )}
+                <label className="thumb-upload" title="Enviar imagem manual">
+                  <Upload size={12} />
+                  <input
+                    type="file"
+                    hidden
+                    accept="image/jpeg,image/png,image/webp,.jpg,.jpeg,.png,.webp"
+                    disabled={busy}
+                    onChange={(event) => {
+                      const file = event.target.files?.[0];
+                      if (file) onUploadStyleImage(productId, style.id, file);
+                      event.currentTarget.value = "";
+                    }}
+                  />
+                </label>
+                <button
+                  aria-expanded={regenerateOpen}
+                  aria-label={`Abrir geração por IA para ${style.name}`}
+                  className="thumb-ai-toggle"
+                  disabled={busy}
+                  onClick={() => setActiveRegenerateKey(regenerateOpen ? "" : style.id)}
+                  title="IA: gerar ou recriar imagem"
+                >
+                  IA
+                </button>
+              </div>
+              <span>{style.name}</span>
+              {regenerateOpen && (
+                <div className="thumb-regenerate">
+                  <input
+                    value={extraPrompts[style.id] || ""}
+                    onChange={(event) => onExtraPromptChange(style.id, event.target.value)}
+                    placeholder="Prompt extra"
+                    disabled={busy}
+                  />
+                  <button
+                    title={asset ? "Recriar esta imagem" : "Gerar esta imagem"}
+                    onClick={() => onRegenerateImage(productId, style.id, extraPrompts[style.id] || "")}
+                    disabled={busy}
+                  >
+                    {asset ? "Recriar" : "Gerar"}
+                  </button>
+                </div>
+              )}
+            </div>
+          );
+        })}
+        {!slots.length && (
+          <div className="gallery-note">Configure os estilos de imagem em Ajustes para liberar os slots.</div>
+        )}
       </div>
     </div>
   );
