@@ -108,8 +108,11 @@ def is_image_asset(asset: Asset) -> bool:
 
 
 def _ensure_public_url(product: Product, asset: Asset) -> str | None:
-    if not asset.public_url and r2_configured():
-        asset.public_url = upload_file_to_r2(asset.path, r2_key_prefix(product))
+    # Sempre republica o arquivo local no R2 (force=True) antes de exportar o
+    # link. Nao confiamos em uma public_url ja existente: o objeto pode ter sumido
+    # do bucket, gerando imagem quebrada no anuncio exportado.
+    if r2_configured() and asset.path and Path(asset.path).is_file():
+        asset.public_url = upload_file_to_r2(asset.path, r2_key_prefix(product), force=True)
     return asset.public_url
 
 

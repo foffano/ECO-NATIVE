@@ -55,6 +55,14 @@ def color_variation_filename(sku: str, source_prompt_key: str, color_name: str) 
     return f"{sku}_capa_produto_{source_prompt_key}_{color_name}.png"
 
 
+def manual_color_filename(sku: str, color_name: str) -> str:
+    return f"{sku}_cor_{color_name}.png"
+
+
+def variation_image_filename(sku: str, slug: str) -> str:
+    return f"{sku}_variacao_{slug}.png"
+
+
 def resolve_sku_for_capture(
     product_name: str,
     sku_reference_products: list[Product],

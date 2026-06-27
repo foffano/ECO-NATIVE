@@ -1,5 +1,5 @@
 param(
-    [string]$Version = "0.1.35",
+    [string]$Version = "0.1.36",
     [string]$ReleaseDir = "$env:USERPROFILE\ECO-NATIVE-release"
 )
 
@@ -16,17 +16,18 @@ $headers = @{
 
 $releaseBody = @"
 ## Resumo
-- A secao "Imagens base IA" agora mostra os 6 slots fixos por estilo, mesmo antes de gerar qualquer imagem
-- Cada slot permite enviar/substituir a imagem manualmente (JPG/PNG/WEBP ate 15MB) ou gerar/recriar por IA
-- Novo endpoint de upload por estilo normaliza a imagem para PNG e publica no R2 (substitui o asset generated_<estilo>)
-- Recriacao por IA agora cai no prompt global quando o perfil da loja nao tem o estilo, permitindo "Gerar" em slot vazio
+- Variacoes de cor manuais: adicione uma cor enviando a foto (nome livre, ex.: Azul Bebe) alem das geradas por IA
+- Variacoes genericas (ex.: Tamanho) criadas manualmente com SKU proprio e foto por variacao
+- Remocao de variacoes de cor/atributo direto pela aba do produto, limpando SKUs e arquivos locais
+- Correcao do upload para o bucket Cloudflare R2: o app sempre republica a imagem (force) antes de usar o link, evitando enviar a IA ou exportar um link quebrado/desatualizado quando o objeto sumiu do bucket
 
 ## Test plan
-- [ ] Abrir um produto sem imagens base: ver os 6 slots vazios na secao Imagens base IA
-- [ ] Enviar uma imagem manual em um slot e confirmar que substitui aquele estilo
-- [ ] Gerar por IA em um slot vazio e confirmar que a imagem aparece
-- [ ] Recriar por IA um slot ja preenchido com prompt extra
-- [ ] Atualizar via auto-update de 0.1.34 para 0.1.35
+- [ ] Adicionar uma cor manual enviando uma foto e confirmar que aparece nas variacoes de cor
+- [ ] Criar uma variacao de Tamanho e enviar uma foto para ela
+- [ ] Remover uma variacao e confirmar que SKU e arquivo somem
+- [ ] Gerar imagem por IA e confirmar que o link enviado aponta para o objeto atual no R2
+- [ ] Exportar a planilha e confirmar que as imagens abrem
+- [ ] Atualizar via auto-update de 0.1.35 para 0.1.36
 "@
 
 $releasePayload = @{

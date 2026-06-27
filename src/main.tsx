@@ -446,9 +446,14 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
   return response.json() as Promise<T>;
 }
 
-async function apiUpload<T>(path: string, file: File): Promise<T> {
+async function apiUpload<T>(path: string, file: File, fields?: Record<string, string>): Promise<T> {
   const form = new FormData();
   form.append("file", file);
+  if (fields) {
+    for (const [key, value] of Object.entries(fields)) {
+      form.append(key, value);
+    }
+  }
   const response = await fetch(`${API_BASE}${path}`, { method: "POST", body: form });
   if (!response.ok) {
     throw new Error(await readApiError(response));
@@ -619,6 +624,20 @@ function productSku(product?: Product): string {
 function productColorSkus(product?: Product): Record<string, string> {
   const value = product?.metadata?.color_skus;
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, string> : {};
+}
+
+function productColorLabels(product?: Product): Record<string, string> {
+  const value = product?.metadata?.color_labels;
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, string> : {};
+}
+
+type ManualVariation = { id: string; attribute: string; value: string; sku: string };
+
+function productManualVariations(product?: Product): ManualVariation[] {
+  const value = product?.metadata?.manual_variations;
+  if (!Array.isArray(value)) return [];
+  return value.filter((item): item is ManualVariation =>
+    Boolean(item) && typeof item === "object" && typeof (item as ManualVariation).id === "string");
 }
 
 function productListed(product?: Product): boolean {
@@ -2866,11 +2885,57 @@ function App() {
     }, { refresh: false, blockUi: true, notifySuccess: true });
   }
 
+  function uploadColorImageManual(productId: string, name: string, file: File) {
+    return runAction("Enviando variação de cor", async () => {
+      const updated = await apiUpload<Product>(`/api/products/${productId}/color-image`, file, { name });
+      patchProduct(updated);
+      return updated;
+    }, { refresh: false, blockUi: true, notifySuccess: true });
+  }
+
+  function createVariation(productId: string, attribute: string, value: string) {
+    return runFluidAction("Criando variação", async () => {
+      const updated = await api<Product>(`/api/products/${productId}/variations`, {
+        method: "POST",
+        body: JSON.stringify({ attribute, value }),
+      });
+      patchProduct(updated);
+      setNotice("Variação criada.");
+      return updated;
+    });
+  }
+
+  function uploadVariationImage(productId: string, slug: string, file: File) {
+    return runAction("Enviando foto da variação", async () => {
+      const updated = await apiUpload<Product>(`/api/products/${productId}/variations/${slug}/image`, file);
+      patchProduct(updated);
+      return updated;
+    }, { refresh: false, blockUi: true, notifySuccess: true });
+  }
+
+  function deleteVariation(productId: string, slug: string) {
+    return runFluidAction("Removendo variação", async () => {
+      const updated = await api<Product>(`/api/products/${productId}/variations/${slug}`, { method: "DELETE" });
+      patchProduct(updated);
+      setNotice("Variação removida.");
+      return updated;
+    });
+  }
+
   function deleteModelAsset(productId: string, assetId: string) {
     return runFluidAction("Removendo arquivo 3D", async () => {
       const updated = await api<Product>(`/api/products/${productId}/assets/${assetId}`, { method: "DELETE" });
       patchProduct(updated);
       setNotice("Arquivo 3D removido.");
+      return updated;
+    });
+  }
+
+  function deleteColorAsset(productId: string, assetId: string) {
+    return runFluidAction("Removendo variação de cor", async () => {
+      const updated = await api<Product>(`/api/products/${productId}/assets/${assetId}`, { method: "DELETE" });
+      patchProduct(updated);
+      setNotice("Variação de cor removida.");
       return updated;
     });
   }
@@ -3271,6 +3336,11 @@ function App() {
             onUploadCoverImage={uploadCoverImage}
             onUploadModelFile={uploadModelFile}
             onUploadStyleImage={uploadStyleImage}
+            onUploadColorImageManual={uploadColorImageManual}
+            onCreateVariation={createVariation}
+            onUploadVariationImage={uploadVariationImage}
+            onDeleteVariation={deleteVariation}
+            onDeleteColorAsset={deleteColorAsset}
             onUpdateProductListed={updateProductListed}
             onSavePrintPlates={(productId, plates) => runFluidAction("Salvando placas", () => savePrintPlates(productId, plates))}
             filaments={filaments}
@@ -4976,6 +5046,11 @@ function ProductsTab({
   onUploadCoverImage,
   onUploadModelFile,
   onUploadStyleImage,
+  onUploadColorImageManual,
+  onCreateVariation,
+  onUploadVariationImage,
+  onDeleteVariation,
+  onDeleteColorAsset,
   onSavePrintPlates,
   filaments,
   productionSettings,
@@ -5024,6 +5099,11 @@ function ProductsTab({
   onUploadCoverImage: (productId: string, file: File) => void;
   onUploadModelFile: (productId: string, file: File) => void;
   onUploadStyleImage: (productId: string, promptKey: string, file: File) => void;
+  onUploadColorImageManual: (productId: string, name: string, file: File) => void;
+  onCreateVariation: (productId: string, attribute: string, value: string) => Promise<unknown> | void;
+  onUploadVariationImage: (productId: string, slug: string, file: File) => void;
+  onDeleteVariation: (productId: string, slug: string) => void;
+  onDeleteColorAsset: (productId: string, assetId: string) => void;
   onSavePrintPlates: (productId: string, plates: PrintPlate[]) => Promise<unknown>;
   filaments: FilamentSpool[];
   productionSettings: ProductionSettings | null;
@@ -5570,11 +5650,12 @@ function ProductsTab({
                   onRegenerateImage={onRegenerateImage}
                   onUploadCoverImage={onUploadCoverImage}
                   onUploadStyleImage={onUploadStyleImage}
+                  onDeleteColorAsset={onDeleteColorAsset}
                 />
                 <div className="image-generation-options">
                   <div className="subsection-title">Variações de cor</div>
                   <div className="option-row">
-                    <small>As cores marcadas usam a imagem base gerada pela IA como referência.</small>
+                    <small>Gere cores por IA a partir da imagem base, ou adicione uma cor manualmente enviando a foto.</small>
                     <button
                       className="primary compact-primary"
                       onClick={() => setColorDialogOpen(true)}
@@ -5583,7 +5664,20 @@ function ProductsTab({
                       <ImagePlus size={16} /> Gerar variações de cor
                     </button>
                   </div>
+                  <ManualColorAdder
+                    busy={busy}
+                    onAdd={(name, file) => onUploadColorImageManual(selectedProduct.id, name, file)}
+                  />
                 </div>
+                <VariationsManager
+                  busy={busy}
+                  product={selectedProduct}
+                  imageVersion={selectedProduct.updated_at}
+                  onCreate={(attribute, value) => onCreateVariation(selectedProduct.id, attribute, value)}
+                  onUploadImage={(slug, file) => onUploadVariationImage(selectedProduct.id, slug, file)}
+                  onDelete={(slug) => onDeleteVariation(selectedProduct.id, slug)}
+                  onOpenImage={setFullscreenAsset}
+                />
               </div>
             )}
 
@@ -5903,6 +5997,7 @@ function ProductImageGallery({
   onRegenerateImage,
   onUploadCoverImage,
   onUploadStyleImage,
+  onDeleteColorAsset,
 }: {
   busy: boolean;
   extraPrompts: Record<string, string>;
@@ -5913,6 +6008,7 @@ function ProductImageGallery({
   onRegenerateImage: (productId: string, promptKey: string, extraPrompt: string) => void;
   onUploadCoverImage: (productId: string, file: File) => void;
   onUploadStyleImage: (productId: string, promptKey: string, file: File) => void;
+  onDeleteColorAsset: (productId: string, assetId: string) => void;
 }) {
   const coverFileInputRef = useRef<HTMLInputElement>(null);
   const images = getImageAssets(product);
@@ -5921,6 +6017,7 @@ function ProductImageGallery({
   const colorImages = images.filter((asset) => asset.kind.startsWith("color_"));
   const mainImage = baseImages[0] ?? capturedImages[0] ?? colorImages[0];
   const colorSkus = productColorSkus(product);
+  const colorLabels = productColorLabels(product);
   const imageVersion = product.updated_at;
 
   function handleCoverFileSelected(file?: File) {
@@ -5998,7 +6095,9 @@ function ProductImageGallery({
           imageVersion={imageVersion}
           productId={product.id}
           skuByKey={colorSkus}
+          labelByKey={colorLabels}
           title="Variações de cor"
+          onDeleteAsset={(assetId) => onDeleteColorAsset(product.id, assetId)}
           onExtraPromptChange={onExtraPromptChange}
           onOpenImage={onOpenImage}
           onRegenerateImage={onRegenerateImage}
@@ -6112,6 +6211,161 @@ function BaseStyleGallery({
   );
 }
 
+function ManualColorAdder({
+  busy,
+  onAdd,
+}: {
+  busy: boolean;
+  onAdd: (name: string, file: File) => void;
+}) {
+  const [name, setName] = useState("");
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  function handleFile(file?: File) {
+    if (!file) return;
+    const trimmed = name.trim();
+    if (!trimmed) return;
+    onAdd(trimmed, file);
+    setName("");
+  }
+
+  const ready = Boolean(name.trim());
+
+  return (
+    <div className="manual-variation-add">
+      <input
+        value={name}
+        onChange={(event) => setName(event.target.value)}
+        placeholder="Nome da cor (ex.: Azul Bebê)"
+        disabled={busy}
+      />
+      <button
+        className="compact-primary"
+        disabled={busy || !ready}
+        onClick={() => fileInputRef.current?.click()}
+        title={ready ? "Enviar foto da cor" : "Informe o nome da cor primeiro"}
+      >
+        <Upload size={14} /> Adicionar cor (foto)
+      </button>
+      <input
+        ref={fileInputRef}
+        accept="image/jpeg,image/png,image/webp,.jpg,.jpeg,.png,.webp"
+        hidden
+        type="file"
+        onChange={(event) => {
+          handleFile(event.target.files?.[0]);
+          event.currentTarget.value = "";
+        }}
+      />
+    </div>
+  );
+}
+
+function VariationsManager({
+  busy,
+  product,
+  imageVersion,
+  onCreate,
+  onUploadImage,
+  onDelete,
+  onOpenImage,
+}: {
+  busy: boolean;
+  product: Product;
+  imageVersion?: string;
+  onCreate: (attribute: string, value: string) => void;
+  onUploadImage: (slug: string, file: File) => void;
+  onDelete: (slug: string) => void;
+  onOpenImage: (asset: Asset) => void;
+}) {
+  const [attribute, setAttribute] = useState("Tamanho");
+  const [value, setValue] = useState("");
+  const variations = productManualVariations(product);
+
+  const canCreate = Boolean(attribute.trim() && value.trim());
+
+  function handleCreate() {
+    if (!canCreate) return;
+    onCreate(attribute.trim(), value.trim());
+    setValue("");
+  }
+
+  return (
+    <div className="image-generation-options variations-manager">
+      <div className="subsection-title">Variações (Tamanho ou outras)</div>
+      <small>Crie variações manuais com o nome que quiser e envie uma foto para cada uma.</small>
+      <div className="variation-create-row">
+        <input
+          value={attribute}
+          onChange={(event) => setAttribute(event.target.value)}
+          placeholder="Tipo (ex.: Tamanho)"
+          disabled={busy}
+        />
+        <input
+          value={value}
+          onChange={(event) => setValue(event.target.value)}
+          placeholder="Valor (ex.: G)"
+          disabled={busy}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") handleCreate();
+          }}
+        />
+        <button className="compact-primary" disabled={busy || !canCreate} onClick={handleCreate}>
+          <Plus size={14} /> Adicionar variação
+        </button>
+      </div>
+      <div className="gallery-strip">
+        {variations.map((variation) => {
+          const asset = product.assets.find((item) => item.kind === `variation_${variation.id}`);
+          return (
+            <div className="gallery-thumb" key={variation.id}>
+              <div className="thumb-image-frame">
+                {asset ? (
+                  <button className="thumb-open" onClick={() => onOpenImage(asset)}>
+                    <img src={assetUrl(asset, imageVersion)} alt="" />
+                  </button>
+                ) : (
+                  <div className="thumb-empty">
+                    <ImagePlus size={20} />
+                  </div>
+                )}
+                <label className="thumb-upload" title="Enviar foto da variação">
+                  <Upload size={12} />
+                  <input
+                    type="file"
+                    hidden
+                    accept="image/jpeg,image/png,image/webp,.jpg,.jpeg,.png,.webp"
+                    disabled={busy}
+                    onChange={(event) => {
+                      const file = event.target.files?.[0];
+                      if (file) onUploadImage(variation.id, file);
+                      event.currentTarget.value = "";
+                    }}
+                  />
+                </label>
+                <button
+                  aria-label={`Remover ${variation.attribute} ${variation.value}`}
+                  className="thumb-delete"
+                  disabled={busy}
+                  onClick={() => onDelete(variation.id)}
+                  title="Remover variação"
+                >
+                  <Trash2 size={12} />
+                </button>
+              </div>
+              <span>{variation.attribute}: {variation.value}</span>
+              {variation.sku && <code className="thumb-sku">{variation.sku}</code>}
+            </div>
+          );
+        })}
+        {!variations.length && (
+          <div className="gallery-note">Nenhuma variação manual ainda. Crie uma acima.</div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function GalleryGroup({
   allowRegenerate = false,
   assets,
@@ -6122,6 +6376,8 @@ function GalleryGroup({
   imageVersion,
   productId,
   skuByKey = {},
+  labelByKey = {},
+  onDeleteAsset,
   onExtraPromptChange,
   onOpenImage,
   onRegenerateImage,
@@ -6136,6 +6392,8 @@ function GalleryGroup({
   imageVersion?: string;
   productId?: string;
   skuByKey?: Record<string, string>;
+  labelByKey?: Record<string, string>;
+  onDeleteAsset?: (assetId: string) => void;
   onExtraPromptChange?: (promptKey: string, value: string) => void;
   onOpenImage: (asset: Asset) => void;
   onRegenerateImage?: (productId: string, promptKey: string, extraPrompt: string) => void;
@@ -6149,8 +6407,10 @@ function GalleryGroup({
       <div className="gallery-strip">
         {assets.map((asset) => {
           const promptKey = asset.kind.replace(/^generated_/, "");
-          const label = asset.kind.replace(/^generated_/, "").replace(/^color_/, "").replace(/_/g, " ");
-          const sku = skuByKey[asset.kind.replace(/^color_/, "")];
+          const slugKey = asset.kind.replace(/^color_/, "");
+          const label = labelByKey[slugKey]
+            || asset.kind.replace(/^generated_/, "").replace(/^color_/, "").replace(/_/g, " ");
+          const sku = skuByKey[slugKey];
           const regenerateOpen = activeRegenerateKey === promptKey;
 
           return (
@@ -6169,6 +6429,17 @@ function GalleryGroup({
                     title="IA: recriar imagem"
                   >
                     IA
+                  </button>
+                )}
+                {onDeleteAsset && (
+                  <button
+                    aria-label={`Remover ${label}`}
+                    className="thumb-delete"
+                    disabled={busy}
+                    onClick={() => onDeleteAsset(asset.id)}
+                    title="Remover variação"
+                  >
+                    <Trash2 size={12} />
                   </button>
                 )}
               </div>

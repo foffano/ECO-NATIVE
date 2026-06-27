@@ -34,12 +34,12 @@ def r2_key_prefix(product: Product) -> str:
 def asset_public_url(product: Product, asset: Asset) -> str:
     if asset.kind == "cover_image":
         return cover_r2_public_url(product, asset)
-    # Re-publica a partir do arquivo local sempre que ele existir. upload_file_to_r2
-    # faz head_object antes, entao so reenvia se o objeto tiver sumido do bucket
-    # (ex.: bucket esvaziado). Evita mandar para a IA uma URL apontando para um
-    # objeto que nao existe mais.
+    # Sempre republica o arquivo local no R2 antes de entregar a URL. Nunca
+    # reaproveitamos uma URL ja existente (force=True): o objeto pode ter sumido
+    # do bucket ou apontar para uma versao antiga, o que faria a IA receber um
+    # link quebrado/desatualizado.
     if asset.path and Path(asset.path).is_file():
-        public_url = upload_file_to_r2(asset.path, r2_key_prefix(product))
+        public_url = upload_file_to_r2(asset.path, r2_key_prefix(product), force=True)
         asset.public_url = public_url
         return public_url
     if asset.public_url:
@@ -47,12 +47,6 @@ def asset_public_url(product: Product, asset: Asset) -> str:
     raise RuntimeError(
         "Asset sem arquivo local e sem URL publica valida para enviar a IA."
     )
-
-
-def existing_asset_public_url(product: Product, kind: str, path: Path) -> str | None:
-    normalized_path = str(path)
-    existing = next((asset for asset in product.assets if asset.kind == kind and asset.path == normalized_path), None)
-    return existing.public_url if existing and existing.public_url else None
 
 
 def create_kie_task(prompt: str, image_url: str, api_key: str, model: str = "qwen/image-edit") -> str:
@@ -150,7 +144,7 @@ def generate_studio_images(
         kind = f"generated_{prompt_key}"
         output_path = output_dir / studio_image_filename(sku, prompt_key)
         if output_path.exists():
-            public_url = existing_asset_public_url(product, kind, output_path) or upload_file_to_r2(output_path, r2_key_prefix(product))
+            public_url = upload_file_to_r2(output_path, r2_key_prefix(product), force=True)
             created_assets.append(
                 Asset(
                     product_id=product.id,
@@ -164,7 +158,7 @@ def generate_studio_images(
         add_kie_image_cost(product, f"Imagem base: {prompt_key}", model=kie_model)
         result_url = poll_kie_task(task_id, settings.kie_api_key)
         download_url(result_url, output_path)
-        public_url = upload_file_to_r2(output_path, r2_key_prefix(product))
+        public_url = upload_file_to_r2(output_path, r2_key_prefix(product), force=True)
         created_assets.append(Asset(product_id=product.id, kind=kind, path=str(output_path), public_url=public_url))
 
     return created_assets
@@ -270,7 +264,7 @@ def generate_color_variations_with_kie(
         output_path = output_dir / color_variation_filename(sku, source_prompt_key, color_name)
         kind = f"color_{color_name}"
         if output_path.exists():
-            public_url = existing_asset_public_url(product, kind, output_path) or upload_file_to_r2(output_path, r2_key_prefix(product))
+            public_url = upload_file_to_r2(output_path, r2_key_prefix(product), force=True)
             created_assets.append(
                 Asset(
                     product_id=product.id,
@@ -290,7 +284,7 @@ def generate_color_variations_with_kie(
         add_kie_image_cost(product, f"Variação de cor: {color_name}", model=kie_model)
         result_url = poll_kie_task(task_id, settings.kie_api_key)
         download_url(result_url, output_path)
-        public_url = upload_file_to_r2(output_path, r2_key_prefix(product))
+        public_url = upload_file_to_r2(output_path, r2_key_prefix(product), force=True)
         created_assets.append(Asset(product_id=product.id, kind=kind, path=str(output_path), public_url=public_url))
 
     return created_assets

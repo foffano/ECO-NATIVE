@@ -3768,6 +3768,50 @@ textarea {
   color: var(--eco-forest);
 }
 
+.thumb-delete {
+  position: absolute;
+  right: 6px;
+  top: 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  background: var(--eco-backdrop-heavy);
+  border: 1px solid color-mix(in srgb, var(--eco-panel) 78%, transparent);
+  border-radius: 999px;
+  color: #e88;
+  box-shadow: 0 6px 16px var(--eco-shadow);
+  cursor: pointer;
+}
+
+.thumb-delete:hover {
+  background: #c0392b;
+  color: #fff;
+}
+
+.manual-variation-add,
+.variation-create-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.manual-variation-add input,
+.variation-create-row input {
+  flex: 1 1 140px;
+  min-height: 32px;
+  padding: 0 9px;
+  font-size: 12px;
+}
+
+.variations-manager {
+  display: grid;
+  gap: 10px;
+}
+
 .gallery-thumb span,
 .gallery-note {
   color: var(--eco-muted);

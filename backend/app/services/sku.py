@@ -71,6 +71,12 @@ def color_sku(base_sku: str, color_name: str) -> str:
     return f"{base_sku}-{color_code}"
 
 
+def variation_sku(base_sku: str, attribute: str, value: str) -> str:
+    attribute_code = code_from_text(attribute, 3)
+    value_code = code_from_text(value, 3)
+    return f"{base_sku}-{attribute_code}{value_code}"
+
+
 def ensure_color_skus(product: Product, color_names: list[str]) -> dict[str, str]:
     base_sku = str(product.metadata.get("sku") or "").strip().upper()
     if not base_sku:
