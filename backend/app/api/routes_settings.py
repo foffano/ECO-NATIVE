@@ -12,6 +12,8 @@ class SettingsUpdate(BaseModel):
     openrouter_model: str | None = None
     kie_api_key: str | None = None
     kie_image_model: str | None = None
+    use_codex_image_gen: bool | None = None
+    codex_bin: str | None = None
     cloudflare_account_id: str | None = None
     cloudflare_r2_bucket_name: str | None = None
     cloudflare_r2_access_key: str | None = None
@@ -31,6 +33,8 @@ def read_settings() -> dict[str, object]:
             "openrouter_model": settings.openrouter_model,
             "kie_ai": bool(settings.kie_api_key),
             "kie_image_model": settings.kie_image_model,
+            "codex_image_gen": settings.use_codex_image_gen,
+            "codex_bin": settings.codex_bin,
             "cloudflare_r2": bool(
                 settings.cloudflare_account_id
                 and settings.cloudflare_r2_bucket_name
@@ -50,6 +54,7 @@ def read_setting_secrets() -> dict[str, str | None]:
         "openrouter_model": settings.openrouter_model,
         "kie_api_key": settings.kie_api_key,
         "kie_image_model": settings.kie_image_model,
+        "codex_bin": settings.codex_bin,
         "cloudflare_account_id": settings.cloudflare_account_id,
         "cloudflare_r2_bucket_name": settings.cloudflare_r2_bucket_name,
         "cloudflare_r2_access_key": settings.cloudflare_r2_access_key,
@@ -69,6 +74,10 @@ def update_settings(payload: SettingsUpdate) -> dict[str, object]:
         values["KIE_API_KEY"] = payload.kie_api_key
     if payload.kie_image_model:
         values["KIE_IMAGE_MODEL"] = payload.kie_image_model
+    if payload.use_codex_image_gen is not None:
+        values["USE_CODEX_IMAGE_GEN"] = "true" if payload.use_codex_image_gen else "false"
+    if payload.codex_bin is not None:
+        values["CODEX_BIN"] = payload.codex_bin
     if payload.cloudflare_account_id:
         values["CLOUDFLARE_ACCOUNT_ID"] = payload.cloudflare_account_id
     if payload.cloudflare_r2_bucket_name:

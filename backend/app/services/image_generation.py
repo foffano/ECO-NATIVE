@@ -3,9 +3,10 @@ import time
 from pathlib import Path
 from urllib.parse import quote
 
-from backend.app.core.settings import get_settings
+from backend.app.core.settings import AppSettings, get_settings
 from backend.app.db.models import Asset, Product
 from backend.app.services.cloudflare_r2 import upload_file_to_r2
+from backend.app.services.codex_image import edit_image_with_codex
 from backend.app.services.cost_tracker import add_kie_image_cost
 from backend.app.services.cover_image import cover_r2_public_url, ensure_product_cover
 from backend.app.services.http_client import HttpResponseError, download as http_download, read_response_json, read_response_text, request as http_request
@@ -47,6 +48,66 @@ def asset_public_url(product: Product, asset: Asset) -> str:
     raise RuntimeError(
         "Asset sem arquivo local e sem URL publica valida para enviar a IA."
     )
+
+
+def asset_local_path(product: Product, asset: Asset) -> Path:
+    """Retorna o caminho local do asset para enviar ao Codex CLI.
+
+    O Codex recebe a imagem base como arquivo (flag --image), entao preferimos
+    o arquivo no disco. Se por algum motivo o asset so tiver URL publica, baixamos
+    para um arquivo temporario antes de entregar ao Codex.
+    """
+    if asset.path and Path(asset.path).is_file():
+        return Path(asset.path)
+    public = asset.public_url
+    if not public:
+        try:
+            public = asset_public_url(product, asset)
+        except RuntimeError:
+            public = None
+    if public:
+        tmp_dir = product_output_dir(product)
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+        tmp_path = tmp_dir / f"_codex_src_{asset.kind}.png"
+        download_url(public, tmp_path)
+        return tmp_path
+    raise RuntimeError("Asset sem arquivo local nem URL publica para enviar ao Codex.")
+
+
+def resolve_source_ref(product: Product, asset: Asset, settings: AppSettings) -> str:
+    """Resolve a referencia da imagem base conforme o provedor ativo.
+
+    - Codex CLI: caminho de arquivo local (str).
+    - Kie.ai: URL publica no R2 (str).
+    """
+    if settings.use_codex_image_gen:
+        return str(asset_local_path(product, asset))
+    return asset_public_url(product, asset)
+
+
+def render_image_edit(
+    product: Product,
+    source_ref: str,
+    prompt: str,
+    output_path: Path,
+    *,
+    settings: AppSettings,
+    kie_model: str,
+    cost_label: str | None = None,
+) -> None:
+    """Aplica o prompt sobre a imagem base e grava o resultado em output_path.
+
+    Usa o Codex CLI (entrada/saida locais, sem custo de API) quando habilitado;
+    caso contrario usa a Kie.ai (entrada por URL publica, com custo por imagem).
+    """
+    if settings.use_codex_image_gen:
+        edit_image_with_codex(Path(source_ref), prompt, output_path)
+        return
+    task_id = create_kie_task(prompt, source_ref, settings.kie_api_key, kie_model)
+    if cost_label:
+        add_kie_image_cost(product, cost_label, model=kie_model)
+    result_url = poll_kie_task(task_id, settings.kie_api_key)
+    download_url(result_url, output_path)
 
 
 def create_kie_task(prompt: str, image_url: str, api_key: str, model: str = "qwen/image-edit") -> str:
@@ -123,7 +184,7 @@ def generate_studio_images(
     image_prompts: dict[str, str] | None = None,
 ) -> list[Asset]:
     settings = get_settings()
-    if not settings.kie_api_key:
+    if not settings.use_codex_image_gen and not settings.kie_api_key:
         raise RuntimeError("KIE_API_KEY nao configurada.")
     kie_model = settings.kie_image_model or "qwen/image-edit"
     cover = next((asset for asset in product.assets if asset.kind == "cover_image"), None)
@@ -136,7 +197,7 @@ def generate_studio_images(
         raise RuntimeError("Produto sem SKU. Gere o SKU antes de criar imagens.")
     output_dir = product_output_dir(product)
     output_dir.mkdir(parents=True, exist_ok=True)
-    source_url = asset_public_url(product, cover)
+    source_ref = resolve_source_ref(product, cover, settings)
     created_assets: list[Asset] = []
 
     prompts = image_prompts or IMAGE_PROMPTS
@@ -154,10 +215,15 @@ def generate_studio_images(
                 )
             )
             continue
-        task_id = create_kie_task(f"{prompt} {extra_prompt}".strip(), source_url, settings.kie_api_key, kie_model)
-        add_kie_image_cost(product, f"Imagem base: {prompt_key}", model=kie_model)
-        result_url = poll_kie_task(task_id, settings.kie_api_key)
-        download_url(result_url, output_path)
+        render_image_edit(
+            product,
+            source_ref,
+            f"{prompt} {extra_prompt}".strip(),
+            output_path,
+            settings=settings,
+            kie_model=kie_model,
+            cost_label=f"Imagem base: {prompt_key}",
+        )
         public_url = upload_file_to_r2(output_path, r2_key_prefix(product), force=True)
         created_assets.append(Asset(product_id=product.id, kind=kind, path=str(output_path), public_url=public_url))
 
@@ -172,7 +238,7 @@ def regenerate_studio_image(
     specific_extra_prompt: str = "",
 ) -> Asset:
     settings = get_settings()
-    if not settings.kie_api_key:
+    if not settings.use_codex_image_gen and not settings.kie_api_key:
         raise RuntimeError("KIE_API_KEY nao configurada.")
     kie_model = settings.kie_image_model or "qwen/image-edit"
     cover = next((asset for asset in product.assets if asset.kind == "cover_image"), None)
@@ -186,13 +252,18 @@ def regenerate_studio_image(
     output_dir = product_output_dir(product)
     output_dir.mkdir(parents=True, exist_ok=True)
     output_path = output_dir / studio_image_filename(sku, prompt_key)
-    source_url = asset_public_url(product, cover)
+    source_ref = resolve_source_ref(product, cover, settings)
     final_prompt = " ".join(part.strip() for part in [prompt, store_extra_prompt, specific_extra_prompt] if part.strip())
 
-    task_id = create_kie_task(final_prompt, source_url, settings.kie_api_key, kie_model)
-    add_kie_image_cost(product, f"Recriação de imagem: {prompt_key}", model=kie_model)
-    result_url = poll_kie_task(task_id, settings.kie_api_key)
-    download_url(result_url, output_path)
+    render_image_edit(
+        product,
+        source_ref,
+        final_prompt,
+        output_path,
+        settings=settings,
+        kie_model=kie_model,
+        cost_label=f"Recriação de imagem: {prompt_key}",
+    )
     public_url = upload_file_to_r2(output_path, r2_key_prefix(product), force=True)
     return Asset(product_id=product.id, kind=f"generated_{prompt_key}", path=str(output_path), public_url=public_url)
 
@@ -205,7 +276,7 @@ def regenerate_color_variation_with_kie(
     extra_prompt: str = "",
 ) -> Asset:
     settings = get_settings()
-    if not settings.kie_api_key:
+    if not settings.use_codex_image_gen and not settings.kie_api_key:
         raise RuntimeError("KIE_API_KEY nao configurada.")
     kie_model = settings.kie_image_model or "qwen/image-edit"
 
@@ -220,17 +291,17 @@ def regenerate_color_variation_with_kie(
     output_dir = product_output_dir(product)
     output_dir.mkdir(parents=True, exist_ok=True)
     output_path = output_dir / color_variation_filename(sku, source_prompt_key, color_name)
-    source_url = asset_public_url(product, source_asset)
+    source_ref = resolve_source_ref(product, source_asset, settings)
 
-    task_id = create_kie_task(
+    render_image_edit(
+        product,
+        source_ref,
         render_color_variation_prompt(color_prompt_template, color_desc, extra_prompt),
-        source_url,
-        settings.kie_api_key,
-        kie_model,
+        output_path,
+        settings=settings,
+        kie_model=kie_model,
+        cost_label=f"Recriação de variação de cor: {color_name}",
     )
-    add_kie_image_cost(product, f"Recriação de variação de cor: {color_name}", model=kie_model)
-    result_url = poll_kie_task(task_id, settings.kie_api_key)
-    download_url(result_url, output_path)
     public_url = upload_file_to_r2(output_path, r2_key_prefix(product), force=True)
     return Asset(product_id=product.id, kind=f"color_{color_name}", path=str(output_path), public_url=public_url)
 
@@ -243,7 +314,7 @@ def generate_color_variations_with_kie(
     extra_prompt: str = "",
 ) -> list[Asset]:
     settings = get_settings()
-    if not settings.kie_api_key:
+    if not settings.use_codex_image_gen and not settings.kie_api_key:
         raise RuntimeError("KIE_API_KEY nao configurada.")
     kie_model = settings.kie_image_model or "qwen/image-edit"
 
@@ -252,7 +323,7 @@ def generate_color_variations_with_kie(
         raise RuntimeError("Produto sem SKU. Gere o SKU antes de criar variacoes de cor.")
     source_prompt_key = source_asset.kind.replace("generated_", "", 1) or "studio_classic"
     output_dir = product_output_dir(product)
-    source_url = asset_public_url(product, source_asset)
+    source_ref = resolve_source_ref(product, source_asset, settings)
     color_map = color_description_map()
     created_assets: list[Asset] = []
 
@@ -275,15 +346,15 @@ def generate_color_variations_with_kie(
             )
             continue
 
-        task_id = create_kie_task(
+        render_image_edit(
+            product,
+            source_ref,
             render_color_variation_prompt(color_prompt_template, color_desc, extra_prompt),
-            source_url,
-            settings.kie_api_key,
-            kie_model,
+            output_path,
+            settings=settings,
+            kie_model=kie_model,
+            cost_label=f"Variação de cor: {color_name}",
         )
-        add_kie_image_cost(product, f"Variação de cor: {color_name}", model=kie_model)
-        result_url = poll_kie_task(task_id, settings.kie_api_key)
-        download_url(result_url, output_path)
         public_url = upload_file_to_r2(output_path, r2_key_prefix(product), force=True)
         created_assets.append(Asset(product_id=product.id, kind=kind, path=str(output_path), public_url=public_url))
 

@@ -1512,6 +1512,24 @@ button:disabled {
   font-weight: 800;
 }
 
+.profile-editor-section label.inline-toggle {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: start;
+  gap: 10px;
+}
+
+.profile-editor-section label.inline-toggle input {
+  width: 16px;
+  height: 16px;
+  margin-top: 3px;
+}
+
+.profile-editor-section label.inline-toggle span {
+  display: grid;
+  gap: 4px;
+}
+
 .panel {
   background: var(--eco-panel);
   border: 1px solid var(--eco-line);

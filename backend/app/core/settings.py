@@ -14,12 +14,21 @@ if not os.getenv("ECO_NATIVE_ENV_PATH") and (PROJECT_ROOT / ".env").exists():
 load_dotenv(ENV_PATH)
 
 
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
 @dataclass(frozen=True)
 class AppSettings:
     openrouter_api_key: str | None
     openrouter_model: str | None
     kie_api_key: str | None
     kie_image_model: str | None
+    use_codex_image_gen: bool
+    codex_bin: str | None
     cloudflare_account_id: str | None
     cloudflare_r2_bucket_name: str | None
     cloudflare_r2_access_key: str | None
@@ -34,6 +43,8 @@ def get_settings() -> AppSettings:
         openrouter_model=os.getenv("OPENROUTER_MODEL", "qwen/qwen3.5-flash-02-23"),
         kie_api_key=os.getenv("KIE_API_KEY") or os.getenv("KIEAI_API_KEY"),
         kie_image_model=os.getenv("KIE_IMAGE_MODEL", "qwen/image-edit"),
+        use_codex_image_gen=_env_bool("USE_CODEX_IMAGE_GEN", False),
+        codex_bin=os.getenv("CODEX_BIN"),
         cloudflare_account_id=os.getenv("CLOUDFLARE_ACCOUNT_ID"),
         cloudflare_r2_bucket_name=os.getenv("CLOUDFLARE_R2_BUCKET_NAME"),
         cloudflare_r2_access_key=os.getenv("CLOUDFLARE_R2_ACCESS_KEY"),

@@ -315,6 +315,8 @@ type SettingsPayload = {
     openrouter_model?: string;
     kie_ai: boolean;
     kie_image_model?: string;
+    codex_image_gen: boolean;
+    codex_bin?: string | null;
     cloudflare_r2: boolean;
   };
 };
@@ -324,6 +326,7 @@ type SettingsSecrets = {
   openrouter_model?: string | null;
   kie_api_key?: string | null;
   kie_image_model?: string | null;
+  codex_bin?: string | null;
   cloudflare_account_id?: string | null;
   cloudflare_r2_bucket_name?: string | null;
   cloudflare_r2_access_key?: string | null;
@@ -1710,6 +1713,8 @@ function App() {
   const [openRouterModelDraft, setOpenRouterModelDraft] = useState("qwen/qwen3.5-flash-02-23");
   const [kieApiKeyDraft, setKieApiKeyDraft] = useState("");
   const [kieImageModelDraft, setKieImageModelDraft] = useState("qwen/image-edit");
+  const [useCodexImageGenDraft, setUseCodexImageGenDraft] = useState(false);
+  const [codexBinDraft, setCodexBinDraft] = useState("");
   const [r2AccountIdDraft, setR2AccountIdDraft] = useState("");
   const [r2BucketDraft, setR2BucketDraft] = useState("");
   const [r2AccessKeyDraft, setR2AccessKeyDraft] = useState("");
@@ -1797,6 +1802,8 @@ function App() {
     setImageOptions(nextImageOptions);
     setOpenRouterModelDraft(nextSettings.integrations.openrouter_model || "qwen/qwen3.5-flash-02-23");
     setKieImageModelDraft(nextSettings.integrations.kie_image_model || "qwen/image-edit");
+    setUseCodexImageGenDraft(Boolean(nextSettings.integrations.codex_image_gen));
+    setCodexBinDraft(nextSettings.integrations.codex_bin || "");
     const isCleanDefaultWorkspace =
       (nextStoreProfiles.length === 0 || (nextStoreProfiles.length === 1 && nextStoreProfiles[0]?.name === "Loja principal")) &&
       nextProjects.length === 0 &&
@@ -2514,6 +2521,8 @@ function App() {
           openrouter_model: openRouterModelDraft,
           kie_api_key: kieApiKeyDraft,
           kie_image_model: kieImageModelDraft,
+          use_codex_image_gen: useCodexImageGenDraft,
+          codex_bin: codexBinDraft,
           cloudflare_account_id: r2AccountIdDraft,
           cloudflare_r2_bucket_name: r2BucketDraft,
           cloudflare_r2_access_key: r2AccessKeyDraft,
@@ -3399,6 +3408,8 @@ function App() {
             openRouterModelDraft={openRouterModelDraft}
             kieApiKeyDraft={kieApiKeyDraft}
             kieImageModelDraft={kieImageModelDraft}
+            useCodexImageGenDraft={useCodexImageGenDraft}
+            codexBinDraft={codexBinDraft}
             r2AccessKeyDraft={r2AccessKeyDraft}
             r2AccountIdDraft={r2AccountIdDraft}
             r2BucketDraft={r2BucketDraft}
@@ -3409,6 +3420,8 @@ function App() {
             onOpenRouterModelChange={setOpenRouterModelDraft}
             onKieApiKeyChange={setKieApiKeyDraft}
             onKieImageModelChange={setKieImageModelDraft}
+            onUseCodexImageGenChange={setUseCodexImageGenDraft}
+            onCodexBinChange={setCodexBinDraft}
             onR2AccessKeyChange={setR2AccessKeyDraft}
             onR2AccountIdChange={setR2AccountIdDraft}
             onR2BucketChange={setR2BucketDraft}
@@ -7376,6 +7389,8 @@ function SettingsTab({
   openRouterModelDraft,
   kieApiKeyDraft,
   kieImageModelDraft,
+  useCodexImageGenDraft,
+  codexBinDraft,
   r2AccessKeyDraft,
   r2AccountIdDraft,
   r2BucketDraft,
@@ -7390,6 +7405,8 @@ function SettingsTab({
   onOpenRouterModelChange,
   onKieApiKeyChange,
   onKieImageModelChange,
+  onUseCodexImageGenChange,
+  onCodexBinChange,
   onR2AccessKeyChange,
   onR2AccountIdChange,
   onR2BucketChange,
@@ -7422,6 +7439,8 @@ function SettingsTab({
   openRouterModelDraft: string;
   kieApiKeyDraft: string;
   kieImageModelDraft: string;
+  useCodexImageGenDraft: boolean;
+  codexBinDraft: string;
   r2AccessKeyDraft: string;
   r2AccountIdDraft: string;
   r2BucketDraft: string;
@@ -7436,6 +7455,8 @@ function SettingsTab({
   onOpenRouterModelChange: (value: string) => void;
   onKieApiKeyChange: (value: string) => void;
   onKieImageModelChange: (value: string) => void;
+  onUseCodexImageGenChange: (value: boolean) => void;
+  onCodexBinChange: (value: string) => void;
   onR2AccessKeyChange: (value: string) => void;
   onR2AccountIdChange: (value: string) => void;
   onR2BucketChange: (value: string) => void;
@@ -7577,6 +7598,7 @@ function SettingsTab({
       onOpenRouterModelChange(secrets.openrouter_model || openRouterModelDraft);
       onKieApiKeyChange(secrets.kie_api_key || "");
       onKieImageModelChange(secrets.kie_image_model || kieImageModelDraft || "qwen/image-edit");
+      onCodexBinChange(secrets.codex_bin || codexBinDraft || "");
       onR2AccountIdChange(secrets.cloudflare_account_id || "");
       onR2BucketChange(secrets.cloudflare_r2_bucket_name || "");
       onR2AccessKeyChange(secrets.cloudflare_r2_access_key || "");
@@ -7736,6 +7758,8 @@ function SettingsTab({
     integrationEditorOpen && settings && (
       openRouterModelDraft !== (settings.integrations.openrouter_model || "qwen/qwen3.5-flash-02-23")
       || kieImageModelDraft !== (settings.integrations.kie_image_model || "qwen/image-edit")
+      || useCodexImageGenDraft !== Boolean(settings.integrations.codex_image_gen)
+      || codexBinDraft !== (settings.integrations.codex_bin || "")
       || Boolean(openRouterApiKeyDraft.trim())
       || Boolean(kieApiKeyDraft.trim())
       || Boolean(r2AccountIdDraft.trim())
@@ -8341,6 +8365,35 @@ function SettingsTab({
                     value={kieImageModelDraft}
                     onChange={(event) => onKieImageModelChange(event.target.value)}
                     placeholder={settings?.integrations.kie_image_model || "qwen/image-edit"}
+                  />
+                </label>
+              </section>
+
+              <section className="profile-editor-section">
+                <div className="subsection-title">Codex CLI (geração de imagens)</div>
+                <label className="inline-toggle">
+                  <input
+                    type="checkbox"
+                    checked={useCodexImageGenDraft}
+                    onChange={(event) => onUseCodexImageGenChange(event.target.checked)}
+                  />
+                  <span>
+                    Usar o Codex CLI para gerar imagens
+                    <small>
+                      Quando ativado, a geração/edição de imagens usa o Codex CLI local (assinatura
+                      ChatGPT, sem custo por imagem) em vez da Kie.ai. A imagem base é enviada como
+                      arquivo local. Requer o Codex CLI instalado e logado, com o recurso
+                      image_generation habilitado.
+                    </small>
+                  </span>
+                </label>
+                <label>
+                  Caminho do executável Codex (opcional)
+                  <small>Deixe em branco para usar "codex" do PATH. Ex.: C:\Users\seu-usuario\AppData\Local\codex\codex.cmd</small>
+                  <input
+                    value={codexBinDraft}
+                    onChange={(event) => onCodexBinChange(event.target.value)}
+                    placeholder="codex"
                   />
                 </label>
               </section>
