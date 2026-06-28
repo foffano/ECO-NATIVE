@@ -98,6 +98,16 @@ def edit_image_with_codex(
         "Do not create or modify any other file, and do not write any code."
     )
 
+    # IMPORTANTE: a flag `--image` do `codex exec` e variadica (`--image <FILE>...`),
+    # ou seja, ela consome todos os argumentos posicionais seguintes como imagens.
+    # Se o prompt fosse passado como argumento posicional logo apos `--image <src>`,
+    # ele seria engolido como se fosse outra imagem e o Codex acabaria lendo o prompt
+    # do stdin (vazio) -> "No prompt provided via stdin".
+    #
+    # Por isso NAO passamos o prompt na linha de comando: deixamos o argumento
+    # posicional `[PROMPT]` ausente e entregamos a instrucao via stdin, que e
+    # exatamente o que o `codex exec` espera nesse caso. `--image` fica como ultima
+    # flag e recebe apenas a imagem de origem.
     cmd = [
         codex_bin,
         "exec",
@@ -105,15 +115,16 @@ def edit_image_with_codex(
         str(work_dir),
         "--sandbox",
         "workspace-write",
+        "--skip-git-repo-check",
         "--image",
         str(source_path),
-        instruction,
     ]
 
     started_at = time.time()
     try:
         completed = subprocess.run(
             cmd,
+            input=instruction,
             capture_output=True,
             text=True,
             timeout=timeout_seconds,
