@@ -138,7 +138,17 @@ def create_kie_task(prompt: str, image_url: str, api_key: str, model: str = "qwe
         data = read_response_json(response)
     except HttpResponseError as exc:
         raise RuntimeError(f"Falha ao criar task Kie.ai: {exc}") from exc
-    task_id = data.get("data", {}).get("taskId")
+    if not isinstance(data, dict):
+        raise RuntimeError(
+            f"Falha ao criar task Kie.ai: resposta inesperada ({read_response_text(response, limit=300)})"
+        )
+    # Em respostas de erro/limite a Kie costuma devolver {"data": null}: usar
+    # .get("data", {}) NAO protege (a chave existe com valor None), entao o
+    # encadeamento .get("taskId") levantaria 'NoneType' object has no attribute 'get'.
+    record = data.get("data")
+    if not isinstance(record, dict):
+        record = {}
+    task_id = record.get("taskId")
     if response.status_code == 200 and data.get("code") == 200 and task_id:
         return task_id
     raise RuntimeError(f"Falha ao criar task Kie.ai: {read_response_text(response, limit=300)}")
@@ -157,7 +167,15 @@ def poll_kie_task(task_id: str, api_key: str, max_wait_seconds: int = 300) -> st
             data = read_response_json(response)
         except HttpResponseError as exc:
             raise RuntimeError(f"Falha ao consultar task Kie.ai: {exc}") from exc
-        record = data.get("data", {})
+        if not isinstance(data, dict):
+            raise RuntimeError(
+                f"Falha ao consultar task Kie.ai: resposta inesperada ({read_response_text(response, limit=300)})"
+            )
+        # {"data": null} em respostas de erro/limite faria .get("data", {})
+        # retornar None (a chave existe), logo guardamos explicitamente.
+        record = data.get("data")
+        if not isinstance(record, dict):
+            record = {}
         state = record.get("state")
         if data.get("code") == 200 and state == "success":
             result = json.loads(record.get("resultJson") or "{}")

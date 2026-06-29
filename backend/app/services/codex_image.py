@@ -22,9 +22,28 @@ from backend.app.core.settings import get_settings
 
 _IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
 
+# Frases que o Codex CLI costuma imprimir (stdout/stderr) quando a conta atinge
+# um limite de uso/cota ou e barrada por rate limit. Mantidas em minusculo para
+# comparacao case-insensitive.
+_CODEX_LIMIT_MARKERS = (
+    "rate limit",
+    "usage limit",
+    "quota",
+    "429",
+    "too many requests",
+    "try again",
+    "reached your",
+)
+
 
 class CodexImageError(RuntimeError):
     """Erro ao gerar/editar imagem via Codex CLI."""
+
+
+def _looks_like_usage_limit(*texts: str) -> bool:
+    """True se alguma das saidas indicar limite de uso/cota/rate limit do Codex."""
+    combined = " ".join(text for text in texts if text).lower()
+    return any(marker in combined for marker in _CODEX_LIMIT_MARKERS)
 
 
 def _resolve_codex_bin() -> str:
@@ -194,8 +213,31 @@ def edit_image_with_codex(
                 ) from exc
             return output_path
 
-        stdout_tail = (completed.stdout or "")[-800:]
-        stderr_tail = (completed.stderr or "")[-800:]
+        # Nenhuma imagem foi gerada. Antes de cair na mensagem generica, tentamos
+        # reconhecer um limite de uso/cota/rate limit do Codex para dar um retorno
+        # claro ao usuario. Esse caso costuma vir com exit code != 0 e uma mensagem
+        # de limite no stdout/stderr (mas tambem cobrimos exit 0 com aviso de limite).
+        stdout_text = completed.stdout or ""
+        stderr_text = completed.stderr or ""
+        stdout_tail = stdout_text[-800:]
+        stderr_tail = stderr_text[-800:]
+
+        if _looks_like_usage_limit(stdout_text, stderr_text):
+            raise CodexImageError(
+                "Limite de uso do Codex atingido. Tente novamente mais tarde.\n"
+                f"Codigo de saida: {completed.returncode}\n"
+                f"stdout: {stdout_tail}\n"
+                f"stderr: {stderr_tail}"
+            )
+
+        if completed.returncode != 0:
+            raise CodexImageError(
+                "Codex CLI finalizou com erro e nenhuma imagem foi gerada.\n"
+                f"Codigo de saida: {completed.returncode}\n"
+                f"stdout: {stdout_tail}\n"
+                f"stderr: {stderr_tail}"
+            )
+
         raise CodexImageError(
             "Codex CLI finalizou mas a imagem esperada nao foi gerada.\n"
             f"Codigo de saida: {completed.returncode}\n"
