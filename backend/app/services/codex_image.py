@@ -10,10 +10,10 @@ O Codex usa a assinatura ChatGPT (login OAuth) para a skill `imagegen` /
 ferramenta `image_gen`, entao no modo padrao nao e necessaria a OPENAI_API_KEY.
 """
 
+import errno
 import os
 import shutil
 import subprocess
-import tempfile
 import time
 import uuid
 from pathlib import Path
@@ -87,26 +87,27 @@ def _newest_image_in(directory: Path) -> Path | None:
     return newest[1] if newest else None
 
 
-# Copia resiliente: no Windows, um arquivo recem-criado (pelo processo codex ou
-# por um filho dele) costuma dar "Permission denied" (Errno 13) por alguns
-# instantes — geralmente o antivirus/Windows Defender escaneando o arquivo novo
-# em tempo real, ou um handle ainda nao liberado. E um lock TRANSIENTE, nao uma
-# permissao permanentemente negada, entao re-tentar com um backoff curto resolve.
-_COPY_MAX_ATTEMPTS = 8
-_COPY_BACKOFF_SECONDS = 0.4
+# Orcamento de re-tentativa para mover/copiar o PNG gerado. Mesmo com a causa-raiz
+# resolvida (ver `codex_sandbox_mode`), mantemos um backoff como guarda secundaria
+# contra locks TRANSIENTES no Windows (antivirus/Windows Defender escaneando o
+# arquivo novo, ou um handle ainda nao liberado). O orcamento e maior (~15s) porque
+# o backoff curto anterior (~2.8s) era insuficiente em algumas maquinas.
+_MOVE_MAX_ATTEMPTS = 15
+_MOVE_BACKOFF_SECONDS = 1.0
 
 
 def _resilient_copy(source: Path, destination: Path) -> None:
     """Copia source -> destination tolerando locks transientes (AV/handle).
 
-    Re-tenta em PermissionError/OSError com backoff curto. So levanta a ultima
-    excecao apos esgotar todas as tentativas, preservando o texto do erro
-    original para diagnostico.
+    Re-tenta em PermissionError/OSError com backoff. So levanta a ultima excecao
+    apos esgotar todas as tentativas, preservando o texto do erro original para
+    diagnostico. Usada como fallback quando `os.replace` nao se aplica (ex.: a
+    origem caiu em ~/.codex/generated_images, em outro diretorio/volume).
     """
     destination.parent.mkdir(parents=True, exist_ok=True)
 
     last_error: OSError | None = None
-    for attempt in range(_COPY_MAX_ATTEMPTS):
+    for attempt in range(_MOVE_MAX_ATTEMPTS):
         try:
             # Le os bytes da origem e escreve no destino. Ler tudo de uma vez
             # mantem o handle da origem aberto pelo menor tempo possivel, o que
@@ -117,12 +118,62 @@ def _resilient_copy(source: Path, destination: Path) -> None:
             return
         except OSError as exc:
             last_error = exc
-            if attempt < _COPY_MAX_ATTEMPTS - 1:
-                time.sleep(_COPY_BACKOFF_SECONDS)
+            if attempt < _MOVE_MAX_ATTEMPTS - 1:
+                time.sleep(_MOVE_BACKOFF_SECONDS)
 
     # Esgotou as tentativas: propaga a ultima falha (com seu texto original).
     assert last_error is not None
     raise last_error
+
+
+def _move_into_place(source: Path, destination: Path) -> None:
+    """Move o PNG gerado para `destination` de forma robusta.
+
+    Estrategia primaria: `os.replace(source, destination)`. Quando origem e destino
+    estao no MESMO volume (garantido aqui, pois o diretorio de trabalho fica DENTRO
+    da pasta do produto), `os.replace` e um rename atomico que NAO precisa ler os
+    bytes do arquivo — basta direito de apagar a origem (que temos, pois a pasta do
+    produto pertence ao processo) e escrever no destino. Isso e importante porque o
+    bug original era justamente um "Permission denied" ao LER o arquivo gerado sob
+    sandbox; um rename contorna a leitura.
+
+    Fallback: se `os.replace` falhar de forma persistente (ex.: origem em outro
+    volume/diretorio como ~/.codex/generated_images, ou lock residual), cai para a
+    copia resiliente byte-a-byte e tenta remover a origem.
+
+    Em ambos os caminhos ha re-tentativa com backoff como guarda contra locks
+    transientes. So levanta a ultima excecao apos esgotar o orcamento.
+    """
+    destination.parent.mkdir(parents=True, exist_ok=True)
+
+    last_error: OSError | None = None
+    for attempt in range(_MOVE_MAX_ATTEMPTS):
+        try:
+            os.replace(source, destination)
+            return
+        except OSError as exc:
+            last_error = exc
+            # Origem e destino em volumes diferentes: `os.replace` nunca vai
+            # funcionar (erro deterministico, nao transiente). Nao adianta re-tentar
+            # — vai direto para a copia. Cobre tanto EXDEV (errno) quanto o
+            # ERROR_NOT_SAME_DEVICE do Windows (winerror 17).
+            if exc.errno == errno.EXDEV or getattr(exc, "winerror", None) == 17:
+                break
+            if attempt < _MOVE_MAX_ATTEMPTS - 1:
+                time.sleep(_MOVE_BACKOFF_SECONDS)
+
+    # `os.replace` nao funcionou (provavelmente volume/diretorio diferente, como a
+    # pasta compartilhada ~/.codex/generated_images). Tenta a copia resiliente e,
+    # se conseguir, remove a origem. Se nem isso funcionar, propaga o erro original.
+    try:
+        _resilient_copy(source, destination)
+    except OSError:
+        assert last_error is not None
+        raise last_error
+    try:
+        source.unlink()
+    except OSError:
+        pass
 
 
 def _find_by_exact_name(directory: Path, name: str) -> Path | None:
@@ -150,11 +201,19 @@ def edit_image_with_codex(
 
     Retorna o caminho final gerado. Levanta CodexImageError em caso de falha.
 
-    Concorrencia: cada chamada usa um diretorio de trabalho TEMPORARIO exclusivo
-    e um nome de arquivo unico (UUID). Assim, mesmo quando varios produtos sao
-    gerados em paralelo (o lote do frontend dispara todos de uma vez e o FastAPI
-    roda cada rota sincrona em uma thread do pool), duas execucoes nunca enxergam
-    o arquivo uma da outra -> nao ha como uma imagem cair no produto errado.
+    Concorrencia: cada chamada usa um diretorio de trabalho exclusivo (subpasta
+    oculta dentro da pasta do produto) e um nome de arquivo unico (UUID). Assim,
+    mesmo quando varios produtos sao gerados em paralelo (o lote do frontend dispara
+    todos de uma vez e o FastAPI roda cada rota sincrona em uma thread do pool), duas
+    execucoes nunca enxergam o arquivo uma da outra -> nao ha como uma imagem cair no
+    produto errado.
+
+    Permissoes (Windows): o Codex roda com `--sandbox` configuravel
+    (`codex_sandbox_mode`, padrao `danger-full-access`). Sob `workspace-write` o
+    Codex executa suas ferramentas como um usuario de sandbox restrito e o PNG nasce
+    com dono/ACL que o backend (processo nao-elevado) nao consegue ler -> "Permission
+    denied". Com `danger-full-access` o arquivo nasce com o token normal do usuario,
+    legivel sem elevacao.
     """
     source_path = Path(source_path)
     output_path = Path(output_path)
@@ -169,13 +228,24 @@ def edit_image_with_codex(
         except OSError:
             pass
 
+    settings = get_settings()
     codex_bin = _resolve_codex_bin()
+    sandbox_mode = (settings.codex_sandbox_mode or "danger-full-access").strip()
 
     # Diretorio de trabalho exclusivo desta chamada: isola execucoes concorrentes.
-    work_dir = Path(tempfile.mkdtemp(prefix="codex_imggen_"))
-    # Nome unico desta chamada: permite casar o arquivo por nome exato (e nao por
-    # "mais recente") mesmo se o Codex salvar em ~/.codex/generated_images.
+    #
+    # Fica DENTRO da pasta do produto (mesmo volume que output_path) por dois motivos:
+    #  1) o move final vira um `os.replace` no mesmo volume -> rename atomico, sem
+    #     precisar LER os bytes do arquivo (o bug original era "Permission denied" na
+    #     leitura do PNG gerado sob sandbox);
+    #  2) evita o %TEMP%, cujo ACL/integridade sob `--sandbox workspace-write` era a
+    #     causa-raiz do erro.
+    # Prefixo com "." (oculto) e removido no finally: nunca e confundido com um asset
+    # do produto (os assets sao rastreados por nome de arquivo explicito no banco, e
+    # nada varre a pasta do produto em busca de imagens para criar assets).
     unique_name = f"ecogen_{uuid.uuid4().hex}.png"
+    work_dir = output_path.parent / f".codexgen_{uuid.uuid4().hex}"
+    work_dir.mkdir(parents=True, exist_ok=True)
     expected_in_work = work_dir / unique_name
 
     instruction = (
@@ -203,7 +273,7 @@ def edit_image_with_codex(
         "--cd",
         str(work_dir),
         "--sandbox",
-        "workspace-write",
+        sandbox_mode,
         "--skip-git-repo-check",
         "--image",
         str(source_path),
@@ -244,7 +314,7 @@ def edit_image_with_codex(
 
         if produced is not None:
             try:
-                _resilient_copy(produced, output_path)
+                _move_into_place(produced, output_path)
             except OSError as exc:
                 raise CodexImageError(
                     f"Falha ao mover imagem gerada pelo Codex: {exc}"

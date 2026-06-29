@@ -29,6 +29,7 @@ class AppSettings:
     kie_image_model: str | None
     use_codex_image_gen: bool
     codex_bin: str | None
+    codex_sandbox_mode: str
     cloudflare_account_id: str | None
     cloudflare_r2_bucket_name: str | None
     cloudflare_r2_access_key: str | None
@@ -45,6 +46,16 @@ def get_settings() -> AppSettings:
         kie_image_model=os.getenv("KIE_IMAGE_MODEL", "qwen/image-edit"),
         use_codex_image_gen=_env_bool("USE_CODEX_IMAGE_GEN", False),
         codex_bin=os.getenv("CODEX_BIN"),
+        # Modo de sandbox do Codex CLI para a geracao de imagem. No Windows, o modo
+        # `workspace-write` executa as ferramentas do Codex sob um usuario de sandbox
+        # restrito (grupo `CodexSandboxUsers`): o PNG resultante fica com dono/ACL
+        # do sandbox e o backend (processo normal, nao-elevado) recebe "Permission
+        # denied" ao tentar ler. Rodar como Administrador "funciona" porque um token
+        # elevado contorna a ACL — mas isso nao e aceitavel. Com `danger-full-access`
+        # as ferramentas rodam com o token normal do usuario, entao o arquivo nasce
+        # com dono = usuario atual e ACL legivel sem elevacao. Como e a maquina do
+        # proprio usuario gerando os proprios assets locais, full access e aceitavel.
+        codex_sandbox_mode=(os.getenv("CODEX_SANDBOX_MODE") or "danger-full-access").strip(),
         cloudflare_account_id=os.getenv("CLOUDFLARE_ACCOUNT_ID"),
         cloudflare_r2_bucket_name=os.getenv("CLOUDFLARE_R2_BUCKET_NAME"),
         cloudflare_r2_access_key=os.getenv("CLOUDFLARE_R2_ACCESS_KEY"),
