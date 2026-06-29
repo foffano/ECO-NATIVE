@@ -13,7 +13,9 @@ ferramenta `image_gen`, entao no modo padrao nao e necessaria a OPENAI_API_KEY.
 import os
 import shutil
 import subprocess
+import tempfile
 import time
+import uuid
 from pathlib import Path
 
 from backend.app.core.settings import get_settings
@@ -44,24 +46,41 @@ def _resolve_codex_bin() -> str:
     return candidate
 
 
-def _find_generated_image(search_dirs: list[Path], modified_after: float) -> Path | None:
-    """Procura o arquivo de imagem mais recente criado depois de modified_after."""
+def _newest_image_in(directory: Path) -> Path | None:
+    """Retorna a imagem mais recente dentro de um diretorio (recursivo).
+
+    Usado APENAS sobre o diretorio de trabalho exclusivo desta chamada, que
+    nenhuma outra execucao concorrente enxerga, entao "mais recente" e seguro
+    aqui (ao contrario de uma pasta compartilhada).
+    """
     newest: tuple[float, Path] | None = None
-    for directory in search_dirs:
-        if not directory or not directory.is_dir():
+    if not directory or not directory.is_dir():
+        return None
+    for entry in directory.rglob("*"):
+        if not entry.is_file() or entry.suffix.lower() not in _IMAGE_SUFFIXES:
             continue
-        for entry in directory.rglob("*"):
-            if not entry.is_file() or entry.suffix.lower() not in _IMAGE_SUFFIXES:
-                continue
-            try:
-                mtime = entry.stat().st_mtime
-            except OSError:
-                continue
-            if mtime < modified_after - 1:
-                continue
-            if newest is None or mtime > newest[0]:
-                newest = (mtime, entry)
+        try:
+            mtime = entry.stat().st_mtime
+        except OSError:
+            continue
+        if newest is None or mtime > newest[0]:
+            newest = (mtime, entry)
     return newest[1] if newest else None
+
+
+def _find_by_exact_name(directory: Path, name: str) -> Path | None:
+    """Procura um arquivo com nome EXATO dentro de directory (recursivo).
+
+    Diferente de "imagem mais recente", casar pelo nome unico desta chamada e
+    seguro mesmo em uma pasta compartilhada (~/.codex/generated_images) usada
+    por varias execucoes concorrentes: nunca pegamos a imagem de outro produto.
+    """
+    if not directory or not directory.is_dir():
+        return None
+    for entry in directory.rglob(name):
+        if entry.is_file() and entry.suffix.lower() in _IMAGE_SUFFIXES:
+            return entry
+    return None
 
 
 def edit_image_with_codex(
@@ -73,6 +92,12 @@ def edit_image_with_codex(
     """Edita source_path aplicando prompt e grava o resultado em output_path.
 
     Retorna o caminho final gerado. Levanta CodexImageError em caso de falha.
+
+    Concorrencia: cada chamada usa um diretorio de trabalho TEMPORARIO exclusivo
+    e um nome de arquivo unico (UUID). Assim, mesmo quando varios produtos sao
+    gerados em paralelo (o lote do frontend dispara todos de uma vez e o FastAPI
+    roda cada rota sincrona em uma thread do pool), duas execucoes nunca enxergam
+    o arquivo uma da outra -> nao ha como uma imagem cair no produto errado.
     """
     source_path = Path(source_path)
     output_path = Path(output_path)
@@ -80,8 +105,7 @@ def edit_image_with_codex(
     if not source_path.is_file():
         raise CodexImageError(f"Imagem base nao encontrada: {source_path}")
 
-    work_dir = output_path.parent
-    work_dir.mkdir(parents=True, exist_ok=True)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
     if output_path.exists():
         try:
             output_path.unlink()
@@ -89,11 +113,19 @@ def edit_image_with_codex(
             pass
 
     codex_bin = _resolve_codex_bin()
+
+    # Diretorio de trabalho exclusivo desta chamada: isola execucoes concorrentes.
+    work_dir = Path(tempfile.mkdtemp(prefix="codex_imggen_"))
+    # Nome unico desta chamada: permite casar o arquivo por nome exato (e nao por
+    # "mais recente") mesmo se o Codex salvar em ~/.codex/generated_images.
+    unique_name = f"ecogen_{uuid.uuid4().hex}.png"
+    expected_in_work = work_dir / unique_name
+
     instruction = (
         "Use the built-in image_gen tool (imagegen skill) to edit the attached image. "
         f"Apply exactly this change: {prompt.strip()}. "
         "Use quality=high, size=1024x1024. "
-        f"Save the final result as a single PNG file named '{output_path.name}' "
+        f"Save the final result as a single PNG file named '{unique_name}' "
         "in the current working directory, overwriting it if it already exists. "
         "Do not create or modify any other file, and do not write any code."
     )
@@ -120,48 +152,55 @@ def edit_image_with_codex(
         str(source_path),
     ]
 
-    started_at = time.time()
     try:
-        completed = subprocess.run(
-            cmd,
-            input=instruction,
-            capture_output=True,
-            text=True,
-            timeout=timeout_seconds,
-            cwd=str(work_dir),
-        )
-    except FileNotFoundError as exc:
-        raise CodexImageError(
-            "Codex CLI nao encontrado. Instale o Codex CLI e/ou ajuste o caminho do "
-            "executavel no campo CODEX_BIN das integracoes."
-        ) from exc
-    except subprocess.TimeoutExpired as exc:
-        raise CodexImageError("Timeout aguardando o Codex CLI gerar a imagem.") from exc
-
-    if output_path.is_file():
-        return output_path
-
-    # Fallback: o Codex pode ter salvo a imagem com outro nome / em outra pasta
-    # (por exemplo ~/.codex/generated_images). Tenta localizar o arquivo mais
-    # recente e move para o destino esperado.
-    candidate = _find_generated_image(
-        [work_dir, Path.home() / ".codex" / "generated_images"],
-        modified_after=started_at,
-    )
-    if candidate and candidate.resolve() != output_path.resolve():
         try:
-            shutil.copyfile(candidate, output_path)
-            return output_path
-        except OSError as exc:
-            raise CodexImageError(f"Falha ao mover imagem gerada pelo Codex: {exc}") from exc
-    if candidate:
-        return candidate
+            completed = subprocess.run(
+                cmd,
+                input=instruction,
+                capture_output=True,
+                text=True,
+                timeout=timeout_seconds,
+                cwd=str(work_dir),
+            )
+        except FileNotFoundError as exc:
+            raise CodexImageError(
+                "Codex CLI nao encontrado. Instale o Codex CLI e/ou ajuste o caminho do "
+                "executavel no campo CODEX_BIN das integracoes."
+            ) from exc
+        except subprocess.TimeoutExpired as exc:
+            raise CodexImageError("Timeout aguardando o Codex CLI gerar a imagem.") from exc
 
-    stdout_tail = (completed.stdout or "")[-800:]
-    stderr_tail = (completed.stderr or "")[-800:]
-    raise CodexImageError(
-        "Codex CLI finalizou mas a imagem esperada nao foi gerada.\n"
-        f"Codigo de saida: {completed.returncode}\n"
-        f"stdout: {stdout_tail}\n"
-        f"stderr: {stderr_tail}"
-    )
+        # 1) Caso normal: o arquivo com o nome pedido esta no diretorio exclusivo.
+        produced: Path | None = expected_in_work if expected_in_work.is_file() else None
+        # 2) O Codex pode ter salvo com outro nome dentro do diretorio exclusivo.
+        #    Como o diretorio so pertence a esta chamada, pegar a imagem mais
+        #    recente dele e seguro (nenhuma outra execucao escreve aqui).
+        if produced is None:
+            produced = _newest_image_in(work_dir)
+        # 3) Ultimo recurso: o Codex pode ter salvo na pasta compartilhada
+        #    ~/.codex/generated_images. Casamos APENAS pelo nome unico desta
+        #    chamada (nunca por "mais recente"), o que e seguro sob concorrencia.
+        if produced is None:
+            produced = _find_by_exact_name(
+                Path.home() / ".codex" / "generated_images", unique_name
+            )
+
+        if produced is not None:
+            try:
+                shutil.copyfile(produced, output_path)
+            except OSError as exc:
+                raise CodexImageError(
+                    f"Falha ao mover imagem gerada pelo Codex: {exc}"
+                ) from exc
+            return output_path
+
+        stdout_tail = (completed.stdout or "")[-800:]
+        stderr_tail = (completed.stderr or "")[-800:]
+        raise CodexImageError(
+            "Codex CLI finalizou mas a imagem esperada nao foi gerada.\n"
+            f"Codigo de saida: {completed.returncode}\n"
+            f"stdout: {stdout_tail}\n"
+            f"stderr: {stderr_tail}"
+        )
+    finally:
+        shutil.rmtree(work_dir, ignore_errors=True)
