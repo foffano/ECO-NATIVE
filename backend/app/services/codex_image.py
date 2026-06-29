@@ -87,6 +87,44 @@ def _newest_image_in(directory: Path) -> Path | None:
     return newest[1] if newest else None
 
 
+# Copia resiliente: no Windows, um arquivo recem-criado (pelo processo codex ou
+# por um filho dele) costuma dar "Permission denied" (Errno 13) por alguns
+# instantes — geralmente o antivirus/Windows Defender escaneando o arquivo novo
+# em tempo real, ou um handle ainda nao liberado. E um lock TRANSIENTE, nao uma
+# permissao permanentemente negada, entao re-tentar com um backoff curto resolve.
+_COPY_MAX_ATTEMPTS = 8
+_COPY_BACKOFF_SECONDS = 0.4
+
+
+def _resilient_copy(source: Path, destination: Path) -> None:
+    """Copia source -> destination tolerando locks transientes (AV/handle).
+
+    Re-tenta em PermissionError/OSError com backoff curto. So levanta a ultima
+    excecao apos esgotar todas as tentativas, preservando o texto do erro
+    original para diagnostico.
+    """
+    destination.parent.mkdir(parents=True, exist_ok=True)
+
+    last_error: OSError | None = None
+    for attempt in range(_COPY_MAX_ATTEMPTS):
+        try:
+            # Le os bytes da origem e escreve no destino. Ler tudo de uma vez
+            # mantem o handle da origem aberto pelo menor tempo possivel, o que
+            # ajuda quando o lock do antivirus e momentaneo.
+            data = source.read_bytes()
+            with open(destination, "wb") as out:
+                out.write(data)
+            return
+        except OSError as exc:
+            last_error = exc
+            if attempt < _COPY_MAX_ATTEMPTS - 1:
+                time.sleep(_COPY_BACKOFF_SECONDS)
+
+    # Esgotou as tentativas: propaga a ultima falha (com seu texto original).
+    assert last_error is not None
+    raise last_error
+
+
 def _find_by_exact_name(directory: Path, name: str) -> Path | None:
     """Procura um arquivo com nome EXATO dentro de directory (recursivo).
 
@@ -206,7 +244,7 @@ def edit_image_with_codex(
 
         if produced is not None:
             try:
-                shutil.copyfile(produced, output_path)
+                _resilient_copy(produced, output_path)
             except OSError as exc:
                 raise CodexImageError(
                     f"Falha ao mover imagem gerada pelo Codex: {exc}"
