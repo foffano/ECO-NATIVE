@@ -54,6 +54,33 @@ def _extend_unique_assets(product: Product, assets: list[Asset]) -> list[Asset]:
     return added
 
 
+def _persist_image_asset(product: Product, asset: Asset) -> None:
+    """Salva incrementalmente um asset recém-gerado no produto/store.
+
+    Chamado pelas funções de geração em lote após CADA imagem. Dedup por
+    (kind, path) via `_extend_unique_assets`, então re-executar após uma falha
+    parcial (com o ramo de reaproveitamento `output_path.exists()`) nunca cria
+    Assets duplicados. Persistir a cada item garante que, se a próxima imagem
+    falhar (ex.: limite de uso do Codex), as anteriores já estejam no anúncio.
+    """
+    _extend_unique_assets(product, [asset])
+    store.upsert_product(product)
+
+
+def _finalize_product_image_metadata(product: Product, store_profile) -> None:
+    product.status = ProductStatus.in_edit
+    product.metadata["image_prompt"] = store_profile.image_prompt
+    product.metadata["image_prompts"] = store_profile.image_prompts
+    product.metadata["color_variation_prompt"] = store_profile.color_variation_prompt
+    product.metadata["generated_image_count"] = len(
+        [asset for asset in product.assets if asset.kind.startswith("generated_")]
+    )
+    product.metadata["color_variation_count"] = len(
+        [asset for asset in product.assets if asset.kind.startswith("color_")]
+    )
+    store.upsert_product(product)
+
+
 def run_collect_job(job: Job, payload) -> Job:
     job.status = JobStatus.running
     job.progress = 20
@@ -262,7 +289,25 @@ def run_image_job(
     store_profile = get_store_profile(project.store_profile_id if project else None)
     product = next((item for item in state.products if item.id == product.id), product)
 
+    # Totais esperados, usados para informar progresso parcial em caso de falha
+    # no meio do lote. studio espelha o fallback de generate_studio_images
+    # (image_prompts vazio cai em IMAGE_PROMPTS).
+    studio_total = len(store_profile.image_prompts or IMAGE_PROMPTS) if generate_base_images else 0
+    color_total = len(selected_colors) if selected_colors else 0
+    studio_done = 0
+    color_done = 0
     color_count = 0
+
+    def _on_studio_asset(asset: Asset) -> None:
+        nonlocal studio_done
+        _persist_image_asset(product, asset)
+        studio_done += 1
+
+    def _on_color_asset(asset: Asset) -> None:
+        nonlocal color_done
+        _persist_image_asset(product, asset)
+        color_done += 1
+
     try:
         studio_assets: list[Asset] = []
         if generate_base_images:
@@ -270,9 +315,8 @@ def run_image_job(
                 product,
                 extra_prompt=store_profile.image_prompt,
                 image_prompts=store_profile.image_prompts,
+                on_asset=_on_studio_asset,
             )
-            _extend_unique_assets(product, studio_assets)
-            store.upsert_product(product)
 
         if selected_colors:
             job.progress = 70
@@ -290,37 +334,53 @@ def run_image_job(
             if source_asset:
                 ensure_product_sku(product, state.products, project, store_profile)
                 product.metadata["color_skus"] = ensure_color_skus(product, selected_colors)
-                color_assets = generate_color_variations_with_kie(
+                generate_color_variations_with_kie(
                     product,
                     source_asset,
                     selected_colors,
                     store_profile.color_variation_prompt,
                     extra_prompt=store_profile.image_prompt,
+                    on_asset=_on_color_asset,
                 )
-                _extend_unique_assets(product, color_assets)
-                color_count = len(color_assets)
+                color_count = color_done
             else:
                 raise RuntimeError("Gere as imagens base antes de criar variações de cor.")
     except CoverImageError as exc:
+        # A capa é preparada antes de qualquer geração; nada foi gerado ainda.
         job.status = JobStatus.failed
         job.progress = 100
         job.message = "Falha ao preparar capa do produto"
         job.logs.append(f"{exc.__class__.__name__}: {exc}")
         return store.upsert_job(job)
     except Exception as exc:
+        # Falha no meio do lote: as imagens já geradas foram persistidas
+        # incrementalmente via on_asset, então NÃO as perdemos. Marcamos o job
+        # como falho (o erro chega ao usuário) mas com informação de sucesso
+        # parcial, e preservamos as imagens salvas no anúncio.
+        job.logs.append(_job_error_log(exc))
+        if studio_done or color_done:
+            _finalize_product_image_metadata(product, store_profile)
+        produced_parts: list[str] = []
+        if generate_base_images:
+            produced_parts.append(f"{studio_done} de {studio_total} imagem(ns) base")
+        if selected_colors:
+            produced_parts.append(f"{color_done} de {color_total} variação(ões) de cor")
+        produced_summary = "; ".join(produced_parts) or "0 imagens"
+        reason = (str(exc).splitlines() or [""])[0].strip() or exc.__class__.__name__
         job.status = JobStatus.failed
         job.progress = 100
-        job.message = "Falha ao gerar imagens"
-        job.logs.append(_job_error_log(exc))
+        if studio_done or color_done:
+            partial_message = (
+                f"Falha parcial: geradas {produced_summary}. "
+                f"As imagens já geradas foram salvas no anúncio. Motivo da falha: {reason}"
+            )
+        else:
+            partial_message = f"Falha ao gerar imagens. Motivo: {reason}"
+        job.message = partial_message
+        job.logs.append(partial_message)
         return store.upsert_job(job)
 
-    product.status = ProductStatus.in_edit
-    product.metadata["image_prompt"] = store_profile.image_prompt
-    product.metadata["image_prompts"] = store_profile.image_prompts
-    product.metadata["color_variation_prompt"] = store_profile.color_variation_prompt
-    product.metadata["generated_image_count"] = len([asset for asset in product.assets if asset.kind.startswith("generated_")])
-    product.metadata["color_variation_count"] = len([asset for asset in product.assets if asset.kind.startswith("color_")])
-    store.upsert_product(product)
+    _finalize_product_image_metadata(product, store_profile)
     if color_count:
         if generate_base_images:
             return _finish_job(job, f"Imagens principais e {color_count} variações de cor prontas")

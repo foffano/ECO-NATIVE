@@ -1,5 +1,6 @@
 import json
 import time
+from collections.abc import Callable
 from pathlib import Path
 from urllib.parse import quote
 
@@ -200,7 +201,17 @@ def generate_studio_images(
     product: Product,
     extra_prompt: str = "",
     image_prompts: dict[str, str] | None = None,
+    on_asset: Callable[[Asset], None] | None = None,
 ) -> list[Asset]:
+    """Gera as imagens de estúdio (uma por prompt).
+
+    `on_asset`, se fornecido, é chamado logo após CADA imagem ser gerada e ter
+    seu Asset criado. Isso permite ao chamador persistir incrementalmente cada
+    resultado no produto/store, de modo que uma falha no meio do lote (ex.:
+    limite de uso do Codex levantando CodexImageError) NÃO descarte as imagens
+    já geradas — elas continuam visíveis no anúncio. A exceção é propagada
+    normalmente depois que o callback dos itens anteriores já rodou.
+    """
     settings = get_settings()
     if not settings.use_codex_image_gen and not settings.kie_api_key:
         raise RuntimeError("KIE_API_KEY nao configurada.")
@@ -224,14 +235,15 @@ def generate_studio_images(
         output_path = output_dir / studio_image_filename(sku, prompt_key)
         if output_path.exists():
             public_url = upload_file_to_r2(output_path, r2_key_prefix(product), force=True)
-            created_assets.append(
-                Asset(
-                    product_id=product.id,
-                    kind=kind,
-                    path=str(output_path),
-                    public_url=public_url,
-                )
+            asset = Asset(
+                product_id=product.id,
+                kind=kind,
+                path=str(output_path),
+                public_url=public_url,
             )
+            created_assets.append(asset)
+            if on_asset is not None:
+                on_asset(asset)
             continue
         render_image_edit(
             product,
@@ -243,7 +255,10 @@ def generate_studio_images(
             cost_label=f"Imagem base: {prompt_key}",
         )
         public_url = upload_file_to_r2(output_path, r2_key_prefix(product), force=True)
-        created_assets.append(Asset(product_id=product.id, kind=kind, path=str(output_path), public_url=public_url))
+        asset = Asset(product_id=product.id, kind=kind, path=str(output_path), public_url=public_url)
+        created_assets.append(asset)
+        if on_asset is not None:
+            on_asset(asset)
 
     return created_assets
 
@@ -330,7 +345,15 @@ def generate_color_variations_with_kie(
     selected_colors: list[str],
     color_prompt_template: str,
     extra_prompt: str = "",
+    on_asset: Callable[[Asset], None] | None = None,
 ) -> list[Asset]:
+    """Gera as variações de cor selecionadas (uma por cor).
+
+    Igual a `generate_studio_images`, aceita `on_asset` para persistência
+    incremental: cada variação concluída é entregue ao callback antes de seguir
+    para a próxima, então uma falha no meio do lote (Codex ou Kie) mantém as
+    cores já geradas salvas no produto.
+    """
     settings = get_settings()
     if not settings.use_codex_image_gen and not settings.kie_api_key:
         raise RuntimeError("KIE_API_KEY nao configurada.")
@@ -354,14 +377,15 @@ def generate_color_variations_with_kie(
         kind = f"color_{color_name}"
         if output_path.exists():
             public_url = upload_file_to_r2(output_path, r2_key_prefix(product), force=True)
-            created_assets.append(
-                Asset(
-                    product_id=product.id,
-                    kind=kind,
-                    path=str(output_path),
-                    public_url=public_url,
-                )
+            asset = Asset(
+                product_id=product.id,
+                kind=kind,
+                path=str(output_path),
+                public_url=public_url,
             )
+            created_assets.append(asset)
+            if on_asset is not None:
+                on_asset(asset)
             continue
 
         render_image_edit(
@@ -374,6 +398,9 @@ def generate_color_variations_with_kie(
             cost_label=f"Variação de cor: {color_name}",
         )
         public_url = upload_file_to_r2(output_path, r2_key_prefix(product), force=True)
-        created_assets.append(Asset(product_id=product.id, kind=kind, path=str(output_path), public_url=public_url))
+        asset = Asset(product_id=product.id, kind=kind, path=str(output_path), public_url=public_url)
+        created_assets.append(asset)
+        if on_asset is not None:
+            on_asset(asset)
 
     return created_assets
