@@ -44,7 +44,7 @@ import {
 
 initUiTheme();
 
-const API_BASE = "http://127.0.0.1:8765";
+const API_BASE = "http://127.0.0.1:18765";
 const ONBOARDING_COMPLETE_KEY = "eco_native_onboarding_complete";
 
 declare global {

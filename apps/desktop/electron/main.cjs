@@ -6,7 +6,7 @@ const fs = require("fs");
 const http = require("http");
 const path = require("path");
 
-const API_PORT = process.env.ECO_NATIVE_PORT || "8765";
+const API_PORT = process.env.ECO_NATIVE_PORT || "18765";
 const API_HOST = process.env.ECO_NATIVE_HOST || "127.0.0.1";
 const API_URL = `http://${API_HOST}:${API_PORT}`;
 const TITLE_BAR_HEIGHT = 36;
@@ -33,12 +33,28 @@ function waitForBackend(timeoutMs = 30000) {
   return new Promise((resolve, reject) => {
     function probe() {
       const request = http.get(`${API_URL}/health`, (response) => {
-        response.resume();
-        if (response.statusCode && response.statusCode >= 200 && response.statusCode < 300) {
-          resolve();
-          return;
-        }
-        retry();
+        let body = "";
+        response.setEncoding("utf8");
+        response.on("data", (chunk) => {
+          body += chunk;
+        });
+        response.on("end", () => {
+          try {
+            const payload = JSON.parse(body);
+            if (
+              response.statusCode &&
+              response.statusCode >= 200 &&
+              response.statusCode < 300 &&
+              payload?.service === "eco-native-studio-api"
+            ) {
+              resolve();
+              return;
+            }
+          } catch {
+            // A porta respondeu, mas nao e a API do ECO Native.
+          }
+          retry();
+        });
       });
 
       request.on("error", retry);
