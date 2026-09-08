@@ -260,12 +260,6 @@ export function applyUiTheme(tokens: UiThemeTokens) {
     root.style.setProperty(key, value);
   }
   root.dataset.uiTheme = tokens.greenDark;
-  if (typeof window !== "undefined" && window.ecoNative?.setTitleBarOverlay) {
-    window.ecoNative.setTitleBarOverlay({
-      color: "#00000000",
-      symbolColor: tokens.muted,
-    }).catch(() => undefined);
-  }
 }
 
 export function buildDerivedThemeVariables(tokens: UiThemeTokens): Record<string, string> {

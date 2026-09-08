@@ -60,16 +60,27 @@ def build_search_url(keyword: str) -> str:
     return f"https://makerworld.com/pt/search/models?keyword={encoded}"
 
 
-def open_makerworld_context(playwright, headless: bool):
+def makerworld_profile_dir(store_profile_id: str | None) -> Path:
+    safe_store_id = re.sub(r"[^a-zA-Z0-9_-]+", "", store_profile_id or "legacy") or "legacy"
+    return DATA_DIR / "browser_data" / "makerworld" / safe_store_id
+
+
+def open_makerworld_context(
+    playwright,
+    headless: bool,
+    store_profile_id: str | None = None,
+    viewport: dict[str, int] | None = None,
+):
     if not configure_playwright_browsers():
         raise RuntimeError(playwright_install_hint())
-    user_data_path = DATA_DIR / "browser_data" / "makerworld"
+    user_data_path = makerworld_profile_dir(store_profile_id)
     user_data_path.mkdir(parents=True, exist_ok=True)
     try:
         return playwright.chromium.launch_persistent_context(
             user_data_dir=user_data_path,
             headless=headless,
             accept_downloads=True,
+            viewport=viewport,
             args=["--disable-blink-features=AutomationControlled"],
         )
     except PlaywrightError as error:
@@ -84,6 +95,7 @@ def discover_model_urls(
     scrolls: int = 8,
     headless: bool = False,
     max_urls: int = 200,
+    store_profile_id: str | None = None,
 ) -> list[str]:
     target_url = build_search_url(keyword)
     urls: list[str] = []
@@ -115,7 +127,7 @@ def discover_model_urls(
         return added
 
     with sync_playwright() as playwright:
-        browser = open_makerworld_context(playwright, headless=headless)
+        browser = open_makerworld_context(playwright, headless=headless, store_profile_id=store_profile_id)
         page = browser.new_page()
         page.goto(target_url, wait_until="domcontentloaded", timeout=60_000)
         page.wait_for_timeout(6000)
@@ -158,6 +170,7 @@ def scrape_product_urls(
     sku_reference_products: list[Product] | None = None,
     project: Project | None = None,
     store_profile: StoreProfile | None = None,
+    viewport: dict[str, int] | None = None,
 ) -> list[ScrapedProduct]:
     normalized_urls = []
     for url in urls:
@@ -171,7 +184,12 @@ def scrape_product_urls(
     products: list[ScrapedProduct] = []
     sku_candidates = list(sku_reference_products or [])
     with sync_playwright() as playwright:
-        browser = open_makerworld_context(playwright, headless=headless)
+        browser = open_makerworld_context(
+            playwright,
+            headless=headless,
+            viewport=viewport,
+            store_profile_id=store_profile.id if store_profile else None,
+        )
         page = browser.new_page()
 
         for url in normalized_urls:
@@ -289,7 +307,11 @@ def download_approved_product_assets(
         assets.cover_image_path = download_cover_image(project_id, sku, image_url)
 
     with sync_playwright() as playwright:
-        browser = open_makerworld_context(playwright, headless=headless)
+        browser = open_makerworld_context(
+            playwright,
+            headless=headless,
+            store_profile_id=store_profile.id if store_profile else None,
+        )
         page = browser.new_page()
         try:
             page.goto(product_url, wait_until="domcontentloaded", timeout=60_000)

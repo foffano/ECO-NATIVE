@@ -69,32 +69,30 @@ def fetch_usd_brl_rate() -> dict:
 def get_exchange_status(allow_fetch: bool = True) -> dict:
     cache = read_exchange_cache()
     if cache_is_fresh(cache):
-        return {**cache, "cached": True, "stale": False, "cache_path": str(EXCHANGE_CACHE_PATH)}
+        return {**cache, "cached": True, "stale": False}
 
     if not allow_fetch:
         if cache:
-            return {**cache, "cached": True, "stale": True, "cache_path": str(EXCHANGE_CACHE_PATH)}
+            return {**cache, "cached": True, "stale": True}
         return {
             "usd_brl": None,
             "fetched_at": None,
             "source": None,
             "cached": False,
             "stale": True,
-            "cache_path": str(EXCHANGE_CACHE_PATH),
         }
 
     try:
         payload = fetch_usd_brl_rate()
         write_exchange_cache(payload)
-        return {**payload, "cached": False, "stale": False, "cache_path": str(EXCHANGE_CACHE_PATH)}
+        return {**payload, "cached": False, "stale": False}
     except (OSError, URLError, KeyError, ValueError, TimeoutError):
         if cache:
-            return {**cache, "cached": True, "stale": True, "cache_path": str(EXCHANGE_CACHE_PATH)}
+            return {**cache, "cached": True, "stale": True}
         return {
             "usd_brl": None,
             "fetched_at": None,
             "source": None,
             "cached": False,
             "stale": True,
-            "cache_path": str(EXCHANGE_CACHE_PATH),
         }

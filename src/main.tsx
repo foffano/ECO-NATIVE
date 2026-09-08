@@ -11,8 +11,10 @@ import {
   Eye,
   FolderOpen,
   FolderPlus,
+  Gauge,
   Link2,
   LogIn,
+  LogOut,
   ImagePlus,
   KeyRound,
   Loader2,
@@ -44,78 +46,13 @@ import {
 
 initUiTheme();
 
-const API_BASE = "http://127.0.0.1:18765";
+const API_BASE = "";
 const ONBOARDING_COMPLETE_KEY = "eco_native_onboarding_complete";
 
-declare global {
-  interface Window {
-    ecoNative?: {
-      checkForUpdates: () => Promise<AppUpdateCheckResult>;
-      downloadUpdate: () => Promise<{ ok: boolean; message?: string }>;
-      getAppInfo: () => Promise<{ name: string; version: string; platform?: string; titleBarHeight?: number }>;
-      installUpdate: () => Promise<{ ok: boolean; message?: string }>;
-      onUpdateEvent: (callback: (event: AppUpdateEvent) => void) => () => void;
-      platform?: string;
-      titleBarHeight?: number;
-      setTitleBarOverlay?: (options: { color: string; symbolColor: string }) => Promise<{ ok: boolean }>;
-    };
-  }
-}
-
-function initElectronChrome() {
-  if (typeof window === "undefined" || !window.ecoNative) return;
-  document.documentElement.classList.add("electron-app");
-  if (window.ecoNative.platform === "win32") {
-    document.documentElement.classList.add("electron-win");
-    document.documentElement.style.setProperty(
-      "--electron-titlebar-height",
-      `${window.ecoNative.titleBarHeight ?? 36}px`,
-    );
-  }
-}
-
-initElectronChrome();
-
-type AppUpdatePhase = "idle" | "checking" | "available" | "uptodate" | "downloading" | "downloaded" | "error";
-
-type AppUpdateState = {
-  phase: AppUpdatePhase;
-  version?: string;
-  currentVersion?: string;
-  progress?: number;
-  message?: string;
-  bannerDismissed?: boolean;
-};
-
-type AppUpdateCheckResult = {
-  ok: boolean;
-  status?: "available" | "uptodate" | "error";
-  version?: string;
-  currentVersion?: string;
-  message?: string;
-};
-
-type AppUpdateEvent =
-  | { type: "available"; version: string; currentVersion: string }
-  | { type: "not-available"; version: string; currentVersion: string }
-  | { type: "progress"; percent: number; transferred: number; total: number }
-  | { type: "downloaded"; version: string }
-  | { type: "error"; message: string };
-
-type AppInfo = {
-  name: string;
-  version: string;
-};
-
-const DEFAULT_APP_INFO: AppInfo = {
-  name: __APP_NAME__,
-  version: __APP_VERSION__,
-};
-
 type Marketplace = "shopee" | "tiktok_shop" | "kwai_shop" | "mercado_livre";
-type AppTab = "dashboard" | "collect" | "products" | "costs" | "schedule" | "settings";
-type ProductDetailSection = "listing" | "images" | "files" | "printing" | "info";
-type SettingsSection = "store" | "integrations" | "appearance" | "colors" | "production" | "printing" | "backup";
+type AppTab = "dashboard" | "collect" | "products" | "costs" | "settings";
+type ProductDetailSection = "listing" | "images" | "files" | "info";
+type SettingsSection = "store" | "integrations" | "appearance" | "colors" | "production" | "backup";
 type ProductStatus = "collected" | "in_edit" | "ready" | "exported";
 
 type BlockedSourceUrl = {
@@ -307,9 +244,6 @@ type Job = {
 };
 
 type SettingsPayload = {
-  data_dir: string;
-  projects_dir: string;
-  exports_dir: string;
   integrations: {
     openrouter: boolean;
     openrouter_model?: string;
@@ -343,7 +277,6 @@ type RuntimeStatus = {
     source?: string | null;
     cached?: boolean;
     stale?: boolean;
-    cache_path?: string;
   };
 };
 
@@ -369,6 +302,11 @@ type MakerWorldLoginStatus = {
   open: boolean;
   url?: string | null;
   message: string;
+  configured?: boolean;
+  interactive_login_available?: boolean;
+  remote_control?: boolean;
+  width?: number;
+  height?: number;
 };
 
 type StoreProfile = {
@@ -383,8 +321,33 @@ type StoreProfile = {
   listing_prompt: string;
   image_prompt: string;
   image_prompts: Record<string, string>;
+  disabled_image_prompts: string[];
   color_variation_prompt: string;
   updated_at?: string;
+};
+
+type AuthStatus = {
+  authenticated: boolean;
+  setup_required: boolean;
+  username?: string;
+  is_admin?: boolean;
+  store?: StoreProfile;
+  legacy_stores?: Array<{ id: string; name: string }>;
+};
+
+type AdminStoreUsage = {
+  store: { id: string; name: string; marketplace: string };
+  username?: string | null;
+  enabled: boolean;
+  quotas: Record<string, number | null | undefined>;
+  usage: Record<string, number>;
+};
+
+type AdminUsage = {
+  period: string;
+  periods: string[];
+  totals: Record<string, number>;
+  stores: AdminStoreUsage[];
 };
 
 type ImageOptions = {
@@ -441,11 +404,16 @@ type ProductFilters = {
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${API_BASE}${path}`, {
     headers: { "Content-Type": "application/json" },
+    credentials: "same-origin",
     ...init,
   });
   if (!response.ok) {
+    if (response.status === 401 && !path.startsWith("/api/auth/")) {
+      window.dispatchEvent(new Event("eco-native-auth-required"));
+    }
     throw new Error(await readApiError(response));
   }
+  if (response.status === 204) return undefined as T;
   return response.json() as Promise<T>;
 }
 
@@ -1057,6 +1025,7 @@ function storeProfilesEqual(left: StoreProfile, right: StoreProfile): boolean {
     && left.listing_prompt === right.listing_prompt
     && left.image_prompt === right.image_prompt
     && left.color_variation_prompt === right.color_variation_prompt
+    && JSON.stringify(left.disabled_image_prompts || []) === JSON.stringify(right.disabled_image_prompts || [])
     && JSON.stringify(left.image_prompts || {}) === JSON.stringify(right.image_prompts || {});
 }
 
@@ -1681,17 +1650,13 @@ const tabInfo: Record<AppTab, { title: string; eyebrow: string }> = {
     eyebrow: "Produção",
     title: "Custos",
   },
-  schedule: {
-    eyebrow: "Agenda",
-    title: "Impressões",
-  },
   settings: {
-    eyebrow: "Chaves e pastas",
+    eyebrow: "Configuração",
     title: "Ajustes",
   },
 }
 
-function App() {
+function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<void> }) {
   const [projects, setProjects] = useState<Project[]>([]);
   const [products, setProducts] = useState<Product[]>([]);
   const [jobs, setJobs] = useState<Job[]>([]);
@@ -1722,11 +1687,11 @@ function App() {
   const [r2PublicUrlDraft, setR2PublicUrlDraft] = useState("");
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState("");
-  const [appUpdate, setAppUpdate] = useState<AppUpdateState>({ phase: "idle" });
   const [listingDraft, setListingDraft] = useState<Listing | null>(null);
   const [productNameDraft, setProductNameDraft] = useState("");
-  const [lastExport, setLastExport] = useState<{ path: string; count: number; marketplace: string } | null>(null);
+  const [lastExport, setLastExport] = useState<{ filename: string; count: number; marketplace: string } | null>(null);
   const [makerWorldLogin, setMakerWorldLogin] = useState<MakerWorldLoginStatus | null>(null);
+  const [makerWorldViewerOpen, setMakerWorldViewerOpen] = useState(false);
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [selectedProductIds, setSelectedProductIds] = useState<string[]>([]);
   const [productFilters, setProductFilters] = useState<ProductFilters>({ query: "", status: "all", characteristic: "all" });
@@ -1738,10 +1703,6 @@ function App() {
   const [blockedSourceUrls, setBlockedSourceUrls] = useState<BlockedSourceUrl[]>([]);
   const [filaments, setFilaments] = useState<FilamentSpool[]>([]);
   const [productionSettings, setProductionSettings] = useState<ProductionSettings | null>(null);
-  const [printers, setPrinters] = useState<Printer3D[]>([]);
-  const [scheduleTasks, setScheduleTasks] = useState<PrintScheduleTask[]>([]);
-  const [scheduleDate, setScheduleDate] = useState(todayDateString());
-  const [scheduleView, setScheduleView] = useState<ScheduleView>("day");
 
   const activeStoreProfile = storeProfiles.find((profile) => profile.id === activeStoreProfileId) ?? storeProfiles[0];
   const activeStoreProjects = useMemo(() => {
@@ -1812,7 +1773,9 @@ function App() {
       setOnboardingOpen(true);
     }
     api<MakerWorldLoginStatus>("/api/jobs/makerworld-login")
-      .then(setMakerWorldLogin)
+      .then((status) => {
+        setMakerWorldLogin(status);
+      })
       .catch(() => undefined);
   }
 
@@ -1884,112 +1847,6 @@ function App() {
   useEffect(() => {
     refresh().catch((error) => setNotice(error.message));
   }, []);
-
-  useEffect(() => {
-    if (!window.ecoNative?.onUpdateEvent) return;
-    return window.ecoNative.onUpdateEvent((event) => {
-      if (event.type === "available") {
-        setAppUpdate((prev) => ({
-          phase: "available",
-          version: event.version,
-          currentVersion: event.currentVersion,
-          bannerDismissed: prev.bannerDismissed && prev.version === event.version,
-        }));
-        return;
-      }
-      if (event.type === "not-available") {
-        setAppUpdate((prev) => (
-          prev.phase === "checking"
-            ? {
-                phase: "uptodate",
-                currentVersion: event.currentVersion,
-                message: `Você já está na versão mais recente (${event.currentVersion}).`,
-              }
-            : prev
-        ));
-        return;
-      }
-      if (event.type === "progress") {
-        setAppUpdate((prev) => ({
-          ...prev,
-          phase: "downloading",
-          progress: Math.min(100, Math.max(0, event.percent ?? 0)),
-          bannerDismissed: false,
-        }));
-        return;
-      }
-      if (event.type === "downloaded") {
-        setAppUpdate((prev) => ({
-          ...prev,
-          phase: "downloaded",
-          version: event.version ?? prev.version,
-          progress: 100,
-          message: "Atualização pronta para instalar.",
-          bannerDismissed: false,
-        }));
-        return;
-      }
-      setAppUpdate((prev) => ({
-        ...prev,
-        phase: "error",
-        message: event.message ?? "Erro ao atualizar.",
-      }));
-    });
-  }, []);
-
-  async function checkAppUpdates() {
-    if (!window.ecoNative?.checkForUpdates) {
-      setAppUpdate({ phase: "error", message: "Atualizações ficam disponíveis no app instalado." });
-      return;
-    }
-    setAppUpdate((prev) => ({ ...prev, phase: "checking", message: undefined }));
-    const result = await window.ecoNative.checkForUpdates();
-    if (!result.ok) {
-      setAppUpdate({ phase: "error", message: result.message ?? "Não foi possível verificar atualizações." });
-      return;
-    }
-    if (result.status === "available") {
-      setAppUpdate({
-        phase: "available",
-        version: result.version,
-        currentVersion: result.currentVersion,
-        message: result.message,
-      });
-      return;
-    }
-    setAppUpdate({
-      phase: "uptodate",
-      currentVersion: result.currentVersion,
-      message: result.message,
-    });
-  }
-
-  async function downloadAppUpdate() {
-    if (!window.ecoNative?.downloadUpdate) return;
-    setAppUpdate((prev) => ({
-      ...prev,
-      phase: "downloading",
-      progress: 0,
-      message: "Baixando atualização...",
-      bannerDismissed: false,
-    }));
-    const result = await window.ecoNative.downloadUpdate();
-    if (!result.ok) {
-      setAppUpdate((prev) => ({
-        ...prev,
-        phase: "error",
-        message: result.message ?? "Falha no download.",
-      }));
-    }
-  }
-
-  async function installAppUpdate() {
-    await window.ecoNative?.installUpdate();
-  }
-
-  function dismissAppUpdateBanner() {
-    setAppUpdate((prev) => ({ ...prev, bannerDismissed: true }));
-  }
 
   useEffect(() => {
     function refreshRuntimeStatus() {
@@ -2066,38 +1923,6 @@ function App() {
     };
   }, [activeStoreProfile?.id, products.length]);
 
-  useEffect(() => {
-    let cancelled = false;
-    api<Printer3D[]>("/api/printers")
-      .then((entries) => {
-        if (!cancelled) setPrinters(entries);
-      })
-      .catch(() => {
-        if (!cancelled) setPrinters([]);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [products.length]);
-
-  useEffect(() => {
-    const viewRange = scheduleRange(scheduleView, scheduleDate);
-    const weekRange = scheduleRange("week", todayDateString());
-    const from = viewRange.from < weekRange.from ? viewRange.from : weekRange.from;
-    const to = viewRange.to > weekRange.to ? viewRange.to : weekRange.to;
-    let cancelled = false;
-    api<PrintScheduleTask[]>(`/api/schedule?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`)
-      .then((entries) => {
-        if (!cancelled) setScheduleTasks(entries);
-      })
-      .catch(() => {
-        if (!cancelled) setScheduleTasks([]);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [scheduleView, scheduleDate, products.length]);
-
   async function removeBlockedUrl(entryId: string) {
     if (!activeProject?.id) return;
     try {
@@ -2172,133 +1997,6 @@ function App() {
       body: JSON.stringify(payload),
     });
     setProductionSettings(updated);
-  }
-
-  async function savePrinter(payload: {
-    id?: string;
-    name: string;
-    model: string;
-    notes: string;
-    active: boolean;
-  }) {
-    if (payload.id) {
-      const updated = await api<Printer3D>(`/api/printers/${payload.id}`, {
-        method: "PATCH",
-        body: JSON.stringify({
-          name: payload.name,
-          model: payload.model || null,
-          notes: payload.notes || null,
-          active: payload.active,
-        }),
-      });
-      setPrinters((current) => current.map((item) => (item.id === updated.id ? updated : item)));
-      return updated;
-    }
-    const created = await api<Printer3D>("/api/printers", {
-      method: "POST",
-      body: JSON.stringify({
-        name: payload.name,
-        model: payload.model || null,
-        notes: payload.notes || null,
-        active: payload.active,
-      }),
-    });
-    setPrinters((current) => [...current, created].sort((a, b) => a.name.localeCompare(b.name, "pt-BR")));
-    return created;
-  }
-
-  async function deletePrinter(printerId: string) {
-    await api(`/api/printers/${printerId}`, { method: "DELETE" });
-    setPrinters((current) => current.filter((item) => item.id !== printerId));
-    setScheduleTasks((current) => current.filter((item) => item.printer_id !== printerId));
-  }
-
-  async function reloadPrinters() {
-    const entries = await api<Printer3D[]>("/api/printers");
-    setPrinters(entries);
-    return entries;
-  }
-
-  async function createScheduleTask(payload: {
-    printer_id: string;
-    scheduled_date: string;
-    start_time: string;
-    duration_minutes: number;
-    product_id?: string | null;
-    plate_id?: string | null;
-    title: string;
-    quantity: number;
-    notes: string;
-  }) {
-    const created = await api<PrintScheduleTask>("/api/schedule", {
-      method: "POST",
-      body: JSON.stringify(payload),
-    });
-    if (created.scheduled_date >= scheduleRange(scheduleView, scheduleDate).from
-      && created.scheduled_date <= scheduleRange(scheduleView, scheduleDate).to) {
-      setScheduleTasks((current) => [...current, created].sort((a, b) =>
-        a.scheduled_date.localeCompare(b.scheduled_date) || a.start_time.localeCompare(b.start_time)));
-    }
-    return created;
-  }
-
-  async function updateScheduleTask(taskId: string, payload: Partial<PrintScheduleTask>) {
-    const previous = scheduleTasks.find((item) => item.id === taskId);
-    if (previous) {
-      const optimistic: PrintScheduleTask = { ...previous, ...payload };
-      setScheduleTasks((current) => {
-        const without = current.filter((item) => item.id !== taskId);
-        const { from, to } = scheduleRange(scheduleView, scheduleDate);
-        if (optimistic.scheduled_date < from || optimistic.scheduled_date > to) return without;
-        return [...without, optimistic].sort((a, b) =>
-          a.scheduled_date.localeCompare(b.scheduled_date) || a.start_time.localeCompare(b.start_time));
-      });
-    }
-    try {
-      const updated = await api<PrintScheduleTask>(`/api/schedule/${taskId}`, {
-        method: "PATCH",
-        body: JSON.stringify(payload),
-      });
-      setScheduleTasks((current) => {
-        const without = current.filter((item) => item.id !== taskId);
-        const { from, to } = scheduleRange(scheduleView, scheduleDate);
-        if (updated.scheduled_date < from || updated.scheduled_date > to) return without;
-        return [...without, updated].sort((a, b) =>
-          a.scheduled_date.localeCompare(b.scheduled_date) || a.start_time.localeCompare(b.start_time));
-      });
-      return updated;
-    } catch (error) {
-      if (previous) {
-        setScheduleTasks((current) => {
-          const without = current.filter((item) => item.id !== taskId);
-          const { from, to } = scheduleRange(scheduleView, scheduleDate);
-          if (previous.scheduled_date < from || previous.scheduled_date > to) return without;
-          return [...without, previous].sort((a, b) =>
-            a.scheduled_date.localeCompare(b.scheduled_date) || a.start_time.localeCompare(b.start_time));
-        });
-      }
-      throw error;
-    }
-  }
-
-  async function deleteScheduleTask(taskId: string) {
-    await api(`/api/schedule/${taskId}`, { method: "DELETE" });
-    setScheduleTasks((current) => current.filter((item) => item.id !== taskId));
-  }
-
-  async function savePrintPlates(productId: string, plates: PrintPlate[]) {
-    const result = await api<{ plates: PrintPlate[] }>(`/api/products/${productId}/print-plates`, {
-      method: "PUT",
-      body: JSON.stringify({ plates }),
-    });
-    setProducts((current) =>
-      current.map((product) =>
-        product.id === productId
-          ? { ...product, metadata: { ...product.metadata, print_plates: result.plates } }
-          : product,
-      ),
-    );
-    return result.plates;
   }
 
   const saveProductionCostsBatch = useCallback(async (entries: Array<{ productId: string; productionCost: ProductionCost }>) => {
@@ -2498,6 +2196,7 @@ function App() {
         method: "POST",
       });
       setMakerWorldLogin(result);
+      setMakerWorldViewerOpen(true);
       return result;
     });
   }
@@ -2508,6 +2207,7 @@ function App() {
         method: "POST",
       });
       setMakerWorldLogin(result);
+      setMakerWorldViewerOpen(false);
       return result;
     });
   }
@@ -2626,12 +2326,14 @@ function App() {
     });
   }
 
-  function createStoreProfile() {
+  function createStoreProfile(credentials: { name: string; username: string; password: string }) {
     return runFluidAction("Criando perfil de loja", async () => {
       const created = await api<StoreProfile>("/api/store-profiles", {
         method: "POST",
         body: JSON.stringify({
-          name: `${storeProfileDraft?.name || "Nova loja"} cópia`,
+          name: credentials.name,
+          username: credentials.username,
+          password: credentials.password,
           marketplace: storeProfileDraft?.marketplace || "shopee",
           niche: storeProfileDraft?.niche || "Utilidades para casa",
           ai_profile_id: storeProfileDraft?.ai_profile_id || null,
@@ -2640,12 +2342,11 @@ function App() {
           listing_prompt: storeProfileDraft?.listing_prompt || "",
           image_prompt: storeProfileDraft?.image_prompt || "",
           image_prompts: storeProfileDraft?.image_prompts || {},
+          disabled_image_prompts: storeProfileDraft?.disabled_image_prompts || [],
           color_variation_prompt: storeProfileDraft?.color_variation_prompt || "",
         }),
       });
-      patchStoreProfile(created);
-      setActiveStoreProfileId(created.id);
-      setNotice("Perfil de loja criado.");
+      setNotice(`Loja ${created.name} criada. Ela já pode entrar com o login próprio.`);
       return created;
     });
   }
@@ -2724,8 +2425,6 @@ function App() {
         `${summary.products} produto(s)`,
         `${summary.projects} projeto(s)`,
         `${summary.store_profiles} loja(s)`,
-        summary.printers_3d ? `${summary.printers_3d} impressora(s)` : null,
-        summary.print_schedule_tasks ? `${summary.print_schedule_tasks} impressão(ões) agendada(s)` : null,
         summary.filament_spools ? `${summary.filament_spools} filamento(s)` : null,
         `${summary.files} arquivo(s)`,
         summary.env_restored ? "integrações (.env)" : null,
@@ -3005,13 +2704,32 @@ function App() {
     });
   }
 
-  function openProductFolder(productId = selectedProduct?.id) {
-    if (!productId) return Promise.resolve();
-    return runAction("Abrindo pasta do produto", () =>
-      api<{ status: string; path: string }>(`/api/products/${productId}/open-folder`, {
-        method: "POST",
-      }),
-    { refresh: false, blockUi: true, notifySuccess: true });
+  async function downloadProductFiles(productId = selectedProduct?.id) {
+    if (!productId) return;
+    setBusy(true);
+    setNotice("Preparando arquivos do produto...");
+    try {
+      const response = await fetch(`${API_BASE}/api/products/${productId}/download-files`, { credentials: "same-origin" });
+      if (!response.ok) throw new Error(await readApiError(response));
+      const blob = await response.blob();
+      const disposition = response.headers.get("Content-Disposition") || "";
+      const encodedName = disposition.match(/filename\*=UTF-8''([^;]+)/i)?.[1];
+      const plainName = disposition.match(/filename="?([^";]+)"?/i)?.[1];
+      const filename = encodedName ? decodeURIComponent(encodedName) : plainName || "arquivos-do-produto.zip";
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+      setNotice("Download dos arquivos iniciado.");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Não foi possível baixar os arquivos");
+    } finally {
+      setBusy(false);
+    }
   }
 
   useEffect(() => {
@@ -3207,14 +2925,32 @@ function App() {
       return Promise.resolve();
     }
     return runAction("Exportando CSV", async () => {
-      const result = await api<{ path: string; count: number; marketplace: string }>("/api/exports", {
+      const response = await fetch(`${API_BASE}/api/exports`, {
         method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           project_id: activeProject?.id ?? projectProducts[0]?.project_id,
           marketplace: activeStoreProfile?.marketplace ?? activeProject?.marketplace ?? "shopee",
           product_ids: readySelectedIds,
         }),
       });
+      if (!response.ok) throw new Error(await readApiError(response));
+      const blob = await response.blob();
+      const filename = filenameFromDisposition(response.headers.get("content-disposition"), `exportacao-${todayDateString()}.csv`);
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+      const result = {
+        filename,
+        count: Number(response.headers.get("X-Eco-Export-Count")) || readySelectedIds.length,
+        marketplace: response.headers.get("X-Eco-Export-Marketplace") || activeStoreProfile?.marketplace || "shopee",
+      };
       setLastExport(result);
       return result;
     }, { refresh: false, blockUi: true, notifySuccess: true });
@@ -3222,9 +2958,6 @@ function App() {
 
   return (
     <main className="app-shell">
-      {window.ecoNative?.platform === "win32" && (
-        <div className="window-drag-region" aria-hidden="true" />
-      )}
       <aside className="sidebar">
         <StorePicker
           activeStore={activeStoreProfile}
@@ -3244,14 +2977,14 @@ function App() {
           <TabButton active={activeTab === "costs"} icon={<Coins size={18} />} onClick={() => setActiveTab("costs")}>
             Custos
           </TabButton>
-          <TabButton active={activeTab === "schedule"} icon={<CalendarDays size={18} />} onClick={() => setActiveTab("schedule")}>
-            Impressões
-          </TabButton>
         </nav>
         <nav className="sidebar-footer" aria-label="Ajustes">
           <TabButton active={activeTab === "settings"} icon={<Settings size={18} />} onClick={() => setActiveTab("settings")}>
             Ajustes
           </TabButton>
+          <button className="tab-button logout-button" onClick={() => void onLogout()}>
+            <LogOut size={18} /> Sair ({auth.username})
+          </button>
         </nav>
       </aside>
 
@@ -3271,9 +3004,6 @@ function App() {
             products={projectProducts}
             projects={activeStoreProjects}
             runtimeStatus={runtimeStatus}
-            printers={printers}
-            scheduleTasks={scheduleTasks}
-            onOpenSchedule={() => setActiveTab("schedule")}
           />
         )}
 
@@ -3337,7 +3067,7 @@ function App() {
             onGenerateListing={generateListing}
             onRegenerateImage={regenerateImage}
             onExportSelected={exportCsv}
-            onOpenProductFolder={openProductFolder}
+            onDownloadProductFiles={downloadProductFiles}
             onDeleteModelAsset={deleteModelAsset}
             onListingDraftChange={setListingDraft}
             onProductNameDraftChange={setProductNameDraft}
@@ -3351,7 +3081,6 @@ function App() {
             onDeleteVariation={deleteVariation}
             onDeleteColorAsset={deleteColorAsset}
             onUpdateProductListed={updateProductListed}
-            onSavePrintPlates={(productId, plates) => runFluidAction("Salvando placas", () => savePrintPlates(productId, plates))}
             filaments={filaments}
             productionSettings={productionSettings}
             activeStoreProfile={activeStoreProfile}
@@ -3382,25 +3111,9 @@ function App() {
           />
         )}
 
-        {activeTab === "schedule" && (
-          <ScheduleTab
-            busy={busy}
-            printers={printers.filter((item) => item.active)}
-            products={products}
-            projects={projects}
-            scheduleDate={scheduleDate}
-            scheduleView={scheduleView}
-            tasks={scheduleTasks}
-            onCreateTask={(payload) => runFluidAction("Adicionando impressão", () => createScheduleTask(payload))}
-            onDeleteTask={(taskId) => runFluidAction("Removendo impressão", () => deleteScheduleTask(taskId))}
-            onScheduleDateChange={setScheduleDate}
-            onScheduleViewChange={setScheduleView}
-            onUpdateTask={(taskId, payload) => runFluidAction("Atualizando impressão", () => updateScheduleTask(taskId, payload))}
-          />
-        )}
-
         {activeTab === "settings" && (
           <SettingsTab
+            isAdmin={Boolean(auth.is_admin)}
             storeProfileDraft={storeProfileDraft}
             storeProfiles={storeProfiles}
             imageOptions={imageOptions}
@@ -3441,15 +3154,7 @@ function App() {
             onDeleteFilament={deleteFilament}
             onSaveFilament={saveFilament}
             onSaveProductionSettings={saveProductionSettings}
-            onSavePrinter={savePrinter}
-            onDeletePrinter={deletePrinter}
-            onPrintersSaved={reloadPrinters}
-            printers={printers}
             onWrapAction={runAction}
-            appUpdate={appUpdate}
-            onCheckAppUpdates={checkAppUpdates}
-            onDownloadAppUpdate={downloadAppUpdate}
-            onInstallAppUpdate={installAppUpdate}
           />
         )}
       </section>
@@ -3461,14 +3166,6 @@ function App() {
           kieImageModel={kieImageModelDraft}
           onFinish={finishOnboarding}
           onSkip={skipOnboarding}
-        />
-      )}
-      {window.ecoNative && (
-        <AppUpdateBanner
-          state={appUpdate}
-          onDismiss={dismissAppUpdateBanner}
-          onDownload={downloadAppUpdate}
-          onInstall={installAppUpdate}
         />
       )}
       {notice && (
@@ -3485,112 +3182,111 @@ function App() {
       {confirmDialog && (
         <ConfirmModal dialog={confirmDialog} onClose={closeConfirmDialog} />
       )}
+      {makerWorldViewerOpen && (
+        <MakerWorldRemoteBrowser
+          status={makerWorldLogin}
+          onCloseViewer={() => setMakerWorldViewerOpen(false)}
+          onFinish={() => void closeMakerWorldLogin()}
+        />
+      )}
     </main>
   );
 }
 
-function AppUpdateBanner({
-  state,
-  onDismiss,
-  onDownload,
-  onInstall,
+function MakerWorldRemoteBrowser({
+  status,
+  onCloseViewer,
+  onFinish,
 }: {
-  state: AppUpdateState;
-  onDismiss: () => void;
-  onDownload: () => void;
-  onInstall: () => void;
+  status: MakerWorldLoginStatus | null;
+  onCloseViewer: () => void;
+  onFinish: () => void;
 }) {
-  if (state.bannerDismissed) return null;
-  if (state.phase === "idle" || state.phase === "checking" || state.phase === "uptodate" || state.phase === "error") {
-    return null;
+  const [frameNonce, setFrameNonce] = useState(0);
+  const [frameReady, setFrameReady] = useState(false);
+  const viewportWidth = status?.width || 1280;
+  const viewportHeight = status?.height || 720;
+
+  useEffect(() => {
+    const interval = window.setInterval(() => setFrameNonce((value) => value + 1), 550);
+    return () => window.clearInterval(interval);
+  }, []);
+
+  function sendInput(payload: Record<string, unknown>) {
+    void api<void>("/api/jobs/makerworld-login/input", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }).catch(() => undefined);
+  }
+
+  function point(event: React.MouseEvent<HTMLDivElement>) {
+    const rect = event.currentTarget.getBoundingClientRect();
+    const scale = Math.min(rect.width / viewportWidth, rect.height / viewportHeight);
+    const renderedWidth = viewportWidth * scale;
+    const renderedHeight = viewportHeight * scale;
+    const offsetX = (rect.width - renderedWidth) / 2;
+    const offsetY = (rect.height - renderedHeight) / 2;
+    return {
+      x: Math.max(0, Math.min(viewportWidth, (event.clientX - rect.left - offsetX) / scale)),
+      y: Math.max(0, Math.min(viewportHeight, (event.clientY - rect.top - offsetY) / scale)),
+    };
+  }
+
+  function handleKey(event: React.KeyboardEvent<HTMLDivElement>) {
+    if (event.ctrlKey || event.metaKey || event.altKey) {
+      const modifiers = [event.ctrlKey ? "Control" : "", event.altKey ? "Alt" : "", event.metaKey ? "Meta" : ""].filter(Boolean);
+      sendInput({ type: "key", key: [...modifiers, event.key].join("+") });
+    } else if (event.key.length === 1) {
+      sendInput({ type: "text", text: event.key });
+    } else if (["Backspace", "Delete", "Enter", "Tab", "Escape", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Home", "End", "PageUp", "PageDown"].includes(event.key)) {
+      sendInput({ type: "key", key: event.key });
+    } else {
+      return;
+    }
+    event.preventDefault();
   }
 
   return (
-    <div className="update-banner" role="status" aria-live="polite">
-      {state.phase === "available" && (
-        <>
-          <div className="update-banner-copy">
-            <strong>Nova versão {state.version}</strong>
-            <span>Atualização disponível para o ECO Native Studio.</span>
+    <div className="remote-browser-backdrop" role="presentation">
+      <section className="remote-browser-dialog" role="dialog" aria-modal="true" aria-label="Navegador MakerWorld remoto">
+        <header className="remote-browser-toolbar">
+          <div>
+            <strong>MakerWorld · navegador local</strong>
+            <span>{status?.url || status?.message || "Iniciando Chromium no PC..."}</span>
           </div>
-          <div className="update-banner-actions">
-            <button className="primary" type="button" onClick={onDownload}>Baixar</button>
-            <button className="primary ghost" type="button" onClick={onDismiss}>Agora não</button>
+          <div className="remote-browser-actions">
+            <button className="primary ghost" onClick={onCloseViewer}>Ocultar</button>
+            <button className="primary" onClick={onFinish}>Concluir e salvar sessão</button>
           </div>
-        </>
-      )}
-      {state.phase === "downloading" && (
-        <>
-          <div className="update-banner-copy">
-            <strong>Baixando {state.version ?? "atualização"}</strong>
-            <span>{state.message ?? "Aguarde o download terminar."}</span>
-          </div>
-          <div className="update-progress">
-            <div className="update-progress-track">
-              <span style={{ width: `${Math.min(100, Math.max(0, state.progress ?? 0))}%` }} />
-            </div>
-            <small>{Math.round(state.progress ?? 0)}%</small>
-          </div>
-        </>
-      )}
-      {state.phase === "downloaded" && (
-        <>
-          <div className="update-banner-copy">
-            <strong>Atualização pronta</strong>
-            <span>Versão {state.version} baixada. Instale ao reiniciar o app.</span>
-          </div>
-          <div className="update-banner-actions">
-            <button className="primary" type="button" onClick={onInstall}>Instalar e reiniciar</button>
-            <button className="primary ghost" type="button" onClick={onDismiss}>Depois</button>
-          </div>
-        </>
-      )}
-    </div>
-  );
-}
-
-function AppUpdateControls({
-  state,
-  onCheck,
-  onDownload,
-  onInstall,
-}: {
-  state: AppUpdateState;
-  onCheck: () => void;
-  onDownload: () => void;
-  onInstall: () => void;
-}) {
-  const checking = state.phase === "checking";
-  const downloading = state.phase === "downloading";
-
-  return (
-    <div className="app-update-controls">
-      <div className="backup-actions">
-        <button className="primary" type="button" onClick={onCheck} disabled={checking || downloading}>
-          {checking ? <Loader2 className="spin" size={18} /> : <RefreshCw size={18} />} Verificar atualizações
-        </button>
-        {state.phase === "available" && (
-          <button className="primary ghost" type="button" onClick={onDownload}>
-            <Download size={18} /> Baixar versão {state.version}
-          </button>
-        )}
-        {state.phase === "downloaded" && (
-          <button className="primary" type="button" onClick={onInstall}>
-            <RefreshCw size={18} /> Instalar e reiniciar
-          </button>
-        )}
-      </div>
-      {downloading && (
-        <div className="update-progress">
-          <div className="update-progress-track">
-            <span style={{ width: `${Math.min(100, Math.max(0, state.progress ?? 0))}%` }} />
-          </div>
-          <small>Baixando... {Math.round(state.progress ?? 0)}%</small>
+        </header>
+        <div
+          className="remote-browser-viewport"
+          tabIndex={0}
+          onClick={(event) => sendInput({ type: "click", ...point(event) })}
+          onContextMenu={(event) => {
+            event.preventDefault();
+            sendInput({ type: "click", button: "right", ...point(event) });
+          }}
+          onWheel={(event) => {
+            event.preventDefault();
+            sendInput({ type: "wheel", delta_x: event.deltaX, delta_y: event.deltaY });
+          }}
+          onKeyDown={handleKey}
+          onPaste={(event) => {
+            event.preventDefault();
+            sendInput({ type: "text", text: event.clipboardData.getData("text") });
+          }}
+        >
+          {!frameReady && <div className="remote-browser-loading"><Loader2 className="spin" size={28} /> Aguardando imagem do navegador...</div>}
+          <img
+            src={`${API_BASE}/api/jobs/makerworld-login/frame?t=${frameNonce}`}
+            alt="Tela interativa do MakerWorld"
+            draggable={false}
+            onLoad={() => setFrameReady(true)}
+          />
         </div>
-      )}
-      {state.message && state.phase !== "downloading" && (
-        <span className="update-status">{state.message}</span>
-      )}
+        <footer className="remote-browser-help">Clique na tela e digite normalmente. A janela continua aberta e visível no computador servidor.</footer>
+      </section>
     </div>
   );
 }
@@ -3786,19 +3482,13 @@ function DashboardTab({
   products,
   projects,
   runtimeStatus,
-  printers,
-  scheduleTasks,
-  onOpenSchedule,
 }: {
   activeStoreProfile?: StoreProfile;
   jobs: Job[];
-  lastExport: { path: string; count: number; marketplace: string } | null;
+  lastExport: { filename: string; count: number; marketplace: string } | null;
   products: Product[];
   projects: Project[];
   runtimeStatus: RuntimeStatus | null;
-  printers: Printer3D[];
-  scheduleTasks: PrintScheduleTask[];
-  onOpenSchedule: () => void;
 }) {
   const readyCount = products.filter((product) => product.listing.title && product.listing.description).length;
   const imageCount = products.filter((product) => product.assets.some(isImageAsset)).length;
@@ -3818,31 +3508,6 @@ function DashboardTab({
   const maxCost = Math.max(costSummary.openRouter, costSummary.kie, costSummary.other, 0.000001);
   const usdBrl = Number(runtimeStatus?.exchange.usd_brl);
   const totalCostBrl = Number.isFinite(usdBrl) && usdBrl > 0 ? totalCost * usdBrl : null;
-  const weekAnchor = todayDateString();
-  const weekRange = useMemo(() => scheduleRange("week", weekAnchor), [weekAnchor]);
-  const weekTasks = useMemo(
-    () => scheduleTasks.filter((task) => task.scheduled_date >= weekRange.from && task.scheduled_date <= weekRange.to),
-    [scheduleTasks, weekRange.from, weekRange.to],
-  );
-  const farmMetrics = useMemo(
-    () => computeScheduleMetrics(weekTasks, printers, weekRange.from, weekRange.to),
-    [weekTasks, printers, weekRange.from, weekRange.to],
-  );
-  const weekDates = useMemo(() => eachDateInRange(weekRange.from, weekRange.to), [weekRange.from, weekRange.to]);
-  const weekTrend = useMemo(
-    () => weekDates.map((date) => {
-      const dayMinutes = weekTasks
-        .filter((task) => task.scheduled_date === date)
-        .reduce((sum, task) => sum + schedulePrintingMinutes(task), 0);
-      const available = Math.max(1, farmMetrics.printerCount) * 24 * 60;
-      return {
-        label: parseIsoDate(date).toLocaleDateString("pt-BR", { weekday: "short", day: "numeric" }),
-        value: available > 0 ? dayMinutes / available : 0,
-      };
-    }),
-    [weekDates, weekTasks, farmMetrics.printerCount],
-  );
-  const weekLabel = schedulePeriodLabel("week", weekAnchor, weekRange.from, weekRange.to);
 
   return (
     <section className="dashboard-page">
@@ -3907,55 +3572,6 @@ function DashboardTab({
         </div>
       </div>
 
-      <div className="panel dashboard-farm-panel">
-        <div className="panel-title dashboard-farm-title">
-          <div>
-            <CalendarDays size={18} />
-            <h2>Farm de impressão</h2>
-          </div>
-          <button className="quiet-button" onClick={onOpenSchedule}>Abrir agenda</button>
-        </div>
-        <p className="settings-note section-intro">Semana atual · {weekLabel}</p>
-        {!farmMetrics.printerCount ? (
-          <div className="compact-empty">
-            <strong>Nenhuma impressora ativa</strong>
-            <span>Cadastre impressoras em Ajustes → Impressão para acompanhar ocupação e falhas.</span>
-          </div>
-        ) : (
-          <>
-            <div className="schedule-metrics-grid">
-              <div className="schedule-metric-card">
-                <span className="schedule-metric-label">Ocupação da farm</span>
-                <strong>{formatPercent(farmMetrics.farmOccupancy)}</strong>
-                <small>{formatPrintMinutes(farmMetrics.printingMinutes)} de {formatPrintMinutes(farmMetrics.availableMinutes)} disponíveis</small>
-                <ScheduleMetricBar label="Capacidade geral" value={farmMetrics.farmOccupancy} />
-              </div>
-              <div className="schedule-metric-card">
-                <span className="schedule-metric-label">Taxa de falha</span>
-                <strong>{formatPercent(farmMetrics.failureRate)}</strong>
-                <small>{farmMetrics.failures} falha(s) em {farmMetrics.totalTasks} impressão(ões)</small>
-                <ScheduleMetricBar
-                  label="Falhas + canceladas"
-                  value={farmMetrics.failureRate}
-                  tone={farmMetrics.failureRate > 0.15 ? "danger" : farmMetrics.failureRate > 0.05 ? "warn" : "default"}
-                />
-              </div>
-              <div className="schedule-metric-card">
-                <span className="schedule-metric-label">Impressoras ativas</span>
-                <strong>{farmMetrics.printerCount}</strong>
-                <small>{farmMetrics.totalTasks} job(s) nesta semana</small>
-              </div>
-            </div>
-            <div className="schedule-metrics-charts">
-              <div className="subsection-title">Ocupação por dia</div>
-              {weekTrend.map((entry) => (
-                <ScheduleMetricBar key={entry.label} label={entry.label} value={entry.value} tone={entry.value > 0.85 ? "warn" : "default"} />
-              ))}
-            </div>
-          </>
-        )}
-      </div>
-
       <div className="dashboard-grid">
         <SummaryItem label="Projetos" value={projects.length.toString()} />
         <SummaryItem label="Produtos" value={products.length.toString()} />
@@ -4004,7 +3620,7 @@ function DashboardTab({
             <div className="export-result">
               <strong>{lastExport.count} produto(s)</strong>
               <span>{lastExport.marketplace}</span>
-              <code>{lastExport.path}</code>
+              <span>{lastExport.filename}</span>
             </div>
           ) : (
             <div className="compact-empty">
@@ -4338,12 +3954,12 @@ function CollectTab({
             checked={visibleBrowser}
             onChange={(event) => onVisibleBrowserChange(event.target.checked)}
           />
-          Usar navegador visível com sessão salva
+          Usar navegador visível no PC servidor
         </label>
 
         <div className="action-row">
           <button className="primary login-button" onClick={onOpenLogin} disabled={busy}>
-            <LogIn size={18} /> Logar no MakerWorld
+            <LogIn size={18} /> Configurar login MakerWorld
           </button>
           <button className="primary ghost" onClick={onCloseLogin} disabled={busy || !loginStatus?.open}>
             Fechar navegador
@@ -4355,6 +3971,8 @@ function CollectTab({
             <Play size={18} /> Iniciar coleta
           </button>
         </div>
+
+        <p className="session-note">O navegador roda e permanece visível no PC servidor. O login pode ser controlado pela janela remota deste app.</p>
 
         <div className="manual-links-section">
           <div className="manual-links-heading">
@@ -5051,7 +4669,7 @@ function ProductsTab({
   onExportSelected,
   onListingDraftChange,
   onOpenDetails,
-  onOpenProductFolder,
+  onDownloadProductFiles,
   onProductNameDraftChange,
   onRegenerateImage,
   onSaveListing,
@@ -5064,7 +4682,6 @@ function ProductsTab({
   onUploadVariationImage,
   onDeleteVariation,
   onDeleteColorAsset,
-  onSavePrintPlates,
   filaments,
   productionSettings,
   activeStoreProfile,
@@ -5104,7 +4721,7 @@ function ProductsTab({
   onExportSelected: (ids?: string[]) => void;
   onListingDraftChange: (listing: Listing) => void;
   onOpenDetails: (id: string) => void;
-  onOpenProductFolder: (id?: string) => void;
+  onDownloadProductFiles: (id?: string) => void;
   onProductNameDraftChange: (value: string) => void;
   onRegenerateImage: (productId: string, promptKey: string, extraPrompt: string) => void;
   onSaveListing: () => Promise<unknown> | void;
@@ -5117,7 +4734,6 @@ function ProductsTab({
   onUploadVariationImage: (productId: string, slug: string, file: File) => void;
   onDeleteVariation: (productId: string, slug: string) => void;
   onDeleteColorAsset: (productId: string, assetId: string) => void;
-  onSavePrintPlates: (productId: string, plates: PrintPlate[]) => Promise<unknown>;
   filaments: FilamentSpool[];
   productionSettings: ProductionSettings | null;
   activeStoreProfile?: StoreProfile;
@@ -5135,8 +4751,6 @@ function ProductsTab({
   const [manualProductName, setManualProductName] = useState("");
   const [manualProductSourceUrl, setManualProductSourceUrl] = useState("");
   const [detailSection, setDetailSection] = useState<ProductDetailSection>("listing");
-  const [plateDrafts, setPlateDrafts] = useState<PrintPlate[]>([]);
-  const [savedPlates, setSavedPlates] = useState<PrintPlate[]>([]);
   const modelFileInputRef = useRef<HTMLInputElement>(null);
   const PRODUCT_CARD_BATCH = 20;
   const [renderedCount, setRenderedCount] = useState(PRODUCT_CARD_BATCH);
@@ -5177,19 +4791,6 @@ function ProductsTab({
     return () => observer.disconnect();
   }, [hasMoreProducts, products.length, visibleCount]);
 
-  useEffect(() => {
-    if (!selectedProduct) {
-      setPlateDrafts([]);
-      setSavedPlates([]);
-      return;
-    }
-    const plates = readPrintPlates(selectedProduct);
-    setPlateDrafts(plates);
-    setSavedPlates(plates);
-  }, [selectedProduct?.id, selectedProduct?.metadata?.print_plates]);
-
-  const plateDraftTotals = plateTotals(plateDrafts);
-  const platesDirty = !printPlatesEqual(plateDrafts, savedPlates);
   const listingDirty = Boolean(
     detailsOpen
     && selectedProduct
@@ -5208,29 +4809,6 @@ function ProductsTab({
     },
   });
 
-  const platesAutosaveStatus = useAutosave({
-    enabled: detailsOpen && detailSection === "printing" && Boolean(selectedProduct),
-    isDirty: platesDirty,
-    save: async () => {
-      if (!selectedProduct) return;
-      await onSavePrintPlates(selectedProduct.id, plateDrafts);
-      setSavedPlates(plateDrafts);
-    },
-  });
-
-  function updatePlateDraft(index: number, update: Partial<PrintPlate>) {
-    setPlateDrafts((current) =>
-      current.map((plate, plateIndex) => (plateIndex === index ? { ...plate, ...update } : plate)),
-    );
-  }
-
-  function addPlateDraftRow() {
-    setPlateDrafts((current) => [...current, defaultPrintPlate(current.length + 1)]);
-  }
-
-  function removePlateDraftRow(index: number) {
-    setPlateDrafts((current) => current.filter((_, plateIndex) => plateIndex !== index));
-  }
 
   function updateDraft<K extends keyof Listing>(key: K, value: Listing[K]) {
     if (!listingDraft) return;
@@ -5508,8 +5086,8 @@ function ProductsTab({
                   ) : (
                     <span>Produto sem link de origem</span>
                   )}
-                  <button onClick={() => onOpenProductFolder(selectedProduct.id)} disabled={busy}>
-                    <FolderOpen size={14} /> Pasta dos arquivos
+                  <button onClick={() => onDownloadProductFiles(selectedProduct.id)} disabled={busy}>
+                    <Download size={14} /> Baixar arquivos (.zip)
                   </button>
                 </div>
               </div>
@@ -5551,14 +5129,6 @@ function ProductsTab({
                 aria-selected={detailSection === "files"}
               >
                 <PackageSearch size={15} /> Arquivos 3D
-              </button>
-              <button
-                className={detailSection === "printing" ? "active" : ""}
-                onClick={() => setDetailSection("printing")}
-                role="tab"
-                aria-selected={detailSection === "printing"}
-              >
-                <Printer size={15} /> Impressão
               </button>
               <button
                 className={detailSection === "info" ? "active" : ""}
@@ -5721,7 +5291,6 @@ function ProductsTab({
                       <div>
                         <strong>{modelAssetLabel(asset.kind)}</strong>
                         <code>{fileBasename(asset.path)}</code>
-                        <small>{asset.path}</small>
                       </div>
                       <div className="model-file-actions">
                         <a href={assetUrl(asset)} download={fileBasename(asset.path)}>
@@ -5755,106 +5324,6 @@ function ProductsTab({
                     ))}
                   </div>
                 )}
-              </div>
-            )}
-
-            {detailSection === "printing" && selectedProduct && (
-              <div className="detail-section">
-                <p className="settings-note section-intro">
-                  Configure as placas de impressão deste produto. Filamento, gramas e tempo aqui alimentam automaticamente a aba Custos. As alterações são salvas automaticamente.
-                </p>
-                <div className="print-plates-summary">
-                  <span>{plateDraftTotals.plate_count} placa(s)</span>
-                  <span>{formatPrintMinutes(plateDraftTotals.total_print_time_minutes)} total</span>
-                  <span>{plateDraftTotals.total_filament_grams} g filamento</span>
-                </div>
-                <div className="costs-table-wrap">
-                  <table className="costs-table print-plates-table">
-                    <thead>
-                      <tr>
-                        <th>Nome</th>
-                        <th>Tempo (min)</th>
-                        <th>Filamento (g)</th>
-                        <th>Filamento</th>
-                        <th>Qtd/un.</th>
-                        <th>Notas</th>
-                        <th />
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {plateDrafts.map((plate, index) => (
-                        <tr key={plate.id || `plate-${index}`}>
-                          <td>
-                            <input
-                              value={plate.name}
-                              onChange={(event) => updatePlateDraft(index, { name: event.target.value })}
-                              disabled={busy}
-                            />
-                          </td>
-                          <td>
-                            <input
-                              type="number"
-                              min="0"
-                              value={plate.print_time_minutes || ""}
-                              onChange={(event) => updatePlateDraft(index, { print_time_minutes: Number(event.target.value) || 0 })}
-                              disabled={busy}
-                            />
-                          </td>
-                          <td>
-                            <input
-                              type="number"
-                              min="0"
-                              step="0.1"
-                              value={plate.filament_grams || ""}
-                              onChange={(event) => updatePlateDraft(index, { filament_grams: Number(event.target.value) || 0 })}
-                              disabled={busy}
-                            />
-                          </td>
-                          <td>
-                            <select
-                              value={plate.filament_id || ""}
-                              onChange={(event) => updatePlateDraft(index, { filament_id: event.target.value || null })}
-                              disabled={busy || !filaments.length}
-                            >
-                              <option value="">—</option>
-                              {filaments.map((spool) => (
-                                <option key={spool.id} value={spool.id}>
-                                  {spool.name}
-                                </option>
-                              ))}
-                            </select>
-                          </td>
-                          <td>
-                            <input
-                              type="number"
-                              min="1"
-                              value={plate.quantity || 1}
-                              onChange={(event) => updatePlateDraft(index, { quantity: Math.max(1, Number(event.target.value) || 1) })}
-                              disabled={busy}
-                            />
-                          </td>
-                          <td>
-                            <input
-                              value={plate.notes}
-                              onChange={(event) => updatePlateDraft(index, { notes: event.target.value })}
-                              disabled={busy}
-                            />
-                          </td>
-                          <td className="costs-actions-cell">
-                            <button className="danger-button compact-danger" onClick={() => removePlateDraftRow(index)} disabled={busy}>
-                              <Trash2 size={14} />
-                            </button>
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-                {!plateDrafts.length && <p className="empty">Nenhuma placa cadastrada. Adicione uma placa para planejar a impressão deste produto.</p>}
-                <div className="action-row">
-                  <button className="quiet-button" onClick={addPlateDraftRow} disabled={busy}>+ Placa</button>
-                  <AutosaveIndicator status={platesAutosaveStatus} />
-                </div>
               </div>
             )}
 
@@ -7384,6 +6853,7 @@ function ScheduleTab({
 }
 
 function SettingsTab({
+  isAdmin,
   imageOptions,
   openRouterApiKeyDraft,
   openRouterModelDraft,
@@ -7424,16 +6894,9 @@ function SettingsTab({
   onDeleteFilament,
   onSaveFilament,
   onSaveProductionSettings,
-  onSavePrinter,
-  onDeletePrinter,
-  onPrintersSaved,
-  printers,
   onWrapAction,
-  appUpdate,
-  onCheckAppUpdates,
-  onDownloadAppUpdate,
-  onInstallAppUpdate,
 }: {
+  isAdmin: boolean;
   imageOptions: ImageOptions;
   openRouterApiKeyDraft: string;
   openRouterModelDraft: string;
@@ -7449,7 +6912,7 @@ function SettingsTab({
   settings: SettingsPayload | null;
   storeProfileDraft: StoreProfile | null;
   storeProfiles: StoreProfile[];
-  onCreateStoreProfile: () => Promise<unknown> | void;
+  onCreateStoreProfile: (credentials: { name: string; username: string; password: string }) => Promise<unknown> | void;
   onDownloadAppBackup: () => Promise<unknown> | void;
   onOpenRouterApiKeyChange: (value: string) => void;
   onOpenRouterModelChange: (value: string) => void;
@@ -7489,31 +6952,19 @@ function SettingsTab({
     maintenance_cost_per_hour_brl: number;
     labor_cost_per_hour_brl: number;
   }) => Promise<unknown>;
-  onSavePrinter: (payload: {
-    id?: string;
-    name: string;
-    model: string;
-    notes: string;
-    active: boolean;
-  }) => Promise<unknown>;
-  onDeletePrinter: (printerId: string) => Promise<unknown>;
-  onPrintersSaved: () => Promise<Printer3D[] | void>;
-  printers: Printer3D[];
   onWrapAction: <T,>(label: string, action: () => Promise<T>) => Promise<T | undefined>;
-  appUpdate: AppUpdateState;
-  onCheckAppUpdates: () => Promise<void>;
-  onDownloadAppUpdate: () => Promise<void>;
-  onInstallAppUpdate: () => Promise<void>;
 }) {
   const [profileEditorOpen, setProfileEditorOpen] = useState(false);
+  const [newStoreOpen, setNewStoreOpen] = useState(false);
+  const [newStoreName, setNewStoreName] = useState("");
+  const [newStoreUsername, setNewStoreUsername] = useState("");
+  const [newStorePassword, setNewStorePassword] = useState("");
   const [integrationEditorOpen, setIntegrationEditorOpen] = useState(false);
   const [integrationSecretsVisible, setIntegrationSecretsVisible] = useState(false);
   const [loadingIntegrationSecrets, setLoadingIntegrationSecrets] = useState(false);
   const [settingsSection, setSettingsSection] = useState<SettingsSection>("store");
   const [colorDrafts, setColorDrafts] = useState<ImageOptions["colors"]>(imageOptions.colors);
-  const [appInfo, setAppInfo] = useState<AppInfo>(DEFAULT_APP_INFO);
   const [filamentDrafts, setFilamentDrafts] = useState<FilamentSpool[]>(filaments);
-  const [printerDrafts, setPrinterDrafts] = useState<Printer3D[]>(printers);
   const [electricityPrice, setElectricityPrice] = useState("0.85");
   const [printerPower, setPrinterPower] = useState("200");
   const [printerPurchasePrice, setPrinterPurchasePrice] = useState("0");
@@ -7546,9 +6997,6 @@ function SettingsTab({
     setFilamentDrafts(filaments);
   }, [filaments]);
 
-  useEffect(() => {
-    setPrinterDrafts(printers);
-  }, [printers]);
 
   useEffect(() => {
     if (!productionSettings) return;
@@ -7564,22 +7012,13 @@ function SettingsTab({
     setColorDrafts(imageOptions.colors);
   }, [imageOptions.colors]);
 
-  useEffect(() => {
-    let cancelled = false;
-    if (!window.ecoNative?.getAppInfo) return;
-    window.ecoNative.getAppInfo()
-      .then((info) => {
-        if (!cancelled) setAppInfo(info);
-      })
-      .catch(() => undefined);
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  async function createAndEditStoreProfile() {
-    await onCreateStoreProfile();
-    setProfileEditorOpen(true);
+  async function createStoreLogin(event: React.FormEvent) {
+    event.preventDefault();
+    await onCreateStoreProfile({ name: newStoreName, username: newStoreUsername, password: newStorePassword });
+    setNewStoreOpen(false);
+    setNewStoreName("");
+    setNewStoreUsername("");
+    setNewStorePassword("");
   }
 
   async function saveAndCloseStoreProfile() {
@@ -7636,6 +7075,17 @@ function SettingsTab({
     });
   }
 
+  function toggleStoreImagePrompt(promptId: string, enabled: boolean) {
+    if (!storeProfileDraft) return;
+    const disabled = new Set(storeProfileDraft.disabled_image_prompts || []);
+    if (enabled) disabled.delete(promptId);
+    else disabled.add(promptId);
+    onStoreProfileDraftChange({
+      ...storeProfileDraft,
+      disabled_image_prompts: [...disabled],
+    });
+  }
+
   function handleStorePhotoChange(profileId: string, file?: File) {
     if (!file) return;
     onUploadStoreProfilePhoto(profileId, file);
@@ -7687,44 +7137,6 @@ function SettingsTab({
         updated_at: "",
       },
     ]);
-  }
-
-  function updatePrinterDraft(index: number, key: keyof Printer3D, value: string | boolean) {
-    setPrinterDrafts((current) =>
-      current.map((item, itemIndex) => (itemIndex === index ? { ...item, [key]: value } : item)),
-    );
-  }
-
-  function addPrinterDraftRow() {
-    setPrinterDrafts((current) => [
-      ...current,
-      {
-        id: "",
-        name: "",
-        model: "",
-        notes: "",
-        active: true,
-        created_at: "",
-        updated_at: "",
-      },
-    ]);
-  }
-
-  async function savePrintingSection() {
-    for (const draft of printerDrafts) {
-      if (!draft.name.trim()) continue;
-      await onSavePrinter({
-        id: draft.id || undefined,
-        name: draft.name.trim(),
-        model: draft.model || "",
-        notes: draft.notes || "",
-        active: draft.active,
-      });
-    }
-    const reloaded = await onPrintersSaved();
-    if (Array.isArray(reloaded)) {
-      setPrinterDrafts(reloaded);
-    }
   }
 
   async function saveProductionSection() {
@@ -7782,7 +7194,6 @@ function SettingsTab({
     )
     || !filamentDraftsEqual(filamentDrafts, filaments)
   );
-  const printingDirty = settingsSection === "printing" && !printerDraftsEqual(printerDrafts, printers);
 
   const profileAutosaveStatus = useAutosave({
     enabled: profileEditorOpen,
@@ -7804,21 +7215,17 @@ function SettingsTab({
     isDirty: productionDirty,
     save: () => saveProductionSection(),
   });
-  const printingAutosaveStatus = useAutosave({
-    enabled: settingsSection === "printing",
-    isDirty: printingDirty,
-    save: () => savePrintingSection(),
-  });
-
   return (
     <section className="settings-page settings-layout">
       <nav className="settings-nav" aria-label="Seções de ajustes">
         <button className={settingsSection === "store" ? "active" : ""} onClick={() => setSettingsSection("store")}>
           <ShoppingBag size={16} /> Loja e prompts
         </button>
-        <button className={settingsSection === "integrations" ? "active" : ""} onClick={() => setSettingsSection("integrations")}>
-          <KeyRound size={16} /> Integrações
-        </button>
+        {isAdmin && (
+          <button className={settingsSection === "integrations" ? "active" : ""} onClick={() => setSettingsSection("integrations")}>
+            <KeyRound size={16} /> Integrações
+          </button>
+        )}
         <button className={settingsSection === "appearance" ? "active" : ""} onClick={() => setSettingsSection("appearance")}>
           <Palette size={16} /> Aparência
         </button>
@@ -7827,9 +7234,6 @@ function SettingsTab({
         </button>
         <button className={settingsSection === "production" ? "active" : ""} onClick={() => setSettingsSection("production")}>
           <Coins size={16} /> Produção
-        </button>
-        <button className={settingsSection === "printing" ? "active" : ""} onClick={() => setSettingsSection("printing")}>
-          <Printer size={16} /> Impressão
         </button>
         <button className={settingsSection === "backup" ? "active" : ""} onClick={() => setSettingsSection("backup")}>
           <Download size={16} /> Backup e app
@@ -7844,7 +7248,9 @@ function SettingsTab({
           <h2>Perfis de loja</h2>
         </div>
         <p className="settings-note">
-          Cada perfil representa uma loja/modo de trabalho. Ao trocar a loja ativa, os prompts de anúncio e imagem também mudam.
+          {isAdmin
+            ? "Você está vendo apenas a loja deste login. Cadastre outra loja para gerar um acesso separado e isolado."
+            : "Você está vendo somente a loja vinculada a este login."}
         </p>
         <div className="store-profile-list">
           {storeProfiles.map((profile) => (
@@ -7857,9 +7263,6 @@ function SettingsTab({
                 <small>{profile.niche} · {profile.marketplace.replace("_", " ")}</small>
               </div>
               <div className="store-profile-actions">
-                <button className="primary ghost" onClick={() => onSelectedStoreProfileChange(profile.id)}>
-                  Ativar
-                </button>
                 <button
                   className="primary"
                   onClick={() => {
@@ -7873,13 +7276,30 @@ function SettingsTab({
             </div>
           ))}
         </div>
-        <button className="primary profile-create-button" onClick={createAndEditStoreProfile}>
-          <FolderPlus size={18} /> Criar perfil de loja
-        </button>
+        {isAdmin && (
+          <button className="primary profile-create-button" onClick={() => setNewStoreOpen(true)}>
+            <FolderPlus size={18} /> Criar perfil de loja
+          </button>
+        )}
+        {newStoreOpen && (
+          <div className="modal-backdrop" role="presentation" onMouseDown={() => setNewStoreOpen(false)}>
+            <form className="modal-card auth-form" role="dialog" aria-modal="true" aria-label="Cadastrar nova loja" onSubmit={createStoreLogin} onMouseDown={(event) => event.stopPropagation()}>
+              <div><p className="eyebrow">Novo acesso</p><h2>Cadastrar loja</h2></div>
+              <label>Nome da loja<input value={newStoreName} onChange={(event) => setNewStoreName(event.target.value)} required /></label>
+              <label>Login<input value={newStoreUsername} onChange={(event) => setNewStoreUsername(event.target.value)} required minLength={3} autoComplete="off" /></label>
+              <label>Senha<input type="password" value={newStorePassword} onChange={(event) => setNewStorePassword(event.target.value)} required minLength={8} autoComplete="new-password" /></label>
+              <p className="settings-note">Esse login abrirá somente esta nova loja. Anote a senha: ela não será exibida depois.</p>
+              <div className="modal-actions">
+                <button type="button" className="primary ghost" onClick={() => setNewStoreOpen(false)}>Cancelar</button>
+                <button className="primary"><FolderPlus size={18} /> Criar loja e acesso</button>
+              </div>
+            </form>
+          </div>
+        )}
       </div>
       )}
 
-      {settingsSection === "integrations" && (
+      {isAdmin && settingsSection === "integrations" && (
       <div className="panel integration-settings-panel">
         <div className="panel-title">
           <KeyRound size={18} />
@@ -8068,73 +7488,20 @@ function SettingsTab({
       </div>
       )}
 
-      {settingsSection === "printing" && (
-      <div className="panel printing-settings-panel">
-        <div className="panel-title">
-          <Printer size={18} />
-          <h2>Impressoras 3D</h2>
-        </div>
-        <p className="settings-note section-intro">
-          Impressoras compartilhadas por todas as lojas. As alterações são salvas automaticamente.
-        </p>
-        <div className="costs-table-wrap">
-          <table className="costs-table settings-printer-table">
-            <thead>
-              <tr>
-                <th>Nome</th>
-                <th>Modelo</th>
-                <th>Notas</th>
-                <th>Ativa</th>
-                <th />
-              </tr>
-            </thead>
-            <tbody>
-              {printerDrafts.map((printer, index) => (
-                <tr key={printer.id || `new-printer-${index}`}>
-                  <td><input value={printer.name} onChange={(event) => updatePrinterDraft(index, "name", event.target.value)} /></td>
-                  <td><input value={printer.model || ""} onChange={(event) => updatePrinterDraft(index, "model", event.target.value)} /></td>
-                  <td><input value={printer.notes || ""} onChange={(event) => updatePrinterDraft(index, "notes", event.target.value)} /></td>
-                  <td className="costs-actions-cell">
-                    <input
-                      type="checkbox"
-                      checked={printer.active}
-                      onChange={(event) => updatePrinterDraft(index, "active", event.target.checked)}
-                    />
-                  </td>
-                  <td className="costs-actions-cell">
-                    {printer.id ? (
-                      <button className="danger-button compact-danger" onClick={() => onDeletePrinter(printer.id)} disabled={!printer.id}>
-                        <Trash2 size={14} />
-                      </button>
-                    ) : null}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-        <div className="action-row">
-          <button className="quiet-button" onClick={addPrinterDraftRow}>+ Impressora</button>
-          <AutosaveIndicator status={printingAutosaveStatus} />
-        </div>
-      </div>
-      )}
-
       {settingsSection === "backup" && (
       <>
       <div className="panel backup-settings-panel">
         <div className="panel-title">
           <Download size={18} />
-          <h2>Backup completo</h2>
+          <h2>Backup desta loja</h2>
         </div>
         <p className="settings-note">
-          Gera um ZIP com todos os dados do app: lojas, projetos, produtos, filamentos, impressoras, agenda de impressão,
-          integrações (.env), arquivos de produto (3MF, imagens) e logos das lojas.
-          Ao restaurar, o conteúdo do backup substitui os dados atuais do app.
+          Gera um ZIP somente com a loja deste login, seus projetos, produtos, filamentos e arquivos.
+          Senhas e chaves de integração não entram no arquivo. Por segurança, este login só restaura backups da própria loja.
         </p>
         <div className="backup-actions">
           <button className="primary" onClick={() => onDownloadAppBackup()}>
-            <Download size={18} /> Baixar backup completo
+            <Download size={18} /> Baixar backup da loja
           </button>
           <label className="backup-upload-button">
             <FolderOpen size={18} /> Restaurar backup ZIP
@@ -8150,41 +7517,13 @@ function SettingsTab({
         </div>
       </div>
 
-      <div className="panel app-update-panel">
-        <div className="panel-title">
-          <RefreshCw size={18} />
-          <h2>Aplicativo</h2>
-        </div>
-        <div className="settings-app-about">
-          <span className="brand-mark">
-            <img src="./eco-logo.png" alt="" />
-          </span>
-          <div>
-            <strong>{appInfo.name}</strong>
-            <span>Versão instalada: {appInfo.version}</span>
-          </div>
-        </div>
-        <p className="settings-note">
-          A versão acima é a do app que você está usando agora. O app verifica novas versões ao abrir e avisa discretamente;
-          o download só começa quando você confirmar, aqui ou no aviso na tela.
-        </p>
-        <AppUpdateControls
-          state={appUpdate}
-          onCheck={onCheckAppUpdates}
-          onDownload={onDownloadAppUpdate}
-          onInstall={onInstallAppUpdate}
-        />
-      </div>
-
       <div className="panel paths-settings-panel">
         <div className="panel-title">
           <Settings size={18} />
-          <h2>Pastas e modelos</h2>
+          <h2>Ambiente local</h2>
         </div>
         <div className="summary-list path-list">
-          <SummaryItem label="Dados" value={settings?.data_dir ?? "--"} />
-          <SummaryItem label="Projetos" value={settings?.projects_dir ?? "--"} />
-          <SummaryItem label="Exportações" value={settings?.exports_dir ?? "--"} />
+          <SummaryItem label="Armazenamento" value="Neste computador" />
           <SummaryItem label="Modelo OpenRouter" value={settings?.integrations.openrouter_model ?? "--"} />
           <SummaryItem label="Modelo Kie imagem" value={settings?.integrations.kie_image_model ?? "--"} />
         </div>
@@ -8258,6 +7597,16 @@ function SettingsTab({
                 </div>
                 <div className="prompt-grid">
                   <label>
+                    Busca no MakerWorld
+                    <small>Orienta palavras-chave, foco e características procuradas na coleta.</small>
+                    <textarea value={storeProfileDraft.search_prompt} onChange={(event) => updateStoreDraft("search_prompt", event.target.value)} />
+                  </label>
+                  <label>
+                    Curadoria
+                    <small>Define os critérios usados para avaliar os produtos coletados.</small>
+                    <textarea value={storeProfileDraft.curation_prompt} onChange={(event) => updateStoreDraft("curation_prompt", event.target.value)} />
+                  </label>
+                  <label>
                     Conteúdo/anúncio
                     <small>Prompt usado para gerar título, descrição, categoria e campos comerciais.</small>
                     <textarea value={storeProfileDraft.listing_prompt} onChange={(event) => updateStoreDraft("listing_prompt", event.target.value)} />
@@ -8281,16 +7630,29 @@ function SettingsTab({
               <section className="profile-editor-section">
                 <div className="subsection-title">Prompts de imagem Kie/Qwen</div>
                 <div className="image-prompt-grid">
-                  {imageOptions.studio_prompts.map((prompt) => (
-                    <label key={prompt.id}>
-                      {prompt.name}
-                      <small>Prompt individual enviado ao Kie/Qwen para este tipo de imagem.</small>
+                  {imageOptions.studio_prompts.map((prompt) => {
+                    const enabled = !(storeProfileDraft.disabled_image_prompts || []).includes(prompt.id);
+                    return (
+                    <div className={`image-prompt-card${enabled ? "" : " disabled"}`} key={prompt.id}>
+                      <label className="inline-toggle image-prompt-toggle">
+                        <input
+                          type="checkbox"
+                          checked={enabled}
+                          onChange={(event) => toggleStoreImagePrompt(prompt.id, event.target.checked)}
+                        />
+                        <span>
+                          {prompt.name}
+                          <small>{enabled ? "Incluída na geração de imagens base." : "Desativada para esta loja."}</small>
+                        </span>
+                      </label>
                       <textarea
+                        aria-label={`Prompt de ${prompt.name}`}
                         value={(storeProfileDraft.image_prompts || {})[prompt.id] || ""}
                         onChange={(event) => updateStoreImagePrompt(prompt.id, event.target.value)}
+                        disabled={!enabled}
                       />
-                    </label>
-                  ))}
+                    </div>
+                  )})}
                 </div>
               </section>
             </div>
@@ -8509,4 +7871,248 @@ function Integration({ label, enabled }: { label: string; enabled: boolean }) {
   );
 }
 
-createRoot(document.getElementById("root")!).render(<App />);
+function AdminConsole({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<void> }) {
+  const [usage, setUsage] = useState<AdminUsage | null>(null);
+  const [settings, setSettings] = useState<SettingsPayload | null>(null);
+  const [secrets, setSecrets] = useState<SettingsSecrets>({});
+  const [notice, setNotice] = useState("");
+  const [newStore, setNewStore] = useState({ name: "", username: "", password: "" });
+  const [period, setPeriod] = useState("");
+
+  const reload = useCallback(async () => {
+    const [usagePayload, settingsPayload] = await Promise.all([
+      api<AdminUsage>(`/api/admin/usage${period ? `?period=${encodeURIComponent(period)}` : ""}`),
+      api<SettingsPayload>("/api/settings"),
+    ]);
+    setUsage(usagePayload);
+    setPeriod(usagePayload.period);
+    setSettings(settingsPayload);
+  }, [period]);
+
+  useEffect(() => { void reload(); }, [reload]);
+
+  async function loadSecrets() {
+    setSecrets(await api<SettingsSecrets>("/api/settings/secrets"));
+  }
+
+  async function saveIntegrations() {
+    await api("/api/settings", { method: "PATCH", body: JSON.stringify(secrets) });
+    setNotice("Integrações atualizadas.");
+    await reload();
+  }
+
+  async function saveLimits(row: AdminStoreUsage) {
+    await api(`/api/admin/stores/${row.store.id}/limits`, {
+      method: "PUT",
+      body: JSON.stringify({ enabled: row.enabled, ...row.quotas }),
+    });
+    setNotice(`Limites de ${row.store.name} atualizados.`);
+    await reload();
+  }
+
+  async function createStore(event: React.FormEvent) {
+    event.preventDefault();
+    await api("/api/store-profiles", { method: "POST", body: JSON.stringify(newStore) });
+    setNewStore({ name: "", username: "", password: "" });
+    setNotice("Loja e acesso criados.");
+    await reload();
+  }
+
+  function updateRow(storeId: string, update: Partial<AdminStoreUsage>, quota?: [string, string]) {
+    setUsage((current) => current ? {
+      ...current,
+      stores: current.stores.map((row) => {
+        if (row.store.id !== storeId) return row;
+        if (!quota) return { ...row, ...update };
+        const [key, raw] = quota;
+        return { ...row, quotas: { ...row.quotas, [key]: raw === "" ? null : Number(raw) } };
+      }),
+    } : current);
+  }
+
+  return (
+    <main className="auth-page admin-console-page">
+      <section className="auth-card admin-console-card">
+        <div className="panel-title">
+          <Settings size={20} />
+          <div><p className="eyebrow">Conta administrativa</p><h1>Painel unificado</h1></div>
+          <button className="quiet-button" onClick={() => void onLogout()}><LogOut size={16} /> Sair ({auth.username})</button>
+        </div>
+        {notice && <p className="notice">{notice}</p>}
+
+        <div className="dashboard-grid">
+          <SummaryItem label="Lojas" value={String(usage?.stores.length ?? 0)} />
+          <SummaryItem label="Coletas no período" value={String(usage?.totals.collect_monthly ?? 0)} />
+          <SummaryItem label="Textos no período" value={String(usage?.totals.listing_monthly ?? 0)} />
+          <SummaryItem label="Imagens no período" value={String(usage?.totals.image_monthly ?? 0)} />
+          <SummaryItem label="Custo IA no período" value={formatUsd(usage?.totals.ai_cost_usd_monthly ?? 0)} />
+        </div>
+
+        <div className="panel">
+          <div className="panel-title">
+            <Gauge size={18} /><h2>Cotas e consumo por loja</h2>
+            <label>Período
+              <select value={period} onChange={(event) => setPeriod(event.target.value)}>
+                <option value="all">Todo o histórico</option>
+                {usage?.periods.map((item) => (
+                  <option key={item} value={item}>{item === "legacy" ? "Legado sem período" : item}</option>
+                ))}
+              </select>
+            </label>
+          </div>
+          <p className="settings-note">O período selecionado muda os números de consumo. As cotas são mensais recorrentes: deixe um limite vazio para uso ilimitado. O bloqueio acontece antes de iniciar uma nova operação.</p>
+          <div className="costs-table-wrap"><table className="costs-table"><thead><tr><th>Loja / login</th><th>Coletas</th><th>Textos</th><th>Imagens</th><th>Custo IA (US$)</th><th>Ativa</th><th /></tr></thead><tbody>
+            {usage?.stores.map((row) => (
+              <tr key={row.store.id}>
+                <td><strong>{row.store.name}</strong><small>{row.username || "Sem login"}</small></td>
+                {(["collect_monthly", "listing_monthly", "image_monthly", "ai_cost_usd_monthly"] as const).map((key) => (
+                  <td key={key}><input type="number" min="0" step={key === "ai_cost_usd_monthly" ? "0.01" : "1"} value={row.quotas[key] ?? ""} placeholder={`Usado: ${row.usage[key] ?? 0}`} onChange={(event) => updateRow(row.store.id, {}, [key, event.target.value])} /></td>
+                ))}
+                <td><input type="checkbox" checked={row.enabled} onChange={(event) => updateRow(row.store.id, { enabled: event.target.checked })} /></td>
+                <td><button className="primary" onClick={() => void saveLimits(row)}>Salvar</button></td>
+              </tr>
+            ))}
+          </tbody></table></div>
+        </div>
+
+        <form className="panel auth-form" onSubmit={createStore}>
+          <div className="panel-title"><FolderPlus size={18} /><h2>Nova loja e acesso</h2></div>
+          <div className="form-grid">
+            <label>Nome da loja<input value={newStore.name} onChange={(e) => setNewStore({ ...newStore, name: e.target.value })} required /></label>
+            <label>Login<input value={newStore.username} onChange={(e) => setNewStore({ ...newStore, username: e.target.value })} minLength={3} required /></label>
+            <label>Senha<input type="password" value={newStore.password} onChange={(e) => setNewStore({ ...newStore, password: e.target.value })} minLength={8} required /></label>
+          </div>
+          <button className="primary"><FolderPlus size={16} /> Criar loja</button>
+        </form>
+
+        <div className="panel">
+          <div className="panel-title"><KeyRound size={18} /><h2>Integrações globais</h2></div>
+          <div className="integrations">
+            <Integration label="OpenRouter" enabled={Boolean(settings?.integrations.openrouter)} />
+            <Integration label="Kie.ai" enabled={Boolean(settings?.integrations.kie_ai)} />
+            <Integration label="Cloudflare R2" enabled={Boolean(settings?.integrations.cloudflare_r2)} />
+          </div>
+          <button className="quiet-button" onClick={() => void loadSecrets()}>Carregar configuração</button>
+          <div className="form-grid">
+            <label>OpenRouter API key<input type="password" value={secrets.openrouter_api_key ?? ""} onChange={(e) => setSecrets({ ...secrets, openrouter_api_key: e.target.value })} /></label>
+            <label>Modelo OpenRouter<input value={secrets.openrouter_model ?? ""} onChange={(e) => setSecrets({ ...secrets, openrouter_model: e.target.value })} /></label>
+            <label>Kie API key<input type="password" value={secrets.kie_api_key ?? ""} onChange={(e) => setSecrets({ ...secrets, kie_api_key: e.target.value })} /></label>
+            <label>Modelo Kie<input value={secrets.kie_image_model ?? ""} onChange={(e) => setSecrets({ ...secrets, kie_image_model: e.target.value })} /></label>
+            <label>R2 Account ID<input value={secrets.cloudflare_account_id ?? ""} onChange={(e) => setSecrets({ ...secrets, cloudflare_account_id: e.target.value })} /></label>
+            <label>R2 Bucket<input value={secrets.cloudflare_r2_bucket_name ?? ""} onChange={(e) => setSecrets({ ...secrets, cloudflare_r2_bucket_name: e.target.value })} /></label>
+            <label>R2 Access key<input type="password" value={secrets.cloudflare_r2_access_key ?? ""} onChange={(e) => setSecrets({ ...secrets, cloudflare_r2_access_key: e.target.value })} /></label>
+            <label>R2 Secret key<input type="password" value={secrets.cloudflare_r2_secret_key ?? ""} onChange={(e) => setSecrets({ ...secrets, cloudflare_r2_secret_key: e.target.value })} /></label>
+            <label>R2 URL pública<input value={secrets.cloudflare_r2_public_url ?? ""} onChange={(e) => setSecrets({ ...secrets, cloudflare_r2_public_url: e.target.value })} /></label>
+          </div>
+          <button className="primary" onClick={() => void saveIntegrations()}><Check size={16} /> Salvar integrações</button>
+        </div>
+
+      </section>
+    </main>
+  );
+}
+
+function LoginScreen({ status, onAuthenticated }: { status: AuthStatus; onAuthenticated: (status: AuthStatus) => void }) {
+  const setupRequired = status.setup_required;
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const stores = status.legacy_stores ?? [];
+  const [storeName, setStoreName] = useState(stores[0]?.name ?? "Loja principal");
+  const [storeCredentials, setStoreCredentials] = useState(() =>
+    stores.map((store) => ({ store_profile_id: store.id, username: "", password: "" })),
+  );
+  const [message, setMessage] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+
+  async function submit(event: React.FormEvent) {
+    event.preventDefault();
+    setSubmitting(true);
+    setMessage("");
+    try {
+      const nextStatus = await api<AuthStatus>(setupRequired ? "/api/auth/setup" : "/api/auth/login", {
+        method: "POST",
+        body: JSON.stringify(setupRequired
+          ? { admin: { username, password }, stores: storeCredentials, store_name: stores.length === 1 ? storeName : undefined }
+          : { username, password }),
+      });
+      onAuthenticated(nextStatus);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Não foi possível entrar");
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <main className="auth-page">
+      <section className="auth-card">
+        <img src="/eco-logo.png" alt="ECO Native" className="auth-logo" />
+        <div>
+          <p className="eyebrow">ECO Native Studio</p>
+          <h1>{setupRequired ? "Configure o primeiro acesso" : "Entre na sua loja"}</h1>
+          <p className="auth-description">
+            {setupRequired
+              ? "Crie uma conta administrativa independente e um acesso para cada loja. Os dados continuarão neste computador."
+              : "Entre com uma conta administrativa ou com o login específico de uma loja."}
+          </p>
+        </div>
+
+        <form onSubmit={submit} className="auth-form">
+          {setupRequired && stores.length === 1 && (
+            <label>Nome da loja<input value={storeName} onChange={(event) => setStoreName(event.target.value)} required /></label>
+          )}
+          {setupRequired && (
+            <fieldset className="migration-store">
+              <legend>Conta administradora</legend>
+              <label>Login administrativo<input value={username} onChange={(event) => setUsername(event.target.value)} autoComplete="username" required minLength={3} /></label>
+              <label>Senha administrativa<input type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete="new-password" required minLength={8} /></label>
+            </fieldset>
+          )}
+          {setupRequired ? storeCredentials.map((credential, index) => (
+            <fieldset className="migration-store" key={credential.store_profile_id}>
+              <legend>{stores[index]?.name ?? `Loja ${index + 1}`}</legend>
+              <label>Login<input value={credential.username} onChange={(event) => setStoreCredentials((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, username: event.target.value } : item))} autoComplete="off" required minLength={3} /></label>
+              <label>Senha<input type="password" value={credential.password} onChange={(event) => setStoreCredentials((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, password: event.target.value } : item))} autoComplete="new-password" required minLength={8} /></label>
+            </fieldset>
+          )) : (
+            <>
+              <label>Login<input value={username} onChange={(event) => setUsername(event.target.value)} autoComplete="username" required minLength={3} /></label>
+              <label>Senha<input type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete="current-password" required minLength={8} /></label>
+            </>
+          )}
+          {message && <p className="auth-error">{message}</p>}
+          <button className="primary login-button" disabled={submitting}>
+            {submitting ? <Loader2 size={18} className="spin" /> : <LogIn size={18} />}
+            {setupRequired ? "Criar acesso" : "Entrar"}
+          </button>
+        </form>
+      </section>
+    </main>
+  );
+}
+
+function Root() {
+  const [auth, setAuth] = useState<AuthStatus | null>(null);
+
+  const loadStatus = useCallback(() => {
+    api<AuthStatus>("/api/auth/status").then(setAuth).catch(() => setAuth({ authenticated: false, setup_required: false }));
+  }, []);
+
+  useEffect(() => {
+    loadStatus();
+    window.addEventListener("eco-native-auth-required", loadStatus);
+    return () => window.removeEventListener("eco-native-auth-required", loadStatus);
+  }, [loadStatus]);
+
+  async function logout() {
+    await api<void>("/api/auth/logout", { method: "POST" });
+    setAuth({ authenticated: false, setup_required: false });
+  }
+
+  if (!auth) return <main className="auth-page"><Loader2 size={28} className="spin" /></main>;
+  if (!auth.authenticated) return <LoginScreen status={auth} onAuthenticated={setAuth} />;
+  if (auth.is_admin) return <AdminConsole auth={auth} onLogout={logout} />;
+  return <App auth={auth} onLogout={logout} />;
+}
+
+createRoot(document.getElementById("root")!).render(<Root />);

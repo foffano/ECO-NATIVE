@@ -56,7 +56,6 @@ def add_file(
             "owner_id": owner_id,
             "field": field,
             "arcname": arcname,
-            "original_path": str(path),
         }
     )
 
@@ -142,7 +141,45 @@ def store_scope(state: StudioState, store_profile_id: str) -> tuple[StoreProfile
 
 
 def create_store_backup(store_profile_id: str) -> Path:
-    return create_app_backup()
+    state = store.load()
+    profile, projects, products, jobs, ai_profiles = store_scope(state, store_profile_id)
+    project_ids = {item.id for item in projects}
+    product_ids = {item.id for item in products}
+    scoped = StudioState(
+        store_profiles=[profile],
+        ai_profiles=ai_profiles,
+        projects=projects,
+        products=products,
+        jobs=jobs,
+        blocked_source_urls=[item for item in state.blocked_source_urls if item.project_id in project_ids],
+        filament_spools=[item for item in state.filament_spools if item.store_profile_id == profile.id],
+        production_settings=[item for item in state.production_settings if item.store_profile_id == profile.id],
+        printers_3d=state.printers_3d,
+        print_schedule_tasks=[
+            item for item in state.print_schedule_tasks
+            if item.store_profile_id == profile.id or item.product_id in product_ids
+        ],
+    )
+    backups_dir = EXPORTS_DIR / "backups"
+    backups_dir.mkdir(parents=True, exist_ok=True)
+    output = backups_dir / f"eco-native-{slugify(profile.name)}-{backup_timestamp()}.zip"
+    files: list[dict] = []
+    with ZipFile(output, "w", ZIP_DEFLATED) as archive:
+        add_file(archive, profile.logo_path, f"files/store/{profile.id}/logo{Path(profile.logo_path or '').suffix}", files, "store_profile", profile.id, "logo_path")
+        for product in products:
+            for asset in product.assets:
+                add_file(archive, asset.path, f"files/products/{product.id}/{Path(asset.path).name}", files, "asset", asset.id, "path")
+        manifest = {
+            "version": BACKUP_VERSION_STORE,
+            "kind": "store",
+            "exported_at": now_iso(),
+            "store_profile_id": profile.id,
+            "store_profile_name": profile.name,
+            "data": scoped.model_dump(mode="json"),
+            "files": files,
+        }
+        archive.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
+    return output
 
 
 def backup_target_dir(label: str) -> Path:

@@ -9,11 +9,23 @@ def get_data_dir() -> Path:
     if override:
         return Path(override).expanduser().resolve()
 
+    # Reuse the Electron production directory when migrating the installed app
+    # to the web server. Electron used the lowercase package name on Windows.
+    appdata = os.getenv("APPDATA")
+    if appdata:
+        appdata_path = Path(appdata)
+        production_candidates = (
+            appdata_path / "eco-native-studio",
+            appdata_path / APP_NAME,
+        )
+        for candidate in production_candidates:
+            if (candidate / "studio.json").exists():
+                return candidate
+
     cwd = Path.cwd()
     if (cwd / "package.json").exists() and (cwd / "backend").exists():
         return cwd / "data"
 
-    appdata = os.getenv("APPDATA")
     if appdata:
         return Path(appdata) / APP_NAME
 

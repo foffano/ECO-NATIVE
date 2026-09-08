@@ -2,8 +2,14 @@ from backend.app.core.playwright_env import configure_playwright_browsers
 
 configure_playwright_browsers()
 
-from fastapi import FastAPI
+from pathlib import Path
+from urllib.parse import urlparse
+
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
+from starlette.middleware.base import BaseHTTPMiddleware
 
 from backend.app.api.routes_exports import router as exports_router
 from backend.app.api.routes_ai_profiles import router as ai_profiles_router
@@ -17,14 +23,17 @@ from backend.app.api.routes_r2 import router as r2_router
 from backend.app.api.routes_runtime import router as runtime_router
 from backend.app.api.routes_settings import router as settings_router
 from backend.app.api.routes_filaments import router as filaments_router
-from backend.app.api.routes_printers import router as printers_router
-from backend.app.api.routes_schedule import router as schedule_router
 from backend.app.api.routes_store_profiles import router as store_profiles_router
+from backend.app.api.routes_auth import COOKIE_NAME, router as auth_router
+from backend.app.api.routes_admin import router as admin_router
 from backend.app.core.paths import ensure_app_dirs
+from backend.app.db.store import store
+from backend.app.services.auth import read_session, setup_required
+from backend.app.services.authorization import store_project_ids
 
 ensure_app_dirs()
 
-app = FastAPI(title="ECO Native Studio API", version="0.1.0")
+app = FastAPI(title="ECO Native Studio API", version="0.2.0", docs_url=None, redoc_url=None)
 
 app.add_middleware(
     CORSMiddleware,
@@ -39,6 +48,53 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+class StoreAuthenticationMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        path = request.url.path
+        public = path == "/health" or path.startswith("/api/auth/") or not path.startswith("/api/")
+        user = read_session(request.cookies.get(COOKIE_NAME))
+        request.state.auth = user
+        if public:
+            return await call_next(request)
+        if setup_required():
+            return JSONResponse({"detail": "Configure o primeiro acesso"}, status_code=401)
+        if not user:
+            return JSONResponse({"detail": "Faça login para continuar"}, status_code=401)
+
+        if request.method not in {"GET", "HEAD", "OPTIONS"}:
+            origin = request.headers.get("origin")
+            forwarded_host = request.headers.get("x-forwarded-host") or request.headers.get("host")
+            if origin and urlparse(origin).netloc.casefold() != str(forwarded_host).split(",", 1)[0].strip().casefold():
+                return JSONResponse({"detail": "Origem da requisição não permitida"}, status_code=403)
+
+        # Defense in depth for endpoints addressed by object id. List/create routes
+        # apply their own store scope below.
+        state = store.load()
+        allowed_projects = store_project_ids(state, user.store_profile_id)
+        parts = [part for part in path.split("/") if part]
+        if len(parts) >= 3 and parts[1] == "projects":
+            project = next((item for item in state.projects if item.id == parts[2]), None)
+            if project and project.id not in allowed_projects:
+                return JSONResponse({"detail": "Recurso não encontrado"}, status_code=404)
+        if len(parts) >= 3 and parts[1] == "products":
+            product = next((item for item in state.products if item.id == parts[2]), None)
+            if product:
+                project = next((item for item in state.projects if item.id == product.project_id), None)
+                if not project or project.id not in allowed_projects:
+                    return JSONResponse({"detail": "Recurso não encontrado"}, status_code=404)
+        if len(parts) >= 3 and parts[1] == "assets":
+            product = next((product for product in state.products if any(asset.id == parts[2] for asset in product.assets)), None)
+            project = next((item for item in state.projects if product and item.id == product.project_id), None)
+            if product and (not project or project.id not in allowed_projects):
+                return JSONResponse({"detail": "Recurso não encontrado"}, status_code=404)
+        if len(parts) >= 3 and parts[1] == "store-profiles" and parts[2] != user.store_profile_id:
+            return JSONResponse({"detail": "Recurso não encontrado"}, status_code=404)
+        return await call_next(request)
+
+
+app.add_middleware(StoreAuthenticationMiddleware)
 
 
 @app.get("/health")
@@ -57,7 +113,13 @@ app.include_router(ai_profiles_router, prefix="/api/ai-profiles", tags=["ai-prof
 app.include_router(assets_router, prefix="/api/assets", tags=["assets"])
 app.include_router(store_profiles_router, prefix="/api/store-profiles", tags=["store-profiles"])
 app.include_router(filaments_router, prefix="/api/store-profiles", tags=["filaments"])
-app.include_router(printers_router, prefix="/api/printers", tags=["printers"])
-app.include_router(schedule_router, prefix="/api/schedule", tags=["schedule"])
 app.include_router(image_options_router, prefix="/api/image-options", tags=["image-options"])
 app.include_router(r2_router, prefix="/api/r2", tags=["r2"])
+app.include_router(auth_router, prefix="/api/auth", tags=["auth"])
+app.include_router(admin_router, prefix="/api/admin", tags=["admin"])
+
+# In production the same local process serves the compiled React application.
+# Cloudflare Tunnel therefore exposes one origin while all files and work stay here.
+FRONTEND_DIR = Path(__file__).resolve().parents[2] / "dist" / "frontend"
+if FRONTEND_DIR.exists():
+    app.mount("/", StaticFiles(directory=FRONTEND_DIR, html=True), name="frontend")

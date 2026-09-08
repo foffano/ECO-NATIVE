@@ -1,8 +1,8 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 from pydantic import BaseModel
 
-from backend.app.core.paths import DATA_DIR, EXPORTS_DIR, PROJECTS_DIR
 from backend.app.core.settings import get_settings, set_env_values
+from backend.app.services.authorization import require_admin
 
 router = APIRouter()
 
@@ -25,9 +25,6 @@ class SettingsUpdate(BaseModel):
 def read_settings() -> dict[str, object]:
     settings = get_settings()
     return {
-        "data_dir": str(DATA_DIR),
-        "projects_dir": str(PROJECTS_DIR),
-        "exports_dir": str(EXPORTS_DIR),
         "integrations": {
             "openrouter": bool(settings.openrouter_api_key),
             "openrouter_model": settings.openrouter_model,
@@ -47,7 +44,8 @@ def read_settings() -> dict[str, object]:
 
 
 @router.get("/secrets")
-def read_setting_secrets() -> dict[str, str | None]:
+def read_setting_secrets(request: Request) -> dict[str, str | None]:
+    require_admin(request)
     settings = get_settings()
     return {
         "openrouter_api_key": settings.openrouter_api_key,
@@ -64,7 +62,8 @@ def read_setting_secrets() -> dict[str, str | None]:
 
 
 @router.patch("")
-def update_settings(payload: SettingsUpdate) -> dict[str, object]:
+def update_settings(payload: SettingsUpdate, request: Request) -> dict[str, object]:
+    require_admin(request)
     values: dict[str, str] = {}
     if payload.openrouter_api_key:
         values["OPENROUTER_API_KEY"] = payload.openrouter_api_key

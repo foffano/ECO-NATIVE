@@ -66,6 +66,7 @@ class StoreProfile(BaseModel):
     listing_prompt: str = "Gerar anuncios profissionais para e-commerce em portugues do Brasil."
     image_prompt: str = "Gerar imagens limpas de produto para marketplace, preservando formato e detalhes."
     image_prompts: dict[str, str] = Field(default_factory=dict)
+    disabled_image_prompts: list[str] = Field(default_factory=list)
     color_variation_prompt: str = (
         "Strictly maintain the original object's physical texture, geometry, layer lines, and surface details. "
         "Do NOT change the texture pattern. Only modify the color and surface finish (glossiness/matte) "
@@ -180,6 +181,7 @@ class PrintScheduleTask(BaseModel):
     start_time: str
     duration_minutes: int = Field(default=0, ge=0)
     product_id: str | None = None
+    store_profile_id: str | None = None
     plate_id: str | None = None
     title: str
     quantity: int = Field(default=1, ge=1)

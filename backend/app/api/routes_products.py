@@ -1,18 +1,20 @@
 import io
-import os
 import re
-import subprocess
-import sys
+import tempfile
+from zipfile import ZIP_DEFLATED, ZipFile
 from pathlib import Path
 
 import unicodedata
 
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
+from fastapi.responses import FileResponse
+from starlette.background import BackgroundTask
 from PIL import Image
 from pydantic import BaseModel
 
-from backend.app.db.models import Asset, Listing, PrintPlate, Product, ProductStatus, StudioState, now_iso
+from backend.app.db.models import Asset, Listing, Product, ProductStatus, StudioState, now_iso
 from backend.app.db.store import store
+from backend.app.core.paths import CACHE_DIR
 from backend.app.services.cover_image import CoverImageError, cover_r2_public_url, normalize_cover_to_jpeg, validate_cover_bytes
 from backend.app.services.cloudflare_r2 import r2_configured, upload_file_to_r2
 from backend.app.services.product_paths import (
@@ -27,7 +29,6 @@ from backend.app.services.product_paths import (
     variation_image_filename,
 )
 from backend.app.services.prompt_library import IMAGE_PROMPTS
-from backend.app.services.print_plates import plate_totals, read_print_plates, write_print_plates
 from backend.app.services.product_cleanup import purge_product_data
 from backend.app.services.product_health import product_file_warnings
 from backend.app.services.production_cost import (
@@ -40,6 +41,7 @@ from backend.app.services.production_cost import (
 from backend.app.services.source_url_blacklist import block_product_source_url
 from backend.app.services.sku import ensure_color_skus, ensure_product_sku, variation_sku
 from backend.app.services.store_profiles import get_store_profile
+from backend.app.services.authorization import current_store_id, require_project, store_project_ids
 
 router = APIRouter()
 
@@ -89,10 +91,6 @@ class ProductionCostBatchRequest(BaseModel):
     items: list[ProductionCostBatchItem]
 
 
-class PrintPlatesUpdate(BaseModel):
-    plates: list[PrintPlate]
-
-
 class VariationCreate(BaseModel):
     attribute: str
     value: str
@@ -100,16 +98,6 @@ class VariationCreate(BaseModel):
 
 def product_folder(product: Product) -> Path:
     return product_dir_for(product)
-
-
-def open_folder(path: Path) -> None:
-    if sys.platform.startswith("win"):
-        os.startfile(str(path))  # type: ignore[attr-defined]
-        return
-    if sys.platform == "darwin":
-        subprocess.Popen(["open", str(path)])
-        return
-    subprocess.Popen(["xdg-open", str(path)])
 
 
 def ensure_skus_for_state_products() -> list[Product]:
@@ -128,10 +116,16 @@ def ensure_skus_for_state_products() -> list[Product]:
     if not needs_sku_updates(preview):
         return preview.products
 
+    # Resolve profiles before entering JsonStore.mutate. Calling
+    # get_store_profile() inside the mutation would try to acquire the same
+    # non-reentrant store lock and could deadlock legacy products without SKU.
+    profiles_by_id = {profile.id: profile for profile in preview.store_profiles}
+    fallback_profile = preview.store_profiles[0] if preview.store_profiles else get_store_profile(None)
+
     def apply(state: StudioState) -> list[Product]:
         for product in state.products:
             project = next((item for item in state.projects if item.id == product.project_id), None)
-            store_profile = get_store_profile(project.store_profile_id if project else None)
+            store_profile = profiles_by_id.get(project.store_profile_id if project else "") or fallback_profile
             if not product.metadata.get("sku"):
                 ensure_product_sku(product, state.products, project, store_profile)
             color_names = [asset.kind.replace("color_", "", 1) for asset in product.assets if asset.kind.startswith("color_")]
@@ -142,33 +136,37 @@ def ensure_skus_for_state_products() -> list[Product]:
     return store.mutate(apply)
 
 
-def _annotate_product_health(product: Product) -> Product:
+def _public_product(product: Product) -> Product:
+    public = product.model_copy(deep=True)
     warnings = product_file_warnings(product)
     if warnings:
-        product.metadata["file_warnings"] = warnings
+        public.metadata["file_warnings"] = warnings
     else:
-        product.metadata.pop("file_warnings", None)
-    return product
+        public.metadata.pop("file_warnings", None)
+    for asset in public.assets:
+        asset.path = Path(asset.path).name
+    return public
 
 
 @router.get("")
-def list_products(project_id: str | None = None) -> list[Product]:
+def list_products(request: Request, project_id: str | None = None) -> list[Product]:
     products = ensure_skus_for_state_products()
+    state = store.load()
+    allowed_projects = store_project_ids(state, current_store_id(request))
+    products = [p for p in products if p.project_id in allowed_projects]
     if project_id:
         products = [p for p in products if p.project_id == project_id]
-    return sorted((_annotate_product_health(p.model_copy(deep=True)) for p in products), key=lambda p: p.created_at, reverse=True)
+    return sorted((_public_product(p) for p in products), key=lambda p: p.created_at, reverse=True)
 
 
 @router.post("")
-def create_product(payload: ProductCreate) -> Product:
+def create_product(payload: ProductCreate, request: Request) -> Product:
     state = store.load()
-    if not any(p.id == payload.project_id for p in state.projects):
-        raise HTTPException(status_code=404, detail="Projeto nao encontrado")
-    project = next((p for p in state.projects if p.id == payload.project_id), None)
+    project = require_project(state, payload.project_id, current_store_id(request))
     store_profile = get_store_profile(project.store_profile_id if project else None)
     product = Product(**payload.model_dump())
     ensure_product_sku(product, state.products, project, store_profile)
-    return store.upsert_product(product)
+    return _public_product(store.upsert_product(product))
 
 
 @router.patch("/{product_id}")
@@ -189,7 +187,7 @@ def update_product(product_id: str, payload: ProductUpdate) -> Product:
     if "metadata" in payload.model_fields_set and payload.metadata is not None:
         product.metadata.update(payload.metadata)
 
-    return store.upsert_product(product)
+    return _public_product(store.upsert_product(product))
 
 
 def _production_context(product: Product):
@@ -202,15 +200,19 @@ def _production_context(product: Product):
 
 
 @router.put("/production-costs/batch")
-def batch_update_production_costs(payload: ProductionCostBatchRequest) -> dict:
+def batch_update_production_costs(payload: ProductionCostBatchRequest, request: Request) -> dict:
     if not payload.items:
         return {"updated": 0, "product_ids": []}
 
     preview = store.load()
+    allowed_projects = store_project_ids(preview, current_store_id(request))
     missing_ids = [
         item.product_id
         for item in payload.items
-        if not next((entry for entry in preview.products if entry.id == item.product_id), None)
+        if not next(
+            (entry for entry in preview.products if entry.id == item.product_id and entry.project_id in allowed_projects),
+            None,
+        )
     ]
     if missing_ids:
         raise HTTPException(
@@ -221,7 +223,10 @@ def batch_update_production_costs(payload: ProductionCostBatchRequest) -> dict:
     def apply(state: StudioState) -> dict:
         updated_ids: list[str] = []
         for item in payload.items:
-            product = next((entry for entry in state.products if entry.id == item.product_id), None)
+            product = next(
+                (entry for entry in state.products if entry.id == item.product_id and entry.project_id in allowed_projects),
+                None,
+            )
             if not product:
                 continue
             write_production_cost(product, normalize_production_cost(item.production_cost))
@@ -256,42 +261,31 @@ def update_production_cost(product_id: str, payload: ProductionCost) -> dict:
     return breakdown.model_dump()
 
 
-@router.get("/{product_id}/print-plates")
-def get_print_plates(product_id: str) -> dict:
-    state = store.load()
-    product = next((item for item in state.products if item.id == product_id), None)
-    if not product:
-        raise HTTPException(status_code=404, detail="Produto nao encontrado")
-    plates = read_print_plates(product)
-    return {"plates": [plate.model_dump() for plate in plates], "totals": plate_totals(plates)}
-
-
-@router.put("/{product_id}/print-plates")
-def update_print_plates(product_id: str, payload: PrintPlatesUpdate) -> dict:
-    state = store.load()
-    product = next((item for item in state.products if item.id == product_id), None)
-    if not product:
-        raise HTTPException(status_code=404, detail="Produto nao encontrado")
-    plates = payload.plates
-    write_print_plates(product, plates)
-    store.upsert_product(product)
-    return {"plates": [plate.model_dump() for plate in plates], "totals": plate_totals(plates)}
-
-
-@router.post("/{product_id}/open-folder")
-def open_product_folder(product_id: str) -> dict[str, str]:
+@router.get("/{product_id}/download-files")
+def download_product_files(product_id: str) -> FileResponse:
     state = store.load()
     product = next((p for p in state.products if p.id == product_id), None)
     if not product:
         raise HTTPException(status_code=404, detail="Produto nao encontrado")
 
     folder = product_folder(product)
-    folder.mkdir(parents=True, exist_ok=True)
-    try:
-        open_folder(folder)
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Nao foi possivel abrir a pasta: {exc}") from exc
-    return {"status": "opened", "path": str(folder)}
+    files = [path for path in folder.rglob("*") if path.is_file()] if folder.exists() else []
+    if not files:
+        raise HTTPException(status_code=404, detail="Este produto ainda não possui arquivos locais")
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    temporary = tempfile.NamedTemporaryFile(prefix=f"produto-{product.id}-", suffix=".zip", dir=CACHE_DIR, delete=False)
+    temporary.close()
+    archive_path = Path(temporary.name)
+    with ZipFile(archive_path, "w", ZIP_DEFLATED) as archive:
+        for path in files:
+            archive.write(path, path.relative_to(folder).as_posix())
+    filename_base = slugify(str(product.metadata.get("sku") or product.name)) or product.id
+    return FileResponse(
+        archive_path,
+        media_type="application/zip",
+        filename=f"{filename_base}-arquivos.zip",
+        background=BackgroundTask(archive_path.unlink, missing_ok=True),
+    )
 
 
 def _next_extra_model_index(product: Product) -> int:
@@ -354,7 +348,7 @@ async def upload_model_file(product_id: str, file: UploadFile = File(...)) -> Pr
     )
     if product.metadata.get("model_download_error"):
         product.metadata.pop("model_download_error", None)
-    return store.upsert_product(product)
+    return _public_product(store.upsert_product(product))
 
 
 @router.post("/{product_id}/cover-image")
@@ -409,7 +403,7 @@ async def upload_cover_image(product_id: str, file: UploadFile = File(...)) -> P
             raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     product.updated_at = now_iso()
-    return store.upsert_product(product)
+    return _public_product(store.upsert_product(product))
 
 
 @router.post("/{product_id}/style-image/{prompt_key}")
@@ -470,7 +464,7 @@ async def upload_style_image(product_id: str, prompt_key: str, file: UploadFile 
             raise HTTPException(status_code=500, detail=f"Falha ao publicar imagem no R2: {exc}") from exc
 
     product.updated_at = now_iso()
-    return store.upsert_product(product)
+    return _public_product(store.upsert_product(product))
 
 
 def _require_product_sku(state: StudioState, product: Product) -> str:
@@ -562,7 +556,7 @@ async def upload_manual_color_image(
             raise HTTPException(status_code=500, detail=f"Falha ao publicar imagem no R2: {exc}") from exc
 
     product.updated_at = now_iso()
-    return store.upsert_product(product)
+    return _public_product(store.upsert_product(product))
 
 
 def _manual_variations(product: Product) -> list[dict]:
@@ -599,7 +593,7 @@ def create_variation(product_id: str, payload: VariationCreate) -> Product:
     variations.append(entry)
     product.metadata["manual_variations"] = variations
     product.updated_at = now_iso()
-    return store.upsert_product(product)
+    return _public_product(store.upsert_product(product))
 
 
 @router.post("/{product_id}/variations/{slug}/image")
@@ -646,7 +640,7 @@ async def upload_variation_image(product_id: str, slug: str, file: UploadFile = 
             raise HTTPException(status_code=500, detail=f"Falha ao publicar imagem no R2: {exc}") from exc
 
     product.updated_at = now_iso()
-    return store.upsert_product(product)
+    return _public_product(store.upsert_product(product))
 
 
 @router.delete("/{product_id}/variations/{slug}")
@@ -670,7 +664,7 @@ def delete_variation(product_id: str, slug: str) -> Product:
         entry for entry in variations if str(entry.get("id")) != slug
     ]
     product.updated_at = now_iso()
-    return store.upsert_product(product)
+    return _public_product(store.upsert_product(product))
 
 
 @router.delete("/{product_id}/assets/{asset_id}")
@@ -707,7 +701,7 @@ def delete_product_asset(product_id: str, asset_id: str) -> Product:
             product.metadata["color_labels"] = color_labels
         product.updated_at = now_iso()
 
-    return store.upsert_product(product)
+    return _public_product(store.upsert_product(product))
 
 
 @router.delete("/{product_id}")

@@ -1,7 +1,7 @@
 import base64
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
@@ -9,12 +9,16 @@ from backend.app.core.paths import DATA_DIR
 from backend.app.db.models import Marketplace, StoreProfile
 from backend.app.db.store import store
 from backend.app.services.store_profiles import list_store_profiles
+from backend.app.services.auth import create_user
+from backend.app.services.authorization import current_store_id, require_admin
 
 router = APIRouter()
 
 
 class StoreProfileCreate(BaseModel):
     name: str
+    username: str
+    password: str
     marketplace: Marketplace = Marketplace.shopee
     niche: str = "Utilidades para casa"
     ai_profile_id: str | None = None
@@ -23,6 +27,7 @@ class StoreProfileCreate(BaseModel):
     listing_prompt: str = ""
     image_prompt: str = ""
     image_prompts: dict[str, str] = Field(default_factory=dict)
+    disabled_image_prompts: list[str] = Field(default_factory=list)
     color_variation_prompt: str = ""
 
 
@@ -37,6 +42,7 @@ class StoreProfileUpdate(BaseModel):
     listing_prompt: str | None = None
     image_prompt: str | None = None
     image_prompts: dict[str, str] | None = None
+    disabled_image_prompts: list[str] | None = None
     color_variation_prompt: str | None = None
 
 
@@ -45,13 +51,21 @@ class StoreProfilePhotoUpdate(BaseModel):
 
 
 @router.get("")
-def get_profiles() -> list[StoreProfile]:
-    return list_store_profiles()
+def get_profiles(request: Request) -> list[StoreProfile]:
+    store_id = current_store_id(request)
+    return [profile for profile in list_store_profiles() if profile.id == store_id]
 
 
 @router.post("")
-def create_profile(payload: StoreProfileCreate) -> StoreProfile:
-    return store.upsert_store_profile(StoreProfile(**payload.model_dump()))
+def create_profile(payload: StoreProfileCreate, request: Request) -> StoreProfile:
+    require_admin(request)
+    profile_data = payload.model_dump(exclude={"username", "password"})
+    profile = StoreProfile(**profile_data)
+    try:
+        create_user(payload.username, payload.password, profile.id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return store.upsert_store_profile(profile)
 
 
 @router.patch("/{profile_id}")

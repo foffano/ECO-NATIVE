@@ -1,8 +1,9 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 
 from backend.app.db.models import StudioState
 from backend.app.db.store import store
 from backend.app.services.cloudflare_r2 import purge_r2_bucket, r2_configured
+from backend.app.services.authorization import require_admin
 
 router = APIRouter()
 
@@ -27,7 +28,8 @@ def _clear_stored_public_urls() -> int:
 
 
 @router.post("/purge-bucket")
-def purge_bucket(confirm: bool = False) -> dict:
+def purge_bucket(request: Request, confirm: bool = False) -> dict:
+    require_admin(request)
     if not confirm:
         raise HTTPException(
             status_code=400,

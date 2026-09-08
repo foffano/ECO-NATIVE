@@ -107,6 +107,7 @@ def run_collect_job(job: Job, payload) -> Job:
                 keyword=payload.keyword,
                 scrolls=payload.scrolls,
                 headless=not payload.visible_browser,
+                store_profile_id=store_profile.id,
             )
             job.logs.append(f"{len(urls)} link(s) candidato(s) encontrado(s) na busca.")
 
@@ -292,7 +293,12 @@ def run_image_job(
     # Totais esperados, usados para informar progresso parcial em caso de falha
     # no meio do lote. studio espelha o fallback de generate_studio_images
     # (image_prompts vazio cai em IMAGE_PROMPTS).
-    studio_total = len(store_profile.image_prompts or IMAGE_PROMPTS) if generate_base_images else 0
+    configured_prompts = store_profile.image_prompts or IMAGE_PROMPTS
+    disabled_prompts = set(store_profile.disabled_image_prompts)
+    active_prompts = {
+        key: prompt for key, prompt in configured_prompts.items() if key not in disabled_prompts
+    }
+    studio_total = len(active_prompts) if generate_base_images else 0
     color_total = len(selected_colors) if selected_colors else 0
     studio_done = 0
     color_done = 0
@@ -311,10 +317,12 @@ def run_image_job(
     try:
         studio_assets: list[Asset] = []
         if generate_base_images:
+            if not active_prompts:
+                raise RuntimeError("Ative pelo menos um tipo de imagem nos ajustes da loja.")
             studio_assets = generate_studio_images(
                 product,
                 extra_prompt=store_profile.image_prompt,
-                image_prompts=store_profile.image_prompts,
+                image_prompts=active_prompts,
                 on_asset=_on_studio_asset,
             )
 

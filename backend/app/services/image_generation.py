@@ -104,11 +104,46 @@ def render_image_edit(
     if settings.use_codex_image_gen:
         edit_image_with_codex(Path(source_ref), prompt, output_path)
         return
-    task_id = create_kie_task(prompt, source_ref, settings.kie_api_key, kie_model)
-    if cost_label:
-        add_kie_image_cost(product, cost_label, model=kie_model)
-    result_url = poll_kie_task(task_id, settings.kie_api_key)
-    download_url(result_url, output_path)
+    max_attempts = 3
+    last_error: Exception | None = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            task_id = create_kie_task(prompt, source_ref, settings.kie_api_key, kie_model)
+            result_url = poll_kie_task(task_id, settings.kie_api_key)
+            download_url(result_url, output_path)
+            # Só contabilizamos uma imagem depois que o provedor concluiu e o
+            # arquivo foi baixado. Tasks que terminam em erro não viram custo
+            # de imagem gerada no painel.
+            if cost_label:
+                add_kie_image_cost(product, cost_label, model=kie_model)
+            return
+        except Exception as exc:
+            last_error = exc
+            if attempt == max_attempts or not _is_retryable_kie_error(exc):
+                raise
+            time.sleep(attempt * 2)
+    raise RuntimeError(f"Falha ao gerar imagem na Kie.ai: {last_error}")
+
+
+def _is_retryable_kie_error(exc: Exception) -> bool:
+    """Erros temporários para os quais vale criar uma nova task."""
+    message = str(exc).lower()
+    return any(
+        marker in message
+        for marker in (
+            "internal error",
+            "timeout",
+            "temporar",
+            "rate limit",
+            "too many requests",
+            "status 429",
+            "status 500",
+            "status 502",
+            "status 503",
+            "status 504",
+            "connection",
+        )
+    )
 
 
 def create_kie_task(prompt: str, image_url: str, api_key: str, model: str = "qwen/image-edit") -> str:
@@ -229,7 +264,9 @@ def generate_studio_images(
     source_ref = resolve_source_ref(product, cover, settings)
     created_assets: list[Asset] = []
 
-    prompts = image_prompts or IMAGE_PROMPTS
+    # None usa a biblioteca padrão; {} é uma seleção explicitamente vazia.
+    prompts = IMAGE_PROMPTS if image_prompts is None else image_prompts
+    failures: list[str] = []
     for prompt_key, prompt in prompts.items():
         kind = f"generated_{prompt_key}"
         output_path = output_dir / studio_image_filename(sku, prompt_key)
@@ -245,21 +282,31 @@ def generate_studio_images(
             if on_asset is not None:
                 on_asset(asset)
             continue
-        render_image_edit(
-            product,
-            source_ref,
-            f"{prompt} {extra_prompt}".strip(),
-            output_path,
-            settings=settings,
-            kie_model=kie_model,
-            cost_label=f"Imagem base: {prompt_key}",
-        )
+        try:
+            render_image_edit(
+                product,
+                source_ref,
+                f"{prompt} {extra_prompt}".strip(),
+                output_path,
+                settings=settings,
+                kie_model=kie_model,
+                cost_label=f"Imagem base: {prompt_key}",
+            )
+        except Exception as exc:
+            # Um estilo com falha não deve impedir que os demais estilos do
+            # mesmo lote sejam tentados.
+            failures.append(f"{prompt_key}: {exc}")
+            continue
         public_url = upload_file_to_r2(output_path, r2_key_prefix(product), force=True)
         asset = Asset(product_id=product.id, kind=kind, path=str(output_path), public_url=public_url)
         created_assets.append(asset)
         if on_asset is not None:
             on_asset(asset)
 
+    if failures:
+        raise RuntimeError(
+            "Falha em parte dos estilos após novas tentativas: " + " | ".join(failures)
+        )
     return created_assets
 
 
