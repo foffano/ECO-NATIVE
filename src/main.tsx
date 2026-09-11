@@ -299,6 +299,8 @@ type BackupRestoreSummary = {
 };
 
 type MakerWorldLoginStatus = {
+  pages?: { id: string; url: string }[];
+  active_page_id?: string | null;
   open: boolean;
   url?: string | null;
   message: string;
@@ -3204,19 +3206,36 @@ function MakerWorldRemoteBrowser({
 }) {
   const [frameNonce, setFrameNonce] = useState(0);
   const [frameReady, setFrameReady] = useState(false);
-  const viewportWidth = status?.width || 1280;
-  const viewportHeight = status?.height || 720;
+  const [liveStatus, setLiveStatus] = useState(status);
+  const [inputError, setInputError] = useState("");
+  const viewportWidth = liveStatus?.width || 1280;
+  const viewportHeight = liveStatus?.height || 720;
 
   useEffect(() => {
-    const interval = window.setInterval(() => setFrameNonce((value) => value + 1), 550);
-    return () => window.clearInterval(interval);
+    let cancelled = false;
+    let timer: number;
+    async function refresh() {
+      try {
+        const next = await api<MakerWorldLoginStatus>("/api/jobs/makerworld-login");
+        if (!cancelled) {
+          setLiveStatus(next);
+          setFrameNonce((value) => value + 1);
+        }
+      } catch (error) {
+        if (!cancelled) setInputError(String(error));
+      } finally {
+        if (!cancelled) timer = window.setTimeout(refresh, 550);
+      }
+    }
+    void refresh();
+    return () => { cancelled = true; window.clearTimeout(timer); };
   }, []);
 
   function sendInput(payload: Record<string, unknown>) {
     void api<void>("/api/jobs/makerworld-login/input", {
       method: "POST",
-      body: JSON.stringify(payload),
-    }).catch(() => undefined);
+      body: JSON.stringify({ page_id: liveStatus?.active_page_id, ...payload }),
+    }).then(() => setInputError("")).catch((error) => setInputError(String(error)));
   }
 
   function point(event: React.MouseEvent<HTMLDivElement>) {
@@ -3252,7 +3271,18 @@ function MakerWorldRemoteBrowser({
         <header className="remote-browser-toolbar">
           <div>
             <strong>MakerWorld · navegador local</strong>
-            <span>{status?.url || status?.message || "Iniciando Chromium no PC..."}</span>
+            <span>{liveStatus?.url || liveStatus?.message || "Iniciando Chromium no PC..."}</span>
+            {!!liveStatus?.pages?.length && (
+              <label>Janela: <select
+                aria-label="Janela do navegador"
+                value={liveStatus.active_page_id || ""}
+                onChange={(event) => sendInput({ type: "select_page", page_id: event.target.value })}
+              >
+                {liveStatus.pages.map((page, index) => (
+                  <option key={page.id} value={page.id}>{index + 1} · {page.url || "Abrindo..."}</option>
+                ))}
+              </select></label>
+            )}
           </div>
           <div className="remote-browser-actions">
             <button className="primary ghost" onClick={onCloseViewer}>Ocultar</button>
@@ -3285,7 +3315,7 @@ function MakerWorldRemoteBrowser({
             onLoad={() => setFrameReady(true)}
           />
         </div>
-        <footer className="remote-browser-help">Clique na tela e digite normalmente. A janela continua aberta e visível no computador servidor.</footer>
+        <footer className="remote-browser-help">{inputError || liveStatus?.message} · Novas janelas aparecem automaticamente. Use “Janela” para alternar entre elas.</footer>
       </section>
     </div>
   );

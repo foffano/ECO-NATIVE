@@ -1,4 +1,4 @@
-from typing import Literal
+from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel, Field
@@ -45,7 +45,8 @@ class RegenerateImageRequest(BaseModel):
 
 
 class RemoteBrowserInput(BaseModel):
-    type: Literal["click", "move", "wheel", "text", "key"]
+    type: Literal["click", "move", "wheel", "text", "key", "select_page"]
+    page_id: str | None = Field(default=None, max_length=32)
     x: float | None = Field(default=None, ge=0, le=1280)
     y: float | None = Field(default=None, ge=0, le=720)
     delta_x: float | None = Field(default=None, ge=-5000, le=5000)
@@ -55,7 +56,7 @@ class RemoteBrowserInput(BaseModel):
     key: str | None = Field(default=None, max_length=80)
 
 
-def _makerworld_status(request: Request) -> dict[str, str | bool | int | None]:
+def _makerworld_status(request: Request) -> dict[str, Any]:
     status = get_login_session_status(current_store_id(request)).__dict__
     status["interactive_login_available"] = True
     status["remote_control"] = True
@@ -70,12 +71,12 @@ def list_jobs(request: Request) -> list[Job]:
 
 
 @router.get("/makerworld-login")
-def makerworld_login_status(request: Request) -> dict[str, str | bool | int | None]:
+def makerworld_login_status(request: Request) -> dict[str, Any]:
     return _makerworld_status(request)
 
 
 @router.post("/makerworld-login")
-def open_makerworld_login(request: Request) -> dict[str, str | bool | int | None]:
+def open_makerworld_login(request: Request) -> dict[str, Any]:
     result = open_login_session(current_store_id(request)).__dict__
     result["interactive_login_available"] = True
     result["remote_control"] = True
@@ -83,7 +84,7 @@ def open_makerworld_login(request: Request) -> dict[str, str | bool | int | None
 
 
 @router.post("/makerworld-login/close")
-def close_makerworld_login(request: Request) -> dict[str, str | bool | int | None]:
+def close_makerworld_login(request: Request) -> dict[str, Any]:
     result = close_login_session(current_store_id(request)).__dict__
     result["interactive_login_available"] = True
     result["remote_control"] = True
