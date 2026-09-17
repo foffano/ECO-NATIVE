@@ -178,6 +178,14 @@ def main():
             source.mkdir()
             with tarfile.open(archive, 'r:gz') as tar:
                 tar.extractall(source, filter='data')
+            # The updater runs with umask 077. Docker COPY preserves directory
+            # modes, so normalize read/traverse bits for the non-root app user.
+            os.chmod(source, source.stat().st_mode | 0o555)
+            for path in source.rglob('*'):
+                if path.is_symlink():
+                    continue
+                mode = path.stat().st_mode
+                os.chmod(path, mode | (0o555 if path.is_dir() else 0o444))
             run('docker', 'build', '--target', 'production', '--build-arg', f'APP_VERSION={tag[1:]}',
                 '--build-arg', f'GIT_SHA={manifest["revision"]}', '-t', manifest['image'], str(source))
         labels = json.loads(run('docker', 'image', 'inspect', manifest['image'], '--format', '{{json .Config.Labels}}', capture=True))
