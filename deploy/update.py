@@ -186,7 +186,7 @@ def main():
                     continue
                 mode = path.stat().st_mode
                 os.chmod(path, mode | (0o555 if path.is_dir() else 0o444))
-            run('docker', 'build', '--target', 'production', '--build-arg', f'APP_VERSION={tag[1:]}',
+            run('docker', 'build', '--no-cache', '--target', 'production', '--build-arg', f'APP_VERSION={tag[1:]}',
                 '--build-arg', f'GIT_SHA={manifest["revision"]}', '-t', manifest['image'], str(source))
         labels = json.loads(run('docker', 'image', 'inspect', manifest['image'], '--format', '{{json .Config.Labels}}', capture=True))
         if labels.get('org.opencontainers.image.version') != tag[1:] or labels.get('org.opencontainers.image.revision') != manifest['revision']:
