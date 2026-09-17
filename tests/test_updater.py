@@ -12,19 +12,22 @@ _SPEC.loader.exec_module(updater)
 
 def test_release_manifest_is_strict():
     manifest = {
-        "schema": 1,
+        "schema": 2,
         "tag": "v1.2.3",
         "revision": "a" * 40,
         "image": "eco-native:v1.2.3",
         "architecture": "amd64",
         "asset": updater.ASSET,
         "sha256": "b" * 64,
+        "parts": [{"asset": updater.ASSET + ".part-00", "size": 123, "sha256": "c" * 64}],
     }
     assert updater.validate_manifest(manifest, "v1.2.3") == manifest
     with pytest.raises(ValueError):
         updater.validate_manifest({**manifest, "image": "other:v1.2.3"}, "v1.2.3")
     with pytest.raises(ValueError):
         updater.validate_manifest({**manifest, "revision": "main"}, "v1.2.3")
+    with pytest.raises(ValueError):
+        updater.validate_manifest({**manifest, "parts": [{**manifest["parts"][0], "asset": "wrong"}]}, "v1.2.3")
 
 
 def test_versions_are_numeric_and_environment_keeps_other_settings():

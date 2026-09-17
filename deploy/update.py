@@ -27,12 +27,21 @@ def version(tag):
 
 def validate_manifest(data, tag):
     version(tag)
-    if (data.get('schema') != 1 or data.get('tag') != tag
+    if (data.get('schema') != 2 or data.get('tag') != tag
             or data.get('image') != f'eco-native:{tag}'
             or data.get('architecture') != 'amd64' or data.get('asset') != ASSET
             or not re.fullmatch(r'[a-f0-9]{40}', data.get('revision', ''))
             or not re.fullmatch(r'[a-f0-9]{64}', data.get('sha256', ''))):
         raise ValueError('Invalid release manifest')
+    parts = data.get('parts')
+    if not isinstance(parts, list) or not parts or len(parts) > 20:
+        raise ValueError('Invalid release parts')
+    for index, part in enumerate(parts):
+        expected = f'{ASSET}.part-{index:02d}'
+        if (not isinstance(part, dict) or part.get('asset') != expected
+                or not isinstance(part.get('size'), int) or part['size'] <= 0
+                or not re.fullmatch(r'[a-f0-9]{64}', part.get('sha256', ''))):
+            raise ValueError('Invalid release part')
     return data
 
 
@@ -153,24 +162,35 @@ def main():
             print(f'{tag} previously failed; inspect journal and retry explicitly.')
             return
         assets = {asset['name']: asset for asset in release['assets']}
-        if ASSET not in assets or 'release-manifest.json' not in assets:
+        if 'release-manifest.json' not in assets:
             print(f'{tag}: waiting for tested Docker assets.')
             return
         prefix = f'https://github.com/{REPO}/releases/download/{tag}/'
-        for name in (ASSET, 'release-manifest.json'):
-            if assets[name]['browser_download_url'] != prefix + name:
-                raise ValueError('Unexpected artifact URL')
+        if assets['release-manifest.json']['browser_download_url'] != prefix + 'release-manifest.json':
+            raise ValueError('Unexpected manifest URL')
         with request(prefix + 'release-manifest.json') as response:
             manifest = validate_manifest(json.load(response), tag)
-        if shutil.disk_usage('/var/tmp').free < max(6 * 1024**3, assets[ASSET]['size'] * 4):
+        for part in manifest['parts']:
+            asset = assets.get(part['asset'])
+            if (not asset or asset['size'] != part['size']
+                    or asset['browser_download_url'] != prefix + part['asset']):
+                raise ValueError('Release part missing or inconsistent')
+        total_size = sum(part['size'] for part in manifest['parts'])
+        if shutil.disk_usage('/var/tmp').free < max(6 * 1024**3, total_size * 2):
             raise RuntimeError('Insufficient free disk space for safe update')
         with tempfile.TemporaryDirectory(prefix='eco-native-release-', dir='/var/tmp') as directory:
             archive = Path(directory) / ASSET
             digest = hashlib.sha256()
-            with request(prefix + ASSET) as response, archive.open('wb') as output:
-                while chunk := response.read(1024 * 1024):
-                    digest.update(chunk)
-                    output.write(chunk)
+            with archive.open('wb') as output:
+                for part in manifest['parts']:
+                    part_digest = hashlib.sha256()
+                    with request(prefix + part['asset']) as response:
+                        while chunk := response.read(1024 * 1024):
+                            digest.update(chunk)
+                            part_digest.update(chunk)
+                            output.write(chunk)
+                    if part_digest.hexdigest() != part['sha256']:
+                        raise ValueError('Docker archive part checksum mismatch')
             if digest.hexdigest() != manifest['sha256']:
                 raise ValueError('Docker archive checksum mismatch')
             run('docker', 'load', '-i', str(archive))

@@ -62,8 +62,9 @@ resultado em `deploys.log`. Não altere o código no servidor.
 
 A automação `.github/workflows/release.yml` testa cada release estável, constrói a
 imagem com a versão e o commit gravados, executa Chromium headed e publica dois
-assets: `eco-native-linux-amd64.tar.gz` e `release-manifest.json`. O manifesto é
-enviado por último; sua presença indica que a imagem está pronta para instalação.
+assets em blocos `eco-native-linux-amd64.tar.gz.part-*` e o
+`release-manifest.json`. O manifesto é enviado por último; sua presença indica que
+a imagem está pronta para instalação. Cada bloco e o arquivo completo têm SHA-256.
 
 Na VPS, instale o atualizador e o timer versionados pelo repositório:
 
