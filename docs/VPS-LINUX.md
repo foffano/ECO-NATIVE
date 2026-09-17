@@ -61,10 +61,10 @@ resultado em `deploys.log`. Não altere o código no servidor.
 ## Atualizações automáticas por release
 
 A automação `.github/workflows/release.yml` testa cada release estável, constrói a
-imagem com a versão e o commit gravados, executa Chromium headed e publica dois
-assets em blocos `eco-native-linux-amd64.tar.gz.part-*` e o
-`release-manifest.json`. O manifesto é enviado por último; sua presença indica que
-a imagem está pronta para instalação. Cada bloco e o arquivo completo têm SHA-256.
+imagem com a versão e o commit gravados, executa Chromium headed e publica o código
+aprovado em `eco-native-source.tar.gz` junto do `release-manifest.json`. O manifesto
+é enviado por último e contém o SHA-256; sua presença indica que o pacote está pronto.
+Na VPS, esse mesmo código é compilado localmente antes do smoke test e da troca.
 
 Na VPS, instale o atualizador e o timer versionados pelo repositório:
 

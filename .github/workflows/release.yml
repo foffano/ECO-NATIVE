@@ -43,46 +43,18 @@ jobs:
           curl --fail http://127.0.0.1:18765/ > /tmp/frontend.html
       - name: Export immutable image and manifest
         run: |
-          docker save "eco-native:$TAG" | gzip -1 > eco-native-linux-amd64.tar.gz
+          git archive --format=tar HEAD | gzip -1 > eco-native-source.tar.gz
           python - <<'PY'
           import hashlib, json, os
           from pathlib import Path
-          asset = Path('eco-native-linux-amd64.tar.gz')
+          asset = Path('eco-native-source.tar.gz')
           with asset.open('rb') as stream:
               sha = hashlib.file_digest(stream, 'sha256').hexdigest()
-          parts = []
-          for part in sorted(Path('.').glob(asset.name + '.part-*')):
-              with part.open('rb') as stream:
-                  part_sha = hashlib.file_digest(stream, 'sha256').hexdigest()
-              parts.append(dict(asset=part.name, size=part.stat().st_size, sha256=part_sha))
-          manifest = dict(schema=2, tag=os.environ['TAG'], revision=os.environ['REVISION'], image='eco-native:' + os.environ['TAG'], architecture='amd64', asset=asset.name, sha256=sha, parts=parts)
+          manifest = dict(schema=3, tag=os.environ['TAG'], revision=os.environ['REVISION'], image='eco-native:' + os.environ['TAG'], architecture='amd64', asset=asset.name, sha256=sha)
           Path('release-manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
           PY
-          split -b 256M -d -a 2 eco-native-linux-amd64.tar.gz eco-native-linux-amd64.tar.gz.part-
-          python - <<'PY'
-          import hashlib, json
-          from pathlib import Path
-          path = Path('release-manifest.json')
-          manifest = json.loads(path.read_text())
-          manifest['parts'] = []
-          for part in sorted(Path('.').glob('eco-native-linux-amd64.tar.gz.part-*')):
-              with part.open('rb') as stream:
-                  sha = hashlib.file_digest(stream, 'sha256').hexdigest()
-              manifest['parts'].append(dict(asset=part.name, size=part.stat().st_size, sha256=sha))
-          path.write_text(json.dumps(manifest, indent=2) + '\n')
-          PY
           gh release delete-asset "$TAG" release-manifest.json --yes || true
-          for part in eco-native-linux-amd64.tar.gz.part-*; do
-            uploaded=false
-            for attempt in 1 2 3 4 5; do
-              if gh release upload "$TAG" "$part" --clobber; then
-                uploaded=true
-                break
-              fi
-              sleep $((attempt * 10))
-            done
-            test "$uploaded" = true
-          done
+          gh release upload "$TAG" eco-native-source.tar.gz --clobber
           for attempt in 1 2 3 4 5; do
             if gh release upload "$TAG" release-manifest.json --clobber; then
               exit 0
