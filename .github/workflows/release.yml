@@ -1,0 +1,60 @@
+name: Release Docker image
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Stable release tag (vX.Y.Z)
+        required: true
+permissions:
+  contents: write
+concurrency:
+  group: release-${{ github.event.release.tag_name || inputs.tag }}
+  cancel-in-progress: false
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name || inputs.tag }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Validate release version
+        run: |
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          test "$(python -c 'import json; print(json.load(open("package.json"))["version"])')" = "${TAG#v}"
+          echo "REVISION=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+      - run: pip install -r backend/requirements-dev.txt
+      - run: python -m pytest tests -q
+      - name: Build production image
+        run: docker build --target production --build-arg APP_VERSION="${TAG#v}" --build-arg GIT_SHA="$REVISION" -t "eco-native:$TAG" -t eco-native:local .
+      - name: Verify headed browser and HTTP service
+        run: |
+          docker run --rm --init --network none --shm-size=1g eco-native:$TAG python -m backend.smoke_browser
+          docker compose up -d --no-build --wait --wait-timeout 120
+          curl --fail http://127.0.0.1:18765/health
+          curl --fail http://127.0.0.1:18765/ > /tmp/frontend.html
+      - name: Export immutable image and manifest
+        run: |
+          docker save "eco-native:$TAG" | gzip > eco-native-linux-amd64.tar.gz
+          python - <<'PY'
+          import hashlib, json, os
+          from pathlib import Path
+          asset = Path('eco-native-linux-amd64.tar.gz')
+          with asset.open('rb') as stream:
+              sha = hashlib.file_digest(stream, 'sha256').hexdigest()
+          manifest = dict(schema=1, tag=os.environ['TAG'], revision=os.environ['REVISION'], image='eco-native:' + os.environ['TAG'], architecture='amd64', asset=asset.name, sha256=sha)
+          Path('release-manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
+          PY
+          gh release delete-asset "$TAG" release-manifest.json --yes || true
+          gh release upload "$TAG" eco-native-linux-amd64.tar.gz --clobber
+          gh release upload "$TAG" release-manifest.json
+      - if: always()
+        run: docker compose down

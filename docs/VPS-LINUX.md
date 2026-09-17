@@ -52,13 +52,47 @@ O destino do hostname no Tunnel é `http://eco-native:18765`.
 `IMAGE` e `IMAGE_TAG` ficam em `.env`; `app.env` contém configurações de ambiente.
 O diretório `data` deve pertencer ao UID/GID 1000 do container.
 
-Enquanto não houver runner, o primeiro deploy pode ser feito manualmente:
-construa a imagem a partir do código de uma release em diretório temporário,
-execute `backend.smoke_browser` na imagem, copie apenas o Compose da release
-para a pasta do app e rode `docker compose up -d --pull never --wait`.
-Guarde a tag no `.env` e registre o resultado em `deploys.log`. Não altere o
-código no servidor. O fluxo automatizado de `/srv/infra/scripts/deploy.sh`
-requer imagem publicada em registry e runner previamente configurados.
+O primeiro deploy pode ser feito manualmente: construa a imagem a partir do código
+de uma release em diretório temporário, execute `backend.smoke_browser`, copie
+apenas o Compose da release para a pasta do app e rode
+`docker compose up -d --pull never --wait`. Guarde a tag no `.env` e registre o
+resultado em `deploys.log`. Não altere o código no servidor.
+
+## Atualizações automáticas por release
+
+A automação `.github/workflows/release.yml` testa cada release estável, constrói a
+imagem com a versão e o commit gravados, executa Chromium headed e publica dois
+assets: `eco-native-linux-amd64.tar.gz` e `release-manifest.json`. O manifesto é
+enviado por último; sua presença indica que a imagem está pronta para instalação.
+
+Na VPS, instale o atualizador e o timer versionados pelo repositório:
+
+```bash
+sudo install -o root -g root -m 0755 deploy/update.py /srv/infra/scripts/eco-native-update.py
+sudo install -o root -g root -m 0644 deploy/eco-native-update.service /etc/systemd/system/
+sudo install -o root -g root -m 0644 deploy/eco-native-update.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now eco-native-update.timer
+```
+
+O timer consulta a release estável mais recente a cada cinco minutos. Antes de
+trocar a imagem, ele confere o SHA-256 e os labels, roda o teste do navegador,
+bloqueia novos trabalhos, espera se houver trabalho ou login ativo, para o app e
+cria um backup operacional em `/srv/backups/eco-native`. Após subir, confirma em
+`/health` a versão e o commit. Em caso de erro, restaura a imagem anterior e marca
+aquela release para não repetir a interrupção automaticamente.
+
+Para acompanhar ou repetir uma versão após corrigir a causa:
+
+```bash
+systemctl status eco-native-update.timer
+journalctl -u eco-native-update.service -n 100 --no-pager
+sudo /usr/bin/python3 /srv/infra/scripts/eco-native-update.py --tag v1.2.3
+```
+
+Somente releases publicadas e sem sufixo são instaladas; pushes e prereleases não
+alteram produção. Atualizações do próprio Compose ou do atualizador devem ser
+aplicadas manualmente antes da release que dependa delas.
 
 O arquivo opcional `compose.tunnel.yaml` adiciona o conector. Configure um hostname
 no painel Cloudflare com destino **`http://app:18765`**. `127.0.0.1` dentro do

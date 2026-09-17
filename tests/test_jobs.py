@@ -72,3 +72,18 @@ def test_api_accepts_without_waiting_and_scopes_job_reads():
             assert client.get(f"/api/jobs/{job_id}").status_code == 404
         finally:
             release.set()
+
+
+def test_maintenance_blocks_new_work_and_reports_idle_state():
+    from backend.app.core.paths import DATA_DIR
+    from backend.app.main import app
+
+    marker = DATA_DIR / ".maintenance"
+    marker.touch()
+    with TestClient(app) as client:
+        health = client.get("/health")
+        assert health.status_code == 200
+        assert health.json()["maintenance"] is True
+        assert health.json()["active_jobs"] == 0
+        response = client.post("/api/jobs/collect", json={"project_id": "missing"})
+        assert response.status_code == 503

@@ -8,7 +8,12 @@ COPY public ./public
 RUN npm run build:frontend
 
 FROM python:3.12-slim-bookworm AS runtime
+ARG APP_VERSION=dev
+ARG GIT_SHA=unknown
+LABEL org.opencontainers.image.version=$APP_VERSION \
+      org.opencontainers.image.revision=$GIT_SHA
 ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 \
+    ECO_NATIVE_VERSION=${APP_VERSION} ECO_NATIVE_REVISION=${GIT_SHA} \
     TINI_KILL_PROCESS_GROUP=1 \
     PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
     ECO_NATIVE_HOST=0.0.0.0 ECO_NATIVE_PORT=18765 \

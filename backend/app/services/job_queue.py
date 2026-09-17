@@ -9,6 +9,7 @@ from fastapi import HTTPException
 
 from backend.app.db.models import Job, JobStatus, now_iso
 from backend.app.db.store import store
+from backend.app.core.maintenance import maintenance_requested
 
 logger = logging.getLogger(__name__)
 # Serializes quota checks and admission across all job endpoints.
@@ -45,6 +46,8 @@ class JobQueue:
 
     def submit(self, job: Job, action: Callable[[], Job]) -> Job:
         with admission_lock:
+            if maintenance_requested():
+                raise HTTPException(503, "Atualização do servidor em preparação. Tente novamente em instantes.")
             if self._stop.is_set() or not self._thread or not self._thread.is_alive():
                 raise HTTPException(503, "Servidor encerrando ou fila indisponível")
             if self._queue.full():

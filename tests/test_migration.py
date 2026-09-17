@@ -22,12 +22,15 @@ def test_operational_backup_roundtrip(tmp_path, monkeypatch):
     monkeypatch.setattr(maintenance, "DB_PATH", source / "studio.json")
     monkeypatch.setattr(maintenance, "ENV_PATH", source / ".env")
     (source / "studio.json").write_text(json.dumps({"file": str(source / "projects/a.png")}))
+    (source / ".maintenance").touch()
     for name in ("auth.json", ".session-secret", ".env", "browser_data/makerworld/a/Preferences", "projects/a.png"):
         path = source / name
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("preserved")
     archive = tmp_path / "backup.zip"
     maintenance.backup(archive)
+    with ZipFile(archive) as zipfile:
+        assert "data/.maintenance" not in zipfile.namelist()
     monkeypatch.setattr(maintenance, "DATA_DIR", target)
     monkeypatch.setattr(maintenance, "DB_PATH", target / "studio.json")
     maintenance.restore(archive)

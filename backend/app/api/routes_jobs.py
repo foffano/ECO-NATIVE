@@ -16,6 +16,7 @@ from backend.app.services.makerworld_session import (
 from backend.app.services.authorization import current_store_id, require_product, require_project, store_project_ids
 from backend.app.services.usage_limits import enforce_quota
 from backend.app.services.job_queue import admission_lock, job_queue
+from backend.app.core.maintenance import maintenance_requested
 
 router = APIRouter()
 
@@ -78,7 +79,10 @@ def makerworld_login_status(request: Request) -> dict[str, Any]:
 
 @router.post("/makerworld-login")
 def open_makerworld_login(request: Request) -> dict[str, Any]:
-    result = open_login_session(current_store_id(request)).__dict__
+    with admission_lock:
+        if maintenance_requested():
+            raise HTTPException(503, "Servidor em atualização. Tente novamente em instantes.")
+        result = open_login_session(current_store_id(request)).__dict__
     result["interactive_login_available"] = True
     result["remote_control"] = True
     return result

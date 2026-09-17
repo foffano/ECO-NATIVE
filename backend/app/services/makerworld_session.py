@@ -302,3 +302,8 @@ def close_all_login_sessions() -> None:
     deadline = time.monotonic() + 10
     for session in sessions:
         session._thread.join(timeout=max(0, deadline - time.monotonic()))
+
+
+def active_login_sessions() -> int:
+    with _sessions_lock:
+        return sum(session._thread.is_alive() for session in _sessions.values())

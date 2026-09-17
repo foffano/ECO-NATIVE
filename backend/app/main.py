@@ -1,6 +1,7 @@
 from pathlib import Path
 from contextlib import asynccontextmanager
 import asyncio
+import os
 from urllib.parse import urlparse
 
 from fastapi import FastAPI, Request
@@ -25,6 +26,7 @@ from backend.app.api.routes_store_profiles import router as store_profiles_route
 from backend.app.api.routes_auth import COOKIE_NAME, router as auth_router
 from backend.app.api.routes_admin import router as admin_router
 from backend.app.core.paths import ensure_app_dirs
+from backend.app.core.maintenance import maintenance_requested
 from backend.app.db.store import store
 from backend.app.services.auth import read_session, setup_required
 from backend.app.services.authorization import store_project_ids
@@ -69,6 +71,8 @@ app.add_middleware(
 class StoreAuthenticationMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         path = request.url.path
+        if path.startswith("/api/") and request.method not in {"GET", "HEAD", "OPTIONS"} and maintenance_requested():
+            return JSONResponse({"detail": "Servidor em atualização. Tente novamente em instantes."}, status_code=503)
         public = path == "/health" or path.startswith("/api/auth/") or not path.startswith("/api/")
         user = read_session(request.cookies.get(COOKIE_NAME))
         request.state.auth = user
@@ -114,8 +118,23 @@ app.add_middleware(StoreAuthenticationMiddleware)
 
 
 @app.get("/health")
-def health() -> dict[str, str]:
-    return {"status": "ok", "service": "eco-native-studio-api"}
+def health() -> dict:
+    from backend.app.services.job_queue import admission_lock
+    from backend.app.services.makerworld_session import active_login_sessions
+    # Admission and the maintenance acknowledgement share a lock. Once this
+    # response reports maintenance, a new queued job/login cannot slip through.
+    with admission_lock:
+        maintenance = maintenance_requested()
+        payload = {
+            "status": "ok", "service": "eco-native-studio-api",
+            "version": os.getenv("ECO_NATIVE_VERSION", "dev"),
+            "revision": os.getenv("ECO_NATIVE_REVISION", "unknown"),
+            "maintenance": maintenance,
+        }
+        if maintenance:
+            payload["active_jobs"] = sum(str(job.status) in {"queued", "running"} for job in store.load().jobs)
+            payload["active_login_sessions"] = active_login_sessions()
+        return payload
 
 
 app.include_router(projects_router, prefix="/api/projects", tags=["projects"])

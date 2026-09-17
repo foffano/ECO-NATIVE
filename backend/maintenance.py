@@ -48,7 +48,7 @@ def backup(destination: Path):
     with ZipFile(destination, "x", ZIP_DEFLATED) as archive:
         archive.writestr("manifest.json", json.dumps({"kind": "eco-operational", "version": 1, "data_dir": str(DATA_DIR)}))
         for path in DATA_DIR.rglob("*"):
-            if path.is_symlink() or not path.is_file() or path.name in {".server.lock", "SingletonLock", "SingletonCookie", "SingletonSocket"}:
+            if path.is_symlink() or not path.is_file() or path.name in {".server.lock", ".maintenance", "SingletonLock", "SingletonCookie", "SingletonSocket"}:
                 continue
             archive.write(path, "data/" + path.relative_to(DATA_DIR).as_posix())
         if ENV_PATH.is_file() and not ENV_PATH.is_relative_to(DATA_DIR):
