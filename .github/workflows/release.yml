@@ -73,8 +73,22 @@ jobs:
           PY
           gh release delete-asset "$TAG" release-manifest.json --yes || true
           for part in eco-native-linux-amd64.tar.gz.part-*; do
-            gh release upload "$TAG" "$part" --clobber
+            uploaded=false
+            for attempt in 1 2 3 4 5; do
+              if gh release upload "$TAG" "$part" --clobber; then
+                uploaded=true
+                break
+              fi
+              sleep $((attempt * 10))
+            done
+            test "$uploaded" = true
           done
-          gh release upload "$TAG" release-manifest.json
+          for attempt in 1 2 3 4 5; do
+            if gh release upload "$TAG" release-manifest.json --clobber; then
+              exit 0
+            fi
+            sleep $((attempt * 10))
+          done
+          exit 1
       - if: always()
         run: docker compose down
