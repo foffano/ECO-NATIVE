@@ -15,7 +15,7 @@ concurrency:
 jobs:
   publish:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     env:
       TAG: ${{ github.event.release.tag_name || inputs.tag }}
       GH_TOKEN: ${{ github.token }}
@@ -43,7 +43,7 @@ jobs:
           curl --fail http://127.0.0.1:18765/ > /tmp/frontend.html
       - name: Export immutable image and manifest
         run: |
-          docker save "eco-native:$TAG" | gzip > eco-native-linux-amd64.tar.gz
+          docker save "eco-native:$TAG" | gzip -1 > eco-native-linux-amd64.tar.gz
           python - <<'PY'
           import hashlib, json, os
           from pathlib import Path
