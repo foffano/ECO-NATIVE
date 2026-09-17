@@ -4,7 +4,7 @@ import json
 import re
 from datetime import datetime
 from io import BytesIO
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from zipfile import ZIP_DEFLATED, BadZipFile, ZipFile
 
 from backend.app.core.paths import DATA_DIR, EXPORTS_DIR, PROJECTS_DIR
@@ -235,7 +235,7 @@ def remap_restored_paths(state: StudioState) -> None:
     for profile in state.store_profiles:
         if not profile.logo_path:
             continue
-        filename = Path(profile.logo_path).name
+        filename = PureWindowsPath(profile.logo_path).name
         candidate = STORE_LOGOS_DIR / filename
         if candidate.exists():
             profile.logo_path = str(candidate)
@@ -246,7 +246,7 @@ def remap_restored_paths(state: StudioState) -> None:
         for asset in product.assets:
             if not asset.path:
                 continue
-            filename = Path(asset.path).name
+            filename = PureWindowsPath(asset.path).name
             candidate = product_dir / filename
             if candidate.exists():
                 asset.path = str(candidate)

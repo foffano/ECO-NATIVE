@@ -1,0 +1,15 @@
+.git
+.codex
+.agents
+.venv
+node_modules
+dist
+data
+exports
+backups
+.env*
+**/__pycache__
+**/*.pyc
+*.log
+*.tsbuildinfo
+tests

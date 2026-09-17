@@ -1,8 +1,6 @@
-from backend.app.core.playwright_env import configure_playwright_browsers
-
-configure_playwright_browsers()
-
 from pathlib import Path
+from contextlib import asynccontextmanager
+import asyncio
 from urllib.parse import urlparse
 
 from fastapi import FastAPI, Request
@@ -33,7 +31,25 @@ from backend.app.services.authorization import store_project_ids
 
 ensure_app_dirs()
 
-app = FastAPI(title="ECO Native Studio API", version="0.2.0", docs_url=None, redoc_url=None)
+@asynccontextmanager
+async def lifespan(app):
+    from backend.app.core.server_lock import server_lock
+    from backend.app.services.job_queue import job_queue
+    from backend.app.services.makerworld_session import close_all_login_sessions
+    from backend.app.services.auth import _secret
+    with server_lock():
+        # Initialize before concurrent requests can create different secrets.
+        setup_required()
+        _secret()
+        job_queue.start()
+        try:
+            yield
+        finally:
+            await asyncio.to_thread(close_all_login_sessions)
+            await asyncio.to_thread(job_queue.stop)
+
+
+app = FastAPI(title="ECO Native Studio API", version="0.2.0", docs_url=None, redoc_url=None, lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,

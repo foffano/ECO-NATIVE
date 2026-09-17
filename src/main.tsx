@@ -419,6 +419,21 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
   return response.json() as Promise<T>;
 }
 
+// A job continues on the server even if this page is closed. Polling preserves
+// existing batch sequencing without holding a long HTTP request open.
+async function submitJob(path: string, init: RequestInit): Promise<Job> {
+  let job = await api<Job>(path, init);
+  while (job.status === "queued" || job.status === "running") {
+    await new Promise((resolve) => window.setTimeout(resolve, 1500));
+    try {
+      job = await api<Job>(`/api/jobs/${job.id}`);
+    } catch (error) {
+      throw new Error(`Não foi possível acompanhar a tarefa ${job.id}. Ela pode continuar no servidor; confira o histórico antes de repetir. ${error instanceof Error ? error.message : ""}`);
+    }
+  }
+  return job;
+}
+
 async function apiUpload<T>(path: string, file: File, fields?: Record<string, string>): Promise<T> {
   const form = new FormData();
   form.append("file", file);
@@ -1673,7 +1688,6 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
   const [manualUrl, setManualUrl] = useState("");
   const [collectLimit, setCollectLimit] = useState(8);
   const [collectScrolls, setCollectScrolls] = useState(8);
-  const [visibleBrowser, setVisibleBrowser] = useState(true);
   const [activeStoreProfileId, setActiveStoreProfileId] = useState("");
   const [storeProfileDraft, setStoreProfileDraft] = useState<StoreProfile | null>(null);
   const [openRouterApiKeyDraft, setOpenRouterApiKeyDraft] = useState("");
@@ -1791,6 +1805,28 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
     setProducts(nextProducts);
     setJobs(nextJobs);
   }
+
+  useEffect(() => {
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout>;
+    let active = new Set<string>();
+    async function poll() {
+      try {
+        const next = await api<Job[]>("/api/jobs");
+        if (cancelled) return;
+        setJobs(next);
+        const finished = next.some((job) => active.has(job.id) && ["completed", "failed"].includes(job.status));
+        active = new Set(next.filter((job) => ["queued", "running"].includes(job.status)).map((job) => job.id));
+        if (finished) {
+          const catalog = await api<Product[]>("/api/products");
+          if (!cancelled) setProducts(catalog);
+        }
+      } catch { /* Other API calls handle authentication and user-facing errors. */ }
+      if (!cancelled) timer = setTimeout(poll, 2500);
+    }
+    void poll();
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, []);
 
   async function refreshProducts() {
     const nextProducts = await api<Product[]>("/api/products");
@@ -2149,7 +2185,7 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
   function collectProducts() {
     if (!activeProject) return Promise.resolve();
     return runAction("Coletando produtos", () =>
-      api<Job>("/api/jobs/collect", {
+      submitJob("/api/jobs/collect", {
         method: "POST",
         body: JSON.stringify({
           project_id: activeProject.id,
@@ -2158,7 +2194,7 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
           urls: [],
           limit: collectLimit,
           scrolls: collectScrolls,
-          visible_browser: visibleBrowser,
+          visible_browser: true,
           skip_ai_curation: true,
         }),
       }),
@@ -2176,7 +2212,7 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
       return Promise.resolve();
     }
     return runAction("Extraindo links selecionados", () =>
-      api<Job>("/api/jobs/collect", {
+      submitJob("/api/jobs/collect", {
         method: "POST",
         body: JSON.stringify({
           project_id: activeProject.id,
@@ -2185,7 +2221,7 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
           urls,
           limit: urls.length,
           scrolls: collectScrolls,
-          visible_browser: visibleBrowser,
+          visible_browser: true,
           skip_ai_curation: true,
         }),
       }),
@@ -2451,7 +2487,7 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
         ) {
           throw new Error("__cancelled__");
         }
-        return api<Job>("/api/jobs/listing", {
+        return submitJob("/api/jobs/listing", {
         method: "POST",
         body: JSON.stringify({ product_id: productId }),
         });
@@ -2478,7 +2514,7 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
         ) {
           throw new Error("__cancelled__");
         }
-        return api<Job>("/api/jobs/images", {
+        return submitJob("/api/jobs/images", {
         method: "POST",
         body: JSON.stringify({ product_id: productId, color_variations: [], generate_base_images: true }),
         });
@@ -2506,7 +2542,7 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
         ) {
           throw new Error("__cancelled__");
         }
-        return api<Job>("/api/jobs/images", {
+        return submitJob("/api/jobs/images", {
         method: "POST",
         body: JSON.stringify({ product_id: productId, color_variations: colorVariations, generate_base_images: false }),
         });
@@ -2524,7 +2560,7 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
       return Promise.resolve();
     }
     return runAction("Recriando imagem", () =>
-      api<Job>("/api/jobs/image-regenerate", {
+      submitJob("/api/jobs/image-regenerate", {
         method: "POST",
         body: JSON.stringify({ product_id: productId, prompt_key: promptKey, extra_prompt: extraPrompt }),
       }),
@@ -2829,7 +2865,7 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
       "Gerando anúncios em lote",
       productIds,
       (productId) =>
-        api<Job>("/api/jobs/listing", {
+        submitJob("/api/jobs/listing", {
           method: "POST",
           body: JSON.stringify({ product_id: productId }),
         }),
@@ -2850,7 +2886,7 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
       "Gerando imagens base em lote",
       productIds,
       (productId) =>
-        api<Job>("/api/jobs/images", {
+        submitJob("/api/jobs/images", {
           method: "POST",
           body: JSON.stringify({ product_id: productId, color_variations: [], generate_base_images: true }),
         }),
@@ -3023,7 +3059,6 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
             projectName={projectName}
             projects={activeStoreProjects}
             scrolls={collectScrolls}
-            visibleBrowser={visibleBrowser}
             onCollect={collectProducts}
             onExtractSelectedLinks={extractSelectedLinks}
             onCreateProject={createProject}
@@ -3035,7 +3070,6 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
             onProjectNameChange={setProjectName}
             onScrollsChange={setCollectScrolls}
             onSelectProject={selectProject}
-            onVisibleBrowserChange={setVisibleBrowser}
             blockedSourceUrls={blockedSourceUrls}
             onRemoveBlockedUrl={removeBlockedUrl}
           />
@@ -3880,7 +3914,6 @@ function CollectTab({
   projectName,
   projects,
   scrolls,
-  visibleBrowser,
   onCollect,
   onCloseLogin,
   onCreateProject,
@@ -3892,7 +3925,6 @@ function CollectTab({
   onProjectNameChange,
   onScrollsChange,
   onSelectProject,
-  onVisibleBrowserChange,
   blockedSourceUrls,
   onRemoveBlockedUrl,
 }: {
@@ -3908,7 +3940,6 @@ function CollectTab({
   projectName: string;
   projects: Project[];
   scrolls: number;
-  visibleBrowser: boolean;
   onCollect: () => void;
   onCloseLogin: () => void;
   onCreateProject: () => void;
@@ -3920,7 +3951,6 @@ function CollectTab({
   onProjectNameChange: (value: string) => void;
   onScrollsChange: (value: number) => void;
   onSelectProject: (projectId: string) => void;
-  onVisibleBrowserChange: (value: boolean) => void;
   blockedSourceUrls: BlockedSourceUrl[];
   onRemoveBlockedUrl: (entryId: string) => void;
 }) {
@@ -3981,10 +4011,10 @@ function CollectTab({
         <label className="checkbox-row">
           <input
             type="checkbox"
-            checked={visibleBrowser}
-            onChange={(event) => onVisibleBrowserChange(event.target.checked)}
+            checked={true}
+            disabled
           />
-          Usar navegador visível no PC servidor
+          Navegador com interface no servidor (controle pelo painel)
         </label>
 
         <div className="action-row">

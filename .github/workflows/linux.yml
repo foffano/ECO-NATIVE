@@ -1,0 +1,24 @@
+name: Linux container
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r backend/requirements-dev.txt
+      - run: python -m pytest tests -q
+      - run: docker compose config --quiet
+      - run: docker compose build
+      - run: docker compose run --rm --no-deps app python -m backend.smoke_browser
+      - run: docker compose up -d --wait --wait-timeout 90
+      - run: curl --fail http://127.0.0.1:18765/health && curl --fail http://127.0.0.1:18765/ > /tmp/frontend.html
+      - if: always()
+        run: docker compose logs --tail=100
+      - if: always()
+        run: docker compose down

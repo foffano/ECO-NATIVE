@@ -15,6 +15,7 @@ from backend.app.services.makerworld_session import (
 )
 from backend.app.services.authorization import current_store_id, require_product, require_project, store_project_ids
 from backend.app.services.usage_limits import enforce_quota
+from backend.app.services.job_queue import admission_lock, job_queue
 
 router = APIRouter()
 
@@ -107,53 +108,63 @@ def makerworld_login_input(payload: RemoteBrowserInput, request: Request) -> Non
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
-@router.post("/collect")
+@router.post("/collect", status_code=202)
 def collect_products(payload: CollectRequest, request: Request) -> Job:
-    state = store.load()
-    store_id = current_store_id(request)
-    enforce_quota(state, store_id, "collect_monthly")
-    enforce_quota(state, store_id, "ai_cost_usd_monthly")
-    project = require_project(state, payload.project_id, store_id)
-    payload.store_profile_id = project.store_profile_id
-    job = Job(type="collect_products", project_id=payload.project_id)
-    store.upsert_job(job)
-    return run_collect_job(job, payload)
+    with admission_lock:
+        state = store.load()
+        store_id = current_store_id(request)
+        enforce_quota(state, store_id, "collect_monthly")
+        enforce_quota(state, store_id, "ai_cost_usd_monthly")
+        project = require_project(state, payload.project_id, store_id)
+        payload.store_profile_id = project.store_profile_id
+        job = Job(type="collect_products", project_id=payload.project_id)
+        return job_queue.submit(job, lambda: run_collect_job(job, payload))
 
 
-@router.post("/listing")
+@router.post("/listing", status_code=202)
 def generate_listing(payload: ProductJobRequest, request: Request) -> Job:
-    state = store.load()
-    store_id = current_store_id(request)
-    enforce_quota(state, store_id, "listing_monthly")
-    enforce_quota(state, store_id, "ai_cost_usd_monthly")
-    product = require_product(state, payload.product_id, store_id)
+    with admission_lock:
+        state = store.load()
+        store_id = current_store_id(request)
+        enforce_quota(state, store_id, "listing_monthly")
+        enforce_quota(state, store_id, "ai_cost_usd_monthly")
+        product = require_product(state, payload.product_id, store_id)
 
-    job = Job(type="generate_listing", project_id=product.project_id, product_id=product.id)
-    store.upsert_job(job)
-    return run_listing_job(job, product)
+        job = Job(type="generate_listing", project_id=product.project_id, product_id=product.id)
+        return job_queue.submit(job, lambda: run_listing_job(job, product))
 
 
-@router.post("/images")
+@router.post("/images", status_code=202)
 def generate_images(payload: ProductJobRequest, request: Request) -> Job:
-    state = store.load()
-    store_id = current_store_id(request)
-    enforce_quota(state, store_id, "image_monthly")
-    enforce_quota(state, store_id, "ai_cost_usd_monthly")
-    product = require_product(state, payload.product_id, store_id)
+    with admission_lock:
+        state = store.load()
+        store_id = current_store_id(request)
+        enforce_quota(state, store_id, "image_monthly")
+        enforce_quota(state, store_id, "ai_cost_usd_monthly")
+        product = require_product(state, payload.product_id, store_id)
 
-    job = Job(type="generate_images", project_id=product.project_id, product_id=product.id)
-    store.upsert_job(job)
-    return run_image_job(job, product, payload.color_variations, payload.generate_base_images)
+        job = Job(type="generate_images", project_id=product.project_id, product_id=product.id)
+        return job_queue.submit(job, lambda: run_image_job(job, product, payload.color_variations, payload.generate_base_images))
 
 
-@router.post("/image-regenerate")
+@router.post("/image-regenerate", status_code=202)
 def regenerate_image(payload: RegenerateImageRequest, request: Request) -> Job:
-    state = store.load()
-    store_id = current_store_id(request)
-    enforce_quota(state, store_id, "image_monthly")
-    enforce_quota(state, store_id, "ai_cost_usd_monthly")
-    product = require_product(state, payload.product_id, store_id)
+    with admission_lock:
+        state = store.load()
+        store_id = current_store_id(request)
+        enforce_quota(state, store_id, "image_monthly")
+        enforce_quota(state, store_id, "ai_cost_usd_monthly")
+        product = require_product(state, payload.product_id, store_id)
 
-    job = Job(type="regenerate_image", project_id=product.project_id, product_id=product.id)
-    store.upsert_job(job)
-    return run_regenerate_image_job(job, product, payload.prompt_key, payload.extra_prompt)
+        job = Job(type="regenerate_image", project_id=product.project_id, product_id=product.id)
+        return job_queue.submit(job, lambda: run_regenerate_image_job(job, product, payload.prompt_key, payload.extra_prompt))
+
+
+@router.get("/{job_id}")
+def get_job(job_id: str, request: Request) -> Job:
+    state = store.load()
+    allowed = store_project_ids(state, current_store_id(request))
+    job = next((item for item in state.jobs if item.id == job_id and item.project_id in allowed), None)
+    if job is None:
+        raise HTTPException(404, "Trabalho não encontrado")
+    return job

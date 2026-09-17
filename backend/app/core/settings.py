@@ -5,6 +5,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 from backend.app.core.paths import DATA_DIR
+from backend.app.core.atomic_files import atomic_write_text
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 ENV_PATH = Path(os.getenv("ECO_NATIVE_ENV_PATH", DATA_DIR / ".env")).expanduser().resolve()
@@ -79,7 +80,7 @@ def set_env_values(values: dict[str, str]) -> None:
             existing[key] = value.strip()
 
     content = "\n".join(f"{key}={value}" for key, value in sorted(existing.items())) + "\n"
-    ENV_PATH.write_text(content, encoding="utf-8")
+    atomic_write_text(ENV_PATH, content)
 
     for key, value in existing.items():
         os.environ[key] = value

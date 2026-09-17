@@ -1,3 +1,5 @@
+from contextlib import ExitStack, contextmanager
+import os
 import re
 import time
 import urllib.parse
@@ -10,6 +12,7 @@ from playwright.sync_api import sync_playwright
 
 from backend.app.core.playwright_env import configure_playwright_browsers, playwright_install_hint
 
+from backend.app.services.browser_capacity import browser_lease
 from backend.app.core.paths import DATA_DIR
 from backend.app.db.models import Product, Project, StoreProfile
 from backend.app.services.cover_image import download_cover_file
@@ -65,29 +68,38 @@ def makerworld_profile_dir(store_profile_id: str | None) -> Path:
     return DATA_DIR / "browser_data" / "makerworld" / safe_store_id
 
 
+@contextmanager
 def open_makerworld_context(
     playwright,
     headless: bool,
     store_profile_id: str | None = None,
     viewport: dict[str, int] | None = None,
 ):
-    if not configure_playwright_browsers():
+    # Preserve headed mode on both desktop and the Linux virtual display.
+    executable = configure_playwright_browsers(playwright)
+    if not executable:
         raise RuntimeError(playwright_install_hint())
     user_data_path = makerworld_profile_dir(store_profile_id)
     user_data_path.mkdir(parents=True, exist_ok=True)
-    try:
-        return playwright.chromium.launch_persistent_context(
-            user_data_dir=user_data_path,
-            headless=headless,
-            accept_downloads=True,
-            viewport=viewport,
-            args=["--disable-blink-features=AutomationControlled"],
-        )
-    except PlaywrightError as error:
-        message = str(error)
-        if "Executable doesn't exist" in message:
-            raise RuntimeError(playwright_install_hint()) from error
-        raise
+    with browser_lease(str(user_data_path)):
+        try:
+            context = playwright.chromium.launch_persistent_context(
+                user_data_dir=user_data_path,
+                executable_path=str(executable),
+                headless=False,
+                accept_downloads=True,
+                viewport=viewport,
+                chromium_sandbox=os.getenv("ECO_NATIVE_CHROMIUM_SANDBOX", "false").lower() == "true",
+                args=["--disable-blink-features=AutomationControlled"],
+            )
+        except PlaywrightError as error:
+            if "Executable doesn't exist" in str(error):
+                raise RuntimeError(playwright_install_hint()) from error
+            raise
+        try:
+            yield context
+        finally:
+            context.close()
 
 
 def discover_model_urls(
@@ -97,6 +109,7 @@ def discover_model_urls(
     max_urls: int = 200,
     store_profile_id: str | None = None,
 ) -> list[str]:
+    headless = False
     target_url = build_search_url(keyword)
     urls: list[str] = []
     seen: set[str] = set()
@@ -126,8 +139,8 @@ def discover_model_urls(
             added += 1
         return added
 
-    with sync_playwright() as playwright:
-        browser = open_makerworld_context(playwright, headless=headless, store_profile_id=store_profile_id)
+    with sync_playwright() as playwright, ExitStack() as contexts:
+        browser = contexts.enter_context(open_makerworld_context(playwright, headless=False, store_profile_id=store_profile_id))
         page = browser.new_page()
         page.goto(target_url, wait_until="domcontentloaded", timeout=60_000)
         page.wait_for_timeout(6000)
@@ -172,6 +185,7 @@ def scrape_product_urls(
     store_profile: StoreProfile | None = None,
     viewport: dict[str, int] | None = None,
 ) -> list[ScrapedProduct]:
+    headless = False
     normalized_urls = []
     for url in urls:
         clean_url = clean_makerworld_url(url)
@@ -183,13 +197,13 @@ def scrape_product_urls(
 
     products: list[ScrapedProduct] = []
     sku_candidates = list(sku_reference_products or [])
-    with sync_playwright() as playwright:
-        browser = open_makerworld_context(
+    with sync_playwright() as playwright, ExitStack() as contexts:
+        browser = contexts.enter_context(open_makerworld_context(
             playwright,
             headless=headless,
             viewport=viewport,
             store_profile_id=store_profile.id if store_profile else None,
-        )
+        ))
         page = browser.new_page()
 
         for url in normalized_urls:
@@ -301,17 +315,19 @@ def download_approved_product_assets(
     image_url: str | None,
     sku: str,
     headless: bool = False,
+    store_profile: StoreProfile | None = None,
 ) -> DownloadedProductAssets:
+    headless = False
     assets = DownloadedProductAssets()
     if image_url:
         assets.cover_image_path = download_cover_image(project_id, sku, image_url)
 
-    with sync_playwright() as playwright:
-        browser = open_makerworld_context(
+    with sync_playwright() as playwright, ExitStack() as contexts:
+        browser = contexts.enter_context(open_makerworld_context(
             playwright,
             headless=headless,
             store_profile_id=store_profile.id if store_profile else None,
-        )
+        ))
         page = browser.new_page()
         try:
             page.goto(product_url, wait_until="domcontentloaded", timeout=60_000)

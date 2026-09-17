@@ -8,6 +8,7 @@ from threading import Lock
 from typing import TypeVar
 
 from backend.app.core.paths import DB_PATH, EXPORTS_DIR, ensure_app_dirs
+from backend.app.core.atomic_files import atomic_write_text
 from backend.app.db.models import AiProfile, Job, Product, Project, StoreProfile, StudioState, now_iso
 from backend.app.services.product_status_migration import migrate_product_status_payload, migrate_product_statuses
 
@@ -24,8 +25,6 @@ class JsonStore:
     def __init__(self, path: Path = DB_PATH) -> None:
         self.path = path
         ensure_app_dirs()
-        if not self.path.exists():
-            self.replace(StudioState())
 
     def _load_unlocked(self) -> StudioState:
         if not self.path.exists():
@@ -80,10 +79,7 @@ class JsonStore:
         return list(merged.values())
 
     def _write_unlocked(self, state: StudioState) -> None:
-        self.path.write_text(
-            state.model_dump_json(),
-            encoding="utf-8",
-        )
+        atomic_write_text(self.path, state.model_dump_json())
 
     def _save_unlocked(
         self,

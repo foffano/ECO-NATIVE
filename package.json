@@ -18,12 +18,14 @@
     "dev": "concurrently \"npm:dev:frontend\" \"npm:dev:backend\"",
     "dev:frontend": "vite --host 127.0.0.1 --port 5173",
     "dev:backend": ".venv\\Scripts\\python.exe scripts/ensure_playwright.py && .venv\\Scripts\\python.exe -m uvicorn backend.app.main:app --reload --reload-dir backend --host 127.0.0.1 --port 18765",
-    "build": "npm.cmd run build:frontend",
+    "build": "npm run build:frontend",
     "build:frontend": "tsc -b && vite build",
     "build:playwright": ".venv\\Scripts\\python.exe scripts/prepare_playwright.py",
     "start": "npm run build:frontend && .venv\\Scripts\\python.exe -m backend.web_server",
     "serve": ".venv\\Scripts\\python.exe -m backend.web_server",
-    "preview": "vite preview --host 127.0.0.1 --port 4173"
+    "preview": "vite preview --host 127.0.0.1 --port 4173",
+    "start:linux": "python -m backend.web_server",
+    "test:backend": "python -m pytest tests"
   },
   "dependencies": {
     "@vitejs/plugin-react": "^5.1.1",

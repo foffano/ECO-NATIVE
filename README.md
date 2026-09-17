@@ -4,6 +4,25 @@ Aplicação web local para coletar produtos, gerar anúncios e imagens com IA e 
 
 **Stack:** React · Vite · FastAPI · Cloudflare Tunnel (opcional)
 
+## VPS Linux / Docker Compose
+
+Veja o [guia de implantação na VPS](docs/VPS-LINUX.md) para instalação, HTTPS,
+migração do Windows, backups e a imagem opcional com Codex CLI. A imagem Linux
+mantém Chromium com `headless=False` usando Xvfb e controle pelo painel web.
+
+```bash
+docker compose build
+docker compose run --rm --no-deps app python -m backend.smoke_browser
+docker compose up -d
+```
+
+O acesso publicado fica em `127.0.0.1:18765` da VPS. O guia explica o primeiro
+acesso por SSH e a publicação HTTPS. Dados permanecem no volume `eco-data`.
+Use apenas uma instância/worker; tarefas interrompidas por reinício são marcadas
+como falhas para revisão, sem repetir automaticamente cobranças de IA.
+
+As instruções abaixo descrevem a execução local no Windows.
+
 O frontend, a API, o banco JSON, imagens, modelos 3D, Playwright e todos os processamentos rodam neste computador. O Cloudflare Tunnel apenas encaminha HTTPS para a porta HTTP local.
 
 ## Instalação

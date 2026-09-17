@@ -403,6 +403,7 @@ def run_regenerate_image_job(job: Job, product: Product, prompt_key: str, extra_
     store.upsert_job(job)
 
     state = store.load()
+    product = next((item for item in state.products if item.id == product.id), product)
     project = next((item for item in state.projects if item.id == product.project_id), None)
     store_profile = get_store_profile(project.store_profile_id if project else None)
     if prompt_key.startswith("color_"):

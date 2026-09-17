@@ -1,3 +1,4 @@
+from contextlib import ExitStack
 import queue
 import os
 import threading
@@ -96,7 +97,7 @@ class RemoteBrowserSession:
         elif is_open:
             message = (
                 "Navegador MakerWorld oculto no servidor e disponível para controle remoto."
-                if os.getenv("ECO_NATIVE_PRIVATE_DESKTOP") == "1"
+                if os.getenv("ECO_NATIVE_PRIVATE_DESKTOP") == "1" or os.getenv("DISPLAY")
                 else "Navegador MakerWorld visível no PC e disponível para controle remoto."
             )
         elif configured:
@@ -148,13 +149,13 @@ class RemoteBrowserSession:
 
     def _run(self) -> None:
         try:
-            with sync_playwright() as playwright:
-                context = open_makerworld_context(
+            with sync_playwright() as playwright, ExitStack() as contexts:
+                context = contexts.enter_context(open_makerworld_context(
                     playwright,
                     headless=False,
                     store_profile_id=self.store_profile_id,
                     viewport={"width": VIEWPORT_WIDTH, "height": VIEWPORT_HEIGHT},
-                )
+                ))
                 windows = BrowserPages(context)
                 page = windows.current() or context.new_page()
                 page.goto(os.getenv("ECO_NATIVE_MAKERWORLD_URL", MAKERWORLD_HOME), wait_until="domcontentloaded", timeout=60_000)
@@ -239,14 +240,14 @@ def _session(store_profile_id: str) -> RemoteBrowserSession | None:
 
 
 def open_login_session(store_profile_id: str) -> MakerWorldSessionStatus:
-    existing = _session(store_profile_id)
-    if existing:
-        existing.send({"type": "move", "x": 0, "y": 0})
-        return existing.status()
-    session = RemoteBrowserSession(store_profile_id)
     with _sessions_lock:
+        existing = _sessions.get(store_profile_id)
+        if existing and existing._thread.is_alive():
+            existing.send({"type": "move", "x": 0, "y": 0})
+            return existing.status()
+        session = RemoteBrowserSession(store_profile_id)
         _sessions[store_profile_id] = session
-    session.start()
+        session.start()
     return MakerWorldSessionStatus(
         open=True,
         message="Iniciando navegador MakerWorld para controle pelo painel...",
@@ -291,3 +292,13 @@ def send_login_session_input(store_profile_id: str, command: dict[str, Any]) -> 
     if not session:
         raise RuntimeError("Navegador MakerWorld não está aberto")
     session.send(command)
+
+
+def close_all_login_sessions() -> None:
+    with _sessions_lock:
+        sessions = list(_sessions.values())
+    for session in sessions:
+        session.close()
+    deadline = time.monotonic() + 10
+    for session in sessions:
+        session._thread.join(timeout=max(0, deadline - time.monotonic()))

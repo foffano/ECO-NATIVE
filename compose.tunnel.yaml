@@ -1,0 +1,16 @@
+# Optional: docker compose -f compose.yaml -f compose.tunnel.yaml up -d
+services:
+  tunnel:
+    image: cloudflare/cloudflared:2026.9.1
+    command: tunnel --no-autoupdate run
+    environment:
+      TUNNEL_TOKEN: ${TUNNEL_TOKEN:?Configure TUNNEL_TOKEN outside git}
+    restart: unless-stopped
+    depends_on:
+      app:
+        condition: service_healthy
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"

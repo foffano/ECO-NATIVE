@@ -1,0 +1,11 @@
+# Optional: supply an explicitly selected CODEX_VERSION when building.
+services:
+  app:
+    build:
+      target: codex
+      args:
+        CODEX_VERSION: ${CODEX_VERSION:?Set a tested Codex CLI version}
+    volumes:
+      - codex-home:/home/app/.codex
+volumes:
+  codex-home:

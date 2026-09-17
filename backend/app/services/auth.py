@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from backend.app.core.paths import DATA_DIR
+from backend.app.core.atomic_files import atomic_write_text
 
 
 AUTH_PATH = DATA_DIR / "auth.json"
@@ -29,11 +30,11 @@ def _read_auth() -> dict:
         return {"users": []}
     try:
         payload = json.loads(AUTH_PATH.read_text(encoding="utf-8"))
-        if not isinstance(payload, dict):
-            return {"version": 2, "users": []}
+        if not isinstance(payload, dict) or not isinstance(payload.get("users"), list):
+            raise ValueError("Estrutura de autenticação inválida")
         return _migrate_auth_payload(payload)
-    except (OSError, json.JSONDecodeError):
-        return {"users": []}
+    except (OSError, ValueError) as exc:
+        raise RuntimeError("Não foi possível ler auth.json. Restaure o backup; o cadastro inicial permanece bloqueado.") from exc
 
 
 def _unique_store_username(base: str, users: list[dict]) -> str:
@@ -78,9 +79,7 @@ def _migrate_auth_payload(payload: dict) -> dict:
 
 def _write_auth(payload: dict) -> None:
     AUTH_PATH.parent.mkdir(parents=True, exist_ok=True)
-    temporary = AUTH_PATH.with_suffix(".tmp")
-    temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    temporary.replace(AUTH_PATH)
+    atomic_write_text(AUTH_PATH, json.dumps(payload, ensure_ascii=False, indent=2))
 
 
 def setup_required() -> bool:
@@ -204,7 +203,7 @@ def authenticate(username: str, password: str) -> AuthenticatedStore | None:
 def _secret() -> bytes:
     if not SECRET_PATH.exists():
         SECRET_PATH.parent.mkdir(parents=True, exist_ok=True)
-        SECRET_PATH.write_text(secrets.token_urlsafe(48), encoding="utf-8")
+        atomic_write_text(SECRET_PATH, secrets.token_urlsafe(48))
     return SECRET_PATH.read_text(encoding="utf-8").strip().encode("utf-8")
 
 
