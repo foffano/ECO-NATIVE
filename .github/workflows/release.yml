@@ -72,7 +72,9 @@ jobs:
           path.write_text(json.dumps(manifest, indent=2) + '\n')
           PY
           gh release delete-asset "$TAG" release-manifest.json --yes || true
-          gh release upload "$TAG" eco-native-linux-amd64.tar.gz.part-* --clobber
+          for part in eco-native-linux-amd64.tar.gz.part-*; do
+            gh release upload "$TAG" "$part" --clobber
+          done
           gh release upload "$TAG" release-manifest.json
       - if: always()
         run: docker compose down
