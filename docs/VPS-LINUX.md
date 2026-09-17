@@ -45,6 +45,21 @@ o deployment e não é automaticamente o arquivo de integrações dentro do cont
 
 ## HTTPS por Cloudflare Tunnel
 
+Na VPS `prod-01`, que já tem Tunnel e rede `edge`, use `deploy/compose.yml`.
+Esse arquivo segue a estrutura `/srv/apps/eco-native`, não publica portas,
+usa `./data` como diretório persistente e limita o app a 2 CPUs/4 GB de RAM.
+O destino do hostname no Tunnel é `http://eco-native:18765`.
+`IMAGE` e `IMAGE_TAG` ficam em `.env`; `app.env` contém configurações de ambiente.
+O diretório `data` deve pertencer ao UID/GID 1000 do container.
+
+Enquanto não houver runner, o primeiro deploy pode ser feito manualmente:
+construa a imagem a partir do código de uma release em diretório temporário,
+execute `backend.smoke_browser` na imagem, copie apenas o Compose da release
+para a pasta do app e rode `docker compose up -d --pull never --wait`.
+Guarde a tag no `.env` e registre o resultado em `deploys.log`. Não altere o
+código no servidor. O fluxo automatizado de `/srv/infra/scripts/deploy.sh`
+requer imagem publicada em registry e runner previamente configurados.
+
 O arquivo opcional `compose.tunnel.yaml` adiciona o conector. Configure um hostname
 no painel Cloudflare com destino **`http://app:18765`**. `127.0.0.1` dentro do
 conector apontaria para o próprio conector.

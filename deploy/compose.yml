@@ -1,0 +1,40 @@
+# Production layout used by /srv/infra on prod-01.
+# IMAGE and IMAGE_TAG are recorded in /srv/apps/eco-native/.env.
+services:
+  app:
+    image: ${IMAGE:?}:${IMAGE_TAG:?}
+    init: true
+    restart: unless-stopped
+    env_file: app.env
+    environment:
+      ECO_NATIVE_HOST: 0.0.0.0
+      ECO_NATIVE_PORT: "18765"
+      ECO_NATIVE_DATA_DIR: /data
+      ECO_NATIVE_ENV_PATH: /data/.env
+      ECO_NATIVE_SECURE_COOKIES: "true"
+      ECO_NATIVE_MAX_BROWSERS: "2"
+      ECO_NATIVE_JOB_QUEUE_SIZE: "32"
+    volumes:
+      - ./data:/data
+    networks:
+      default:
+      edge:
+        aliases: [eco-native]
+    shm_size: 1gb
+    mem_limit: 4g
+    cpus: 2
+    stop_grace_period: 45s
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:18765/health', timeout=3).read()"]
+      interval: 10s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+networks:
+  edge:
+    external: true
