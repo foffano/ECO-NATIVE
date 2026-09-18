@@ -1,4 +1,4 @@
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel, Field
@@ -46,12 +46,21 @@ class RegenerateImageRequest(BaseModel):
     extra_prompt: str = ""
 
 
+# One pointer sample of a drag: x, y and the milliseconds since the previous sample.
+PathPoint = tuple[
+    Annotated[float, Field(ge=0, le=1280)],
+    Annotated[float, Field(ge=0, le=720)],
+    Annotated[float, Field(ge=0, le=1000)],
+]
+
+
 class RemoteBrowserInput(BaseModel):
-    type: Literal["click", "move", "wheel", "text", "key", "select_page", "navigate"]
+    type: Literal["click", "down", "move", "up", "wheel", "text", "key", "select_page", "navigate"]
     page_id: str | None = Field(default=None, max_length=32)
     action: Literal["back", "reload", "home", "login"] | None = None
     x: float | None = Field(default=None, ge=0, le=1280)
     y: float | None = Field(default=None, ge=0, le=720)
+    path: list[PathPoint] | None = Field(default=None, max_length=120)
     delta_x: float | None = Field(default=None, ge=-5000, le=5000)
     delta_y: float | None = Field(default=None, ge=-5000, le=5000)
     button: Literal["left", "right", "middle"] = "left"

@@ -127,3 +127,72 @@ def test_remote_input_accepts_only_known_navigation(monkeypatch):
         assert client.post(url, json={"type": "navigate", "action": "login", "page_id": "1"}).status_code == 204
         assert client.post(url, json={"type": "navigate", "action": "https://example.com"}).status_code == 422
     assert sent == [(shop.id, {"type": "navigate", "page_id": "1", "action": "login", "button": "left"})]
+
+
+def test_drag_replays_the_pointer_path_within_the_viewport():
+    session = RemoteBrowserSession("shop")
+    page = MagicMock()
+    session._execute(page, {"type": "down", "x": 10, "y": 20, "button": "left"})
+    session._execute(page, {"type": "move", "path": [(15, 20, 0), (5000, 30, 900)]})
+    session._execute(page, {"type": "up", "x": 40, "y": 20, "button": "left"})
+    assert page.mouse.method_calls == [
+        call.move(10.0, 20.0),
+        call.down(button="left"),
+        call.move(15.0, 20.0),
+        call.move(1280.0, 30.0),
+        call.move(40.0, 20.0),
+        call.up(button="left"),
+    ]
+    page.wait_for_timeout.assert_called_once_with(200)
+
+
+def test_panel_follows_a_running_collect_browser(monkeypatch):
+    started = []
+
+    class FakeViewer:
+        def __init__(self, store_profile_id, attach_endpoint=None):
+            self.attached = attach_endpoint is not None
+            self.endpoint = attach_endpoint
+            self.closed = False
+            self._thread = SimpleNamespace(is_alive=lambda: not self.closed)
+            started.append(self)
+
+        def start(self):
+            pass
+
+        def close(self):
+            self.closed = True
+
+        def frame(self):
+            return b"jpeg"
+
+    monkeypatch.setattr(session_module, "RemoteBrowserSession", FakeViewer)
+    assert session_module.get_login_session_status("shop").mode == "login"
+    with session_module.watch_collect_browser("shop", "http://127.0.0.1:9222"):
+        status = session_module.get_login_session_status("shop")
+        assert (status.mode, status.open) == ("collect", False)
+        assert not started  # Polling status alone does not start a viewer.
+        session_module.set_collect_notice("shop", "Resolva a verificação")
+        status = session_module.get_login_session_status("shop")
+        assert (status.message, status.attention) == ("Resolva a verificação", True)
+        assert session_module.get_login_session_frame("shop") == b"jpeg"
+        assert [viewer.endpoint for viewer in started] == ["http://127.0.0.1:9222"]
+    assert started[0].closed
+    assert session_module.get_login_session_status("shop").mode == "login"
+    assert "shop" not in session_module._collect_notices
+
+
+def test_remote_input_validates_drag_paths(monkeypatch):
+    from backend.app.main import app
+    from backend.app.services.auth import AuthenticatedStore, create_initial_users, create_session
+
+    shop = store.upsert_store_profile(StoreProfile(name="A"))
+    create_initial_users(("admin", "password123"), [("shop-a", "password123", shop.id)])
+    monkeypatch.setattr("backend.app.api.routes_jobs.send_login_session_input", lambda store_id, command: None)
+    with TestClient(app) as client:
+        client.cookies.set("eco_native_session", create_session(AuthenticatedStore(shop.id, "shop-a")))
+        url = "/api/jobs/makerworld-login/input"
+        assert client.post(url, json={"type": "down", "x": 10, "y": 10}).status_code == 204
+        assert client.post(url, json={"type": "move", "path": [[10, 10, 16], [20, 12, 16]]}).status_code == 204
+        assert client.post(url, json={"type": "move", "path": [[10, 900, 16]]}).status_code == 422
+        assert client.post(url, json={"type": "move", "path": [[1, 1, 1]] * 121}).status_code == 422

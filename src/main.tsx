@@ -313,6 +313,8 @@ type MakerWorldLoginStatus = {
   height?: number;
   loading?: boolean;
   challenge?: boolean;
+  attention?: boolean;
+  mode?: "login" | "collect";
 };
 
 type StoreProfile = {
@@ -425,12 +427,13 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
 
 // A job continues on the server even if this page is closed. Polling preserves
 // existing batch sequencing without holding a long HTTP request open.
-async function submitJob(path: string, init: RequestInit): Promise<Job> {
+async function submitJob(path: string, init: RequestInit, onProgress?: (job: Job) => void): Promise<Job> {
   let job = await api<Job>(path, init);
   while (job.status === "queued" || job.status === "running") {
     await new Promise((resolve) => window.setTimeout(resolve, 1500));
     try {
       job = await api<Job>(`/api/jobs/${job.id}`);
+      onProgress?.(job);
     } catch (error) {
       throw new Error(`Não foi possível acompanhar a tarefa ${job.id}. Ela pode continuar no servidor; confira o histórico antes de repetir. ${error instanceof Error ? error.message : ""}`);
     }
@@ -1712,6 +1715,7 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
   const [lastExport, setLastExport] = useState<{ filename: string; count: number; marketplace: string } | null>(null);
   const [makerWorldLogin, setMakerWorldLogin] = useState<MakerWorldLoginStatus | null>(null);
   const [makerWorldViewerOpen, setMakerWorldViewerOpen] = useState(false);
+  const [collectRunning, setCollectRunning] = useState(false);
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [selectedProductIds, setSelectedProductIds] = useState<string[]>([]);
   const [productFilters, setProductFilters] = useState<ProductFilters>({ query: "", status: "all", characteristic: "all" });
@@ -2188,21 +2192,16 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
 
   function collectProducts() {
     if (!activeProject) return Promise.resolve();
-    return runAction("Coletando produtos", () =>
-      submitJob("/api/jobs/collect", {
-        method: "POST",
-        body: JSON.stringify({
-          project_id: activeProject.id,
-          store_profile_id: activeStoreProfile?.id ?? null,
-          keyword,
-          urls: [],
-          limit: collectLimit,
-          scrolls: collectScrolls,
-          visible_browser: true,
-          skip_ai_curation: true,
-        }),
-      }),
-    { refresh: "catalog", blockUi: true });
+    return runCollect("Coletando produtos", {
+      project_id: activeProject.id,
+      store_profile_id: activeStoreProfile?.id ?? null,
+      keyword,
+      urls: [],
+      limit: collectLimit,
+      scrolls: collectScrolls,
+      visible_browser: true,
+      skip_ai_curation: true,
+    });
   }
 
   function extractSelectedLinks() {
@@ -2215,21 +2214,41 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
       setNotice("Cole ao menos um link MakerWorld para extrair.");
       return Promise.resolve();
     }
-    return runAction("Extraindo links selecionados", () =>
-      submitJob("/api/jobs/collect", {
-        method: "POST",
-        body: JSON.stringify({
-          project_id: activeProject.id,
-          store_profile_id: activeStoreProfile?.id ?? null,
-          keyword: "",
-          urls,
-          limit: urls.length,
-          scrolls: collectScrolls,
-          visible_browser: true,
-          skip_ai_curation: true,
-        }),
-      }),
-    { refresh: "catalog", blockUi: true });
+    return runCollect("Extraindo links selecionados", {
+      project_id: activeProject.id,
+      store_profile_id: activeStoreProfile?.id ?? null,
+      keyword: "",
+      urls,
+      limit: urls.length,
+      scrolls: collectScrolls,
+      visible_browser: true,
+      skip_ai_curation: true,
+    });
+  }
+
+  // The collect browser is shown in the remote panel so the user can solve MakerWorld checks.
+  function runCollect(label: string, body: Record<string, unknown>) {
+    return runAction(label, async () => {
+      if (makerWorldLogin?.open && makerWorldLogin.mode !== "collect") {
+        // The login window holds the store's browser profile that the collect needs.
+        setMakerWorldLogin(await api<MakerWorldLoginStatus>("/api/jobs/makerworld-login/close", { method: "POST" }));
+      }
+      let attention = "";
+      setCollectRunning(true);
+      setMakerWorldViewerOpen(true);
+      try {
+        return await submitJob("/api/jobs/collect", { method: "POST", body: JSON.stringify(body) }, (job) => {
+          const next = typeof job.metadata?.attention === "string" ? job.metadata.attention : "";
+          if (next === attention) return;
+          attention = next;
+          if (next) setMakerWorldViewerOpen(true);
+          setNotice(next || `${label}...`);
+        });
+      } finally {
+        setCollectRunning(false);
+        setMakerWorldViewerOpen(false);
+      }
+    }, { refresh: "catalog", blockUi: true });
   }
 
   function openMakerWorldLogin() {
@@ -3212,6 +3231,11 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
         <div className={busy ? "toast-notice busy-toast" : "toast-notice"} role="status" aria-live="polite">
           {busy && <Loader2 className="spin" size={16} />}
           <span>{displayText(notice)}</span>
+          {collectRunning && !makerWorldViewerOpen && (
+            <button className="toast-action" onClick={() => setMakerWorldViewerOpen(true)}>
+              Ver navegador da coleta
+            </button>
+          )}
           {!busy && (
             <button aria-label="Fechar aviso" onClick={() => setNotice("")}>
               ×
@@ -3225,6 +3249,7 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
       {makerWorldViewerOpen && (
         <MakerWorldRemoteBrowser
           status={makerWorldLogin}
+          collect={collectRunning}
           onCloseViewer={() => setMakerWorldViewerOpen(false)}
           onFinish={() => void closeMakerWorldLogin()}
         />
@@ -3233,12 +3258,16 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
   );
 }
 
+type DragPoint = [number, number, number];
+
 function MakerWorldRemoteBrowser({
   status,
+  collect,
   onCloseViewer,
   onFinish,
 }: {
   status: MakerWorldLoginStatus | null;
+  collect: boolean;
   onCloseViewer: () => void;
   onFinish: () => void;
 }) {
@@ -3247,8 +3276,14 @@ function MakerWorldRemoteBrowser({
   const [liveStatus, setLiveStatus] = useState(status);
   const [inputError, setInputError] = useState("");
   const frameRef = useRef<HTMLImageElement>(null);
+  const liveStatusRef = useRef(status);
+  const sendChain = useRef<Promise<void>>(Promise.resolve());
+  const pendingPath = useRef<DragPoint[]>([]);
+  const pendingWheel = useRef<{ x: number; y: number } | null>(null);
+  const drag = useRef<{ start: { x: number; y: number }; button: string; moved: boolean; lastTime: number } | null>(null);
   const viewportWidth = liveStatus?.width || 1280;
   const viewportHeight = liveStatus?.height || 720;
+  const collectMode = collect || liveStatus?.mode === "collect";
 
   useEffect(() => {
     let cancelled = false;
@@ -3257,6 +3292,7 @@ function MakerWorldRemoteBrowser({
       try {
         const next = await api<MakerWorldLoginStatus>("/api/jobs/makerworld-login");
         if (!cancelled) {
+          liveStatusRef.current = next;
           setLiveStatus(next);
           setFrameNonce((value) => value + 1);
         }
@@ -3270,11 +3306,46 @@ function MakerWorldRemoteBrowser({
     return () => { cancelled = true; window.clearTimeout(timer); };
   }, []);
 
-  function sendInput(payload: Record<string, unknown>) {
-    void api<void>("/api/jobs/makerworld-login/input", {
-      method: "POST",
-      body: JSON.stringify({ page_id: liveStatus?.active_page_id, ...payload }),
-    }).then(() => setInputError("")).catch((error) => setInputError(String(error)));
+  // One request at a time: parallel requests can reach the server out of order,
+  // scrambling typed text and drag paths. A function payload is built when its turn comes.
+  function sendInput(payload: Record<string, unknown> | (() => Record<string, unknown> | null)) {
+    sendChain.current = sendChain.current.then(async () => {
+      const body = typeof payload === "function" ? payload() : payload;
+      if (!body) return;
+      try {
+        await api<void>("/api/jobs/makerworld-login/input", {
+          method: "POST",
+          body: JSON.stringify({ page_id: liveStatusRef.current?.active_page_id, ...body }),
+        });
+        setInputError("");
+      } catch (error) {
+        setInputError(String(error));
+      }
+    });
+  }
+
+  function sendPendingPath() {
+    sendInput(() => {
+      const path = pendingPath.current.splice(0, 120);
+      if (pendingPath.current.length) sendPendingPath();
+      return path.length ? { type: "move", path } : null;
+    });
+  }
+
+  function sendWheel(deltaX: number, deltaY: number) {
+    if (pendingWheel.current) {
+      pendingWheel.current.x += deltaX;
+      pendingWheel.current.y += deltaY;
+      return;
+    }
+    pendingWheel.current = { x: deltaX, y: deltaY };
+    sendInput(() => {
+      const wheel = pendingWheel.current;
+      pendingWheel.current = null;
+      if (!wheel) return null;
+      const limit = (value: number) => Math.max(-5000, Math.min(5000, value));
+      return { type: "wheel", delta_x: limit(wheel.x), delta_y: limit(wheel.y) };
+    });
   }
 
   function point(event: React.MouseEvent<HTMLDivElement>) {
@@ -3289,6 +3360,36 @@ function MakerWorldRemoteBrowser({
       x: Math.max(0, Math.min(viewportWidth, (event.clientX - rect.left - offsetX) / scale)),
       y: Math.max(0, Math.min(viewportHeight, (event.clientY - rect.top - offsetY) / scale)),
     };
+  }
+
+  function handlePointerDown(event: React.PointerEvent<HTMLDivElement>) {
+    if (event.button > 2) return;
+    event.currentTarget.focus();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    const button = event.button === 2 ? "right" : event.button === 1 ? "middle" : "left";
+    drag.current = { start: point(event), button, moved: false, lastTime: event.timeStamp };
+  }
+
+  function handlePointerMove(event: React.PointerEvent<HTMLDivElement>) {
+    const current = drag.current;
+    if (!current) return;
+    const next = point(event);
+    if (!current.moved) {
+      // Small jitter still counts as a click; beyond it the gesture is a drag (slider puzzles).
+      if (Math.hypot(next.x - current.start.x, next.y - current.start.y) < 4) return;
+      current.moved = true;
+      sendInput({ type: "down", button: current.button, ...current.start });
+    }
+    const delay = Math.max(0, Math.min(1000, Math.round(event.timeStamp - current.lastTime)));
+    current.lastTime = event.timeStamp;
+    if (pendingPath.current.push([next.x, next.y, delay]) === 1) sendPendingPath();
+  }
+
+  function handlePointerUp(event: React.PointerEvent<HTMLDivElement>) {
+    const current = drag.current;
+    drag.current = null;
+    if (!current) return;
+    sendInput({ type: current.moved ? "up" : "click", button: current.button, ...point(event) });
   }
 
   function handleKey(event: React.KeyboardEvent<HTMLDivElement>) {
@@ -3310,7 +3411,7 @@ function MakerWorldRemoteBrowser({
       <section className="remote-browser-dialog" role="dialog" aria-modal="true" aria-label="Navegador MakerWorld remoto">
         <header className="remote-browser-toolbar">
           <div>
-            <strong>MakerWorld · navegador local</strong>
+            <strong>{collectMode ? "MakerWorld · navegador da coleta" : "MakerWorld · navegador local"}</strong>
             <span>
               {liveStatus?.loading && <Loader2 className="spin" size={12} aria-label="Carregando página" />}
               {liveStatus?.url || liveStatus?.message || "Iniciando Chromium no PC..."}
@@ -3328,41 +3429,47 @@ function MakerWorldRemoteBrowser({
             )}
           </div>
           <div className="remote-browser-actions">
-            <button className="primary ghost" title="Voltar" aria-label="Voltar" onClick={() => sendInput({ type: "navigate", action: "back" })}>
-              <ArrowLeft size={16} />
-            </button>
-            <button className="primary ghost" title="Recarregar" aria-label="Recarregar" onClick={() => sendInput({ type: "navigate", action: "reload" })}>
-              <RefreshCw size={16} />
-            </button>
-            <button className="primary ghost" title="Página inicial do MakerWorld" aria-label="Página inicial do MakerWorld" onClick={() => sendInput({ type: "navigate", action: "home" })}>
-              <House size={16} />
-            </button>
-            <button className="primary ghost" title="Abre a página de login da Bambu Lab, que volta ao MakerWorld após entrar" onClick={() => sendInput({ type: "navigate", action: "login" })}>
-              <LogIn size={16} /> Tela de login
-            </button>
+            {/* The collect job drives its own navigation; only the login browser gets these controls. */}
+            {!collectMode && (
+              <>
+                <button className="primary ghost" title="Voltar" aria-label="Voltar" onClick={() => sendInput({ type: "navigate", action: "back" })}>
+                  <ArrowLeft size={16} />
+                </button>
+                <button className="primary ghost" title="Recarregar" aria-label="Recarregar" onClick={() => sendInput({ type: "navigate", action: "reload" })}>
+                  <RefreshCw size={16} />
+                </button>
+                <button className="primary ghost" title="Página inicial do MakerWorld" aria-label="Página inicial do MakerWorld" onClick={() => sendInput({ type: "navigate", action: "home" })}>
+                  <House size={16} />
+                </button>
+                <button className="primary ghost" title="Abre a página de login da Bambu Lab, que volta ao MakerWorld após entrar" onClick={() => sendInput({ type: "navigate", action: "login" })}>
+                  <LogIn size={16} /> Tela de login
+                </button>
+              </>
+            )}
             <button className="primary ghost" onClick={onCloseViewer}>Ocultar</button>
-            <button className="primary" onClick={onFinish}>Concluir e salvar sessão</button>
+            {!collectMode && <button className="primary" onClick={onFinish}>Concluir e salvar sessão</button>}
           </div>
         </header>
         <div
           className="remote-browser-viewport"
           tabIndex={0}
-          onClick={(event) => sendInput({ type: "click", ...point(event) })}
-          onContextMenu={(event) => {
-            event.preventDefault();
-            sendInput({ type: "click", button: "right", ...point(event) });
-          }}
-          onWheel={(event) => {
-            event.preventDefault();
-            sendInput({ type: "wheel", delta_x: event.deltaX, delta_y: event.deltaY });
-          }}
+          onPointerDown={handlePointerDown}
+          onPointerMove={handlePointerMove}
+          onPointerUp={handlePointerUp}
+          onPointerCancel={() => { drag.current = null; }}
+          onContextMenu={(event) => event.preventDefault()}
+          onWheel={(event) => sendWheel(event.deltaX, event.deltaY)}
           onKeyDown={handleKey}
           onPaste={(event) => {
             event.preventDefault();
             sendInput({ type: "text", text: event.clipboardData.getData("text") });
           }}
         >
-          {!frameReady && <div className="remote-browser-loading"><Loader2 className="spin" size={28} /> Aguardando imagem do navegador...</div>}
+          {!frameReady && (
+            <div className="remote-browser-loading">
+              <Loader2 className="spin" size={28} /> {collectMode ? "Aguardando o navegador da coleta..." : "Aguardando imagem do navegador..."}
+            </div>
+          )}
           <img
             ref={frameRef}
             src={`${API_BASE}/api/jobs/makerworld-login/frame?t=${frameNonce}`}
@@ -3371,7 +3478,7 @@ function MakerWorldRemoteBrowser({
             onLoad={() => setFrameReady(true)}
           />
         </div>
-        <footer className={liveStatus?.challenge ? "remote-browser-help attention" : "remote-browser-help"}>
+        <footer className={liveStatus?.challenge || liveStatus?.attention ? "remote-browser-help attention" : "remote-browser-help"}>
           {inputError || liveStatus?.message} · Novas janelas aparecem automaticamente. Use “Janela” para alternar entre elas.
         </footer>
       </section>

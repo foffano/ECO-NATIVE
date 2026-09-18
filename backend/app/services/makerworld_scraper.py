@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from contextlib import ExitStack, contextmanager
 import os
 import re
@@ -5,6 +6,7 @@ import time
 import urllib.parse
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import Error as PlaywrightError
@@ -24,6 +26,27 @@ from backend.app.services.product_paths import (
 
 MAKERWORLD_BASE = "https://makerworld.com"
 MAKERWORLD_HOME = "https://makerworld.com/pt"
+
+# Time the user gets to solve a Cloudflare check or MakerWorld puzzle in the collect browser.
+MANUAL_CHECK_SECONDS = 180
+VERIFICATION_PROMPT = (
+    "O MakerWorld pediu uma verificação. Abra o navegador da coleta e resolva para continuar."
+)
+STUDIO_BUTTON_TEXT = re.compile(r"Open in Bambu Studio|Abrir no Bambu Studio", re.IGNORECASE)
+DOWNLOAD_3MF_TEXT = re.compile(r"^\s*(Download|Baixar) 3MF\s*$", re.IGNORECASE)
+REJECT_COOKIES_TEXT = re.compile(r"^(Reject All|Rejeitar todos|Rejeitar tudo|Recusar todos)$", re.IGNORECASE)
+# Logged-in model pages have no <h1>; the title lives in .title-for-share and og:title.
+MODEL_PAGE_STATE_JS = """() => {
+  const text = (element) => ((element && element.textContent) || '').trim();
+  const meta = (selector) => ((document.querySelector(selector) || {}).content || '').trim();
+  return {
+    challenge: Boolean(window._cf_chl_opt),
+    heading: text(document.querySelector('h1')) || text(document.querySelector('.title-for-share')),
+    og_title: meta("meta[property='og:title']"),
+  };
+}"""
+
+AttentionCallback = Callable[[str | None], None]
 
 
 @dataclass
@@ -74,6 +97,7 @@ def open_makerworld_context(
     headless: bool,
     store_profile_id: str | None = None,
     viewport: dict[str, int] | None = None,
+    watch: bool = False,
 ):
     # Preserve headed mode on both desktop and the Linux virtual display.
     executable = configure_playwright_browsers(playwright)
@@ -81,7 +105,14 @@ def open_makerworld_context(
         raise RuntimeError(playwright_install_hint())
     user_data_path = makerworld_profile_dir(store_profile_id)
     user_data_path.mkdir(parents=True, exist_ok=True)
+    args = ["--disable-blink-features=AutomationControlled"]
+    if watch:
+        # A loopback DevTools port lets the panel attach its own connection to watch and control
+        # this browser while the job keeps driving it.
+        args.append("--remote-debugging-port=0")
     with browser_lease(str(user_data_path)):
+        port_file = user_data_path / "DevToolsActivePort"
+        port_file.unlink(missing_ok=True)
         try:
             context = playwright.chromium.launch_persistent_context(
                 user_data_dir=user_data_path,
@@ -90,16 +121,91 @@ def open_makerworld_context(
                 accept_downloads=True,
                 viewport=viewport,
                 chromium_sandbox=os.getenv("ECO_NATIVE_CHROMIUM_SANDBOX", "false").lower() == "true",
-                args=["--disable-blink-features=AutomationControlled"],
+                args=args,
             )
         except PlaywrightError as error:
             if "Executable doesn't exist" in str(error):
                 raise RuntimeError(playwright_install_hint()) from error
             raise
         try:
-            yield context
+            if watch and store_profile_id:
+                # Imported here: makerworld_session imports this module.
+                from backend.app.services.makerworld_session import watch_collect_browser
+
+                with watch_collect_browser(store_profile_id, _devtools_endpoint(port_file)):
+                    yield context
+            else:
+                yield context
         finally:
             context.close()
+
+
+def _devtools_endpoint(port_file: Path, timeout_seconds: float = 5.0) -> str | None:
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        try:
+            port = port_file.read_text(encoding="utf-8").split()[0]
+            if port.isdigit():
+                return f"http://127.0.0.1:{port}"
+        except (OSError, IndexError):
+            pass
+        time.sleep(0.1)
+    return None
+
+
+def first_page(context):
+    """Reuse the startup tab so the collect browser shows a single window."""
+    return context.pages[0] if context.pages else context.new_page()
+
+
+def is_cloudflare_challenge(page) -> bool:
+    try:
+        return bool(page.evaluate("() => Boolean(window._cf_chl_opt)"))
+    except PlaywrightError:
+        return False
+
+
+def wait_with_help(
+    page,
+    ready: Callable[[], Any],
+    on_attention: AttentionCallback | None = None,
+    *,
+    timeout_seconds: float = MANUAL_CHECK_SECONDS,
+    ask_after_seconds: float = 20.0,
+) -> Any:
+    """Poll ready() until it returns a value, asking the user for help if a check blocks the page."""
+    started = time.monotonic()
+    asked = False
+    try:
+        while True:
+            try:
+                value = ready()
+            except PlaywrightError:
+                value = None  # The page is navigating.
+            if value:
+                return value
+            elapsed = time.monotonic() - started
+            if elapsed >= timeout_seconds:
+                return None
+            if on_attention and not asked and (elapsed >= ask_after_seconds or is_cloudflare_challenge(page)):
+                on_attention(VERIFICATION_PROMPT)
+                asked = True
+            page.wait_for_timeout(1000)
+    finally:
+        if asked and on_attention:
+            on_attention(None)
+
+
+def model_page_title(page) -> str | None:
+    state = page.evaluate(MODEL_PAGE_STATE_JS)
+    if state["challenge"]:
+        return None
+    return state["heading"] or strip_makerworld_title_suffix(state["og_title"]) or None
+
+
+def strip_makerworld_title_suffix(title: str) -> str:
+    # "Soap Holder - Free 3D Print Model - MakerWorld" -> "Soap Holder"
+    return re.sub(r"\s+-\s+[^-]*-\s*MakerWorld\s*$", "", title or "").strip()
 
 
 def discover_model_urls(
@@ -108,6 +214,7 @@ def discover_model_urls(
     headless: bool = False,
     max_urls: int = 200,
     store_profile_id: str | None = None,
+    on_attention: AttentionCallback | None = None,
 ) -> list[str]:
     headless = False
     target_url = build_search_url(keyword)
@@ -140,16 +247,15 @@ def discover_model_urls(
         return added
 
     with sync_playwright() as playwright, ExitStack() as contexts:
-        browser = contexts.enter_context(open_makerworld_context(playwright, headless=False, store_profile_id=store_profile_id))
-        page = browser.new_page()
+        browser = contexts.enter_context(open_makerworld_context(
+            playwright, headless=False, store_profile_id=store_profile_id, watch=True,
+        ))
+        page = first_page(browser)
         page.goto(target_url, wait_until="domcontentloaded", timeout=60_000)
         page.wait_for_timeout(6000)
 
-        if "Just a moment" in (page.title() or ""):
-            if headless:
-                browser.close()
-                raise RuntimeError("MakerWorld bloqueou navegador headless com Cloudflare. Use navegador visivel.")
-            page.wait_for_timeout(20_000)
+        if not wait_with_help(page, lambda: not is_cloudflare_challenge(page), on_attention):
+            raise RuntimeError("A verificação de segurança do MakerWorld não foi resolvida a tempo.")
 
         # Coleta inicial (antes de rolar) e a cada rolagem, para nao perder
         # itens que a lista virtualizada remove do DOM ao sair da tela.
@@ -184,8 +290,15 @@ def scrape_product_urls(
     project: Project | None = None,
     store_profile: StoreProfile | None = None,
     viewport: dict[str, int] | None = None,
+    on_product: Callable[[ScrapedProduct], None] | None = None,
+    on_failure: Callable[[str, str], None] | None = None,
+    on_attention: AttentionCallback | None = None,
 ) -> list[ScrapedProduct]:
-    headless = False
+    """Capture model pages, reporting each product as soon as its files are on disk.
+
+    A page that never loads is reported through on_failure instead of becoming a product,
+    so the link can be collected again later.
+    """
     normalized_urls = []
     for url in urls:
         clean_url = clean_makerworld_url(url)
@@ -200,20 +313,19 @@ def scrape_product_urls(
     with sync_playwright() as playwright, ExitStack() as contexts:
         browser = contexts.enter_context(open_makerworld_context(
             playwright,
-            headless=headless,
+            headless=False,
             viewport=viewport,
             store_profile_id=store_profile.id if store_profile else None,
+            watch=True,
         ))
-        page = browser.new_page()
+        page = first_page(browser)
 
         for url in normalized_urls:
             try:
                 page.goto(url, wait_until="domcontentloaded", timeout=60_000)
-                page.wait_for_timeout(1800)
-                if "Just a moment" in (page.title() or ""):
-                    if headless:
-                        raise RuntimeError("MakerWorld bloqueou navegador headless com Cloudflare.")
-                    page.wait_for_timeout(20_000)
+                title = wait_with_help(page, lambda: model_page_title(page), on_attention)
+                if not title:
+                    raise RuntimeError("a página do modelo não carregou (verificação não resolvida ou tempo esgotado)")
                 product = scrape_current_product_page(
                     project_id,
                     page,
@@ -222,33 +334,41 @@ def scrape_product_urls(
                     sku_candidates=sku_candidates,
                     project=project,
                     store_profile=store_profile,
+                    title=title,
                 )
-                if product.sku:
-                    sku_candidates.append(
-                        Product(
-                            project_id=project_id,
-                            name=product.name,
-                            metadata={"sku": product.sku},
-                        )
-                    )
-                if download_model and product.sku:
-                    product_dir = product_assets_dir(project_id, product.sku)
-                    product_dir.mkdir(parents=True, exist_ok=True)
-                    try:
-                        product.model_file_path = download_3mf_from_current_page(page, product_dir, product.sku)
-                    except Exception as exc:
-                        product.model_error = f"{exc.__class__.__name__}: {exc}"
-                products.append(product)
-            except PlaywrightTimeoutError:
-                fallback_name = url.rstrip("/").split("/")[-1].replace("-", " ").title()
-                products.append(ScrapedProduct(name=fallback_name, source_url=url, tags=["timeout"]))
             except Exception as exc:
-                fallback_name = url.rstrip("/").split("/")[-1].replace("-", " ").title()
-                products.append(ScrapedProduct(name=fallback_name, source_url=url, tags=[f"erro: {exc.__class__.__name__}"]))
-
-        browser.close()
+                if on_failure:
+                    on_failure(url, capture_error_message(exc))
+                continue
+            if product.sku:
+                sku_candidates.append(
+                    Product(
+                        project_id=project_id,
+                        name=product.name,
+                        metadata={"sku": product.sku},
+                    )
+                )
+            if download_model and product.sku:
+                product_dir = product_assets_dir(project_id, product.sku)
+                product_dir.mkdir(parents=True, exist_ok=True)
+                try:
+                    product.model_file_path = download_3mf_from_current_page(
+                        page, product_dir, product.sku, on_attention=on_attention,
+                    )
+                except Exception as exc:
+                    product.model_error = f"{exc.__class__.__name__}: {exc}"
+            products.append(product)
+            if on_product:
+                on_product(product)
 
     return products
+
+
+def capture_error_message(exc: Exception) -> str:
+    if isinstance(exc, PlaywrightTimeoutError):
+        return "tempo esgotado ao abrir a página"
+    lines = str(exc).strip().splitlines()
+    return (lines[0] if lines else exc.__class__.__name__)[:300]
 
 
 def scrape_current_product_page(
@@ -259,9 +379,9 @@ def scrape_current_product_page(
     sku_candidates: list[Product] | None = None,
     project: Project | None = None,
     store_profile: StoreProfile | None = None,
+    title: str | None = None,
 ) -> ScrapedProduct:
-    title = page.locator("h1").text_content(timeout=5000)
-    title = title.strip() if title else url.rstrip("/").split("/")[-1].replace("-", " ").title()
+    title = title or model_page_title(page) or url.rstrip("/").split("/")[-1].replace("-", " ").title()
 
     description = ""
     for selector in ("meta[property='og:description']", "meta[name='description']"):
@@ -348,13 +468,77 @@ def download_approved_product_assets(
     return assets
 
 
-def download_3mf_from_current_page(page, product_dir: Path, sku: str) -> str | None:
+def download_3mf_from_current_page(
+    page,
+    product_dir: Path,
+    sku: str,
+    on_attention: AttentionCallback | None = None,
+) -> str | None:
     try:
         page.wait_for_load_state("networkidle", timeout=15_000)
     except PlaywrightTimeoutError:
         pass
     page.wait_for_timeout(3500)
+    dismiss_cookie_banner(page)
 
+    download = download_from_studio_menu(page, on_attention) or download_from_legacy_buttons(page)
+    suffix = Path(download.suggested_filename).suffix or ".3mf"
+    output_path = product_dir / model_filename(sku, suffix)
+    download.save_as(str(output_path))
+    return str(output_path)
+
+
+def dismiss_cookie_banner(page) -> None:
+    """The TrustArc banner covers the download button; rejecting optional cookies closes it."""
+    button = page.locator(".trustarc-banner-wrapper").get_by_role("button", name=REJECT_COOKIES_TEXT)
+    try:
+        if button.count() and button.first.is_visible():
+            button.first.click(timeout=3_000)
+            page.wait_for_timeout(500)
+    except PlaywrightError:
+        pass
+
+
+def download_from_studio_menu(page, on_attention: AttentionCallback | None = None):
+    """Current layout: a green split button in the print-files panel.
+
+    Its main action is "Open in Bambu Studio" (which opens an import dialog, not a download) or,
+    after an account has downloaded before, "Download 3MF". The other actions sit behind its arrow.
+    """
+    main = page.locator("span.primaryButton")
+    try:
+        target = main.filter(has_text=DOWNLOAD_3MF_TEXT).last
+        if not target.count():
+            arrow = main.filter(has_text=STUDIO_BUTTON_TEXT).locator(
+                "xpath=following-sibling::*[contains(@class, 'icon-box')]"
+            ).last
+            if not arrow.count():
+                return None
+            # Centered, the arrow is clear of the cookie banner and the floating "TOP" button.
+            arrow.evaluate("element => element.scrollIntoView({block: 'center'})")
+            arrow.click(timeout=5_000)
+            target = page.get_by_text(DOWNLOAD_3MF_TEXT).last
+            target.wait_for(state="visible", timeout=5_000)
+        else:
+            target.evaluate("element => element.scrollIntoView({block: 'center'})")
+    except PlaywrightError:
+        return None
+
+    downloads = []
+    handler = lambda download: downloads.append(download)
+    page.on("download", handler)
+    try:
+        target.click(timeout=5_000)
+        # A MakerWorld puzzle can hold the download until someone solves it in the panel.
+        download = wait_with_help(page, lambda: downloads[0] if downloads else None, on_attention, ask_after_seconds=8)
+    finally:
+        page.remove_listener("download", handler)
+    if download is None:
+        raise RuntimeError("O download do 3MF não começou (verificação não resolvida ou tempo esgotado).")
+    return download
+
+
+def download_from_legacy_buttons(page):
     option_patterns = [
         r"Baixar 3MF",
         r"Download 3MF",
@@ -373,13 +557,7 @@ def download_3mf_from_current_page(page, product_dir: Path, sku: str) -> str | N
         downloaded = try_click_download_option(page, main_button, option_patterns)
     if not downloaded:
         raise RuntimeError(f"Opcao Baixar 3MF nao apareceu no menu. Botoes visiveis: {visible_button_sample(page)}")
-
-    download_info = downloaded
-    download = download_info.value
-    suffix = Path(download.suggested_filename).suffix or ".3mf"
-    output_path = product_dir / model_filename(sku, suffix)
-    download.save_as(str(output_path))
-    return str(output_path)
+    return downloaded.value
 
 
 def wait_for_download_entrypoint(page, option_patterns: list[str], timeout_ms: int = 30_000):

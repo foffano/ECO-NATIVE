@@ -127,10 +127,10 @@ API na mesma origem, não é necessário liberar CORS para qualquer origem.
 - Após reinício, trabalhos pendentes/em execução são marcados como interrompidos.
   Eles **não são repetidos automaticamente**, para evitar duplicar cobranças de
   IA. Revise os arquivos já gerados antes de repetir a operação.
-- Login e coleta não podem abrir o mesmo perfil simultaneamente. Feche a sessão
-  de login pelo botão do painel antes de coletar; conflitos retornam erro claro.
-- A transmissão mostra páginas e popups web do login. Não transmite diálogos
-  nativos nem os contextos separados das coletas.
+- Login e coleta não podem abrir o mesmo perfil simultaneamente. Ao iniciar uma
+  coleta pelo painel, a janela de login aberta é fechada (a sessão fica salva).
+- A transmissão mostra as páginas do login e o navegador das coletas, que o painel
+  acompanha por uma porta DevTools local ao container. Não transmite diálogos nativos.
 - O healthcheck verifica HTTP; não autentica no MakerWorld nem valida APIs de IA.
   Um container marcado unhealthy não é reiniciado automaticamente pelo Compose;
   `restart: unless-stopped` cobre a saída do processo.

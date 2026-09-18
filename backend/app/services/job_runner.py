@@ -15,10 +15,12 @@ from backend.app.services.prompt_library import IMAGE_PROMPTS
 from backend.app.services.sku import ensure_color_skus, ensure_product_sku
 from backend.app.services.store_profiles import get_store_profile
 from backend.app.services.makerworld_scraper import (
+    ScrapedProduct,
     clean_makerworld_url,
     discover_model_urls,
     scrape_product_urls,
 )
+from backend.app.services.makerworld_session import set_collect_notice
 from backend.app.services.source_url_blacklist import collect_skip_urls
 
 
@@ -94,6 +96,17 @@ def run_collect_job(job: Job, payload) -> Job:
     store_profile = get_store_profile(payload.store_profile_id or (project.store_profile_id if project else None))
     product_urls, blocked_urls, skip_urls = collect_skip_urls(state, payload.project_id)
     sku_reference_products = list(state.products)
+    created = 0
+    failures: list[str] = []
+
+    def ask_user(message: str | None) -> None:
+        # Shown in the job and in the collect browser panel while a check blocks the page.
+        set_collect_notice(store_profile.id, message)
+        if message:
+            job.metadata["attention"] = message
+        else:
+            job.metadata.pop("attention", None)
+        store.upsert_job(job)
 
     try:
         urls = payload.urls
@@ -108,6 +121,7 @@ def run_collect_job(job: Job, payload) -> Job:
                 scrolls=payload.scrolls,
                 headless=not payload.visible_browser,
                 store_profile_id=store_profile.id,
+                on_attention=ask_user,
             )
             job.logs.append(f"{len(urls)} link(s) candidato(s) encontrado(s) na busca.")
 
@@ -142,7 +156,77 @@ def run_collect_job(job: Job, payload) -> Job:
         job.logs.append(f"{len(urls)} link(s) novo(s) para extração direta.")
         store.upsert_job(job)
 
-        scraped_products = scrape_product_urls(
+        def report_progress() -> None:
+            done = created + len(failures)
+            job.progress = min(95, 60 + (35 * done) // max(len(urls), 1))
+            job.message = f"{done} de {len(urls)} link(s) processado(s)"
+            store.upsert_job(job)
+
+        def save_product(scraped: ScrapedProduct) -> None:
+            # Saved as soon as its files are on disk, so an interrupted batch keeps what it captured.
+            nonlocal created
+            clean_url = clean_makerworld_url(scraped.source_url)
+            if clean_url in skip_urls:
+                if clean_url in blocked_urls:
+                    job.logs.append(f"Lista de bloqueio, ignorado: {clean_url}")
+                else:
+                    job.logs.append(f"Duplicado ignorado: {clean_url}")
+                return
+
+            product = Product(
+                project_id=payload.project_id,
+                name=scraped.name,
+                source_url=clean_url,
+                status=ProductStatus.collected,
+                ai_score="coletado_sem_curadoria",
+                tags=scraped.tags or (["link selecionado", "coleta"] if manual_links else ["coleta"]),
+                metadata={
+                    "source": "makerworld",
+                    "description": scraped.description,
+                    "image_url": scraped.image_url,
+                    "curator_decision": "COLETADO_SEM_CURADORIA_IA",
+                    "manual_import": manual_links,
+                    "ai_curation_skipped": True,
+                    "model_download_error": scraped.model_error,
+                },
+            )
+            if scraped.sku:
+                product.metadata["sku"] = scraped.sku
+            else:
+                ensure_product_sku(product, sku_reference_products, project, store_profile)
+            sku_reference_products.append(product)
+            if scraped.local_image_path:
+                product.assets.append(
+                    Asset(
+                        product_id=product.id,
+                        kind="cover_image",
+                        path=scraped.local_image_path,
+                        public_url=scraped.image_url,
+                    )
+                )
+            if scraped.model_file_path:
+                product.assets.append(
+                    Asset(
+                        product_id=product.id,
+                        kind="model_3mf",
+                        path=scraped.model_file_path,
+                    )
+                )
+            if scraped.model_error:
+                job.logs.append(f"Falha ao baixar 3MF de {scraped.name}: {scraped.model_error}")
+            store.upsert_product(product)
+            skip_urls.add(clean_url)
+            product_urls.add(clean_url)
+            created += 1
+            report_progress()
+
+        def record_failure(url: str, reason: str) -> None:
+            # No product is created, so the link stays free for the next collect.
+            failures.append(reason)
+            job.logs.append(f"Não foi possível capturar {url}: {reason}.")
+            report_progress()
+
+        scrape_product_urls(
             project_id=payload.project_id,
             urls=urls,
             headless=not payload.visible_browser,
@@ -151,82 +235,40 @@ def run_collect_job(job: Job, payload) -> Job:
             sku_reference_products=sku_reference_products,
             project=project,
             store_profile=store_profile,
+            on_product=save_product,
+            on_failure=record_failure,
+            on_attention=ask_user,
         )
     except Exception as exc:
+        job.metadata.pop("attention", None)
         job.status = JobStatus.failed
         job.progress = 100
         job.message = "Falha na coleta MakerWorld"
+        if created:
+            job.logs.append(f"{created} produto(s) capturado(s) antes da falha continuam salvos.")
         job.logs.append(_job_error_log(exc))
         return store.upsert_job(job)
+    finally:
+        set_collect_notice(store_profile.id, None)
 
-    created = 0
-    for scraped in scraped_products:
-        clean_url = clean_makerworld_url(scraped.source_url)
-        if clean_url in skip_urls:
-            if clean_url in blocked_urls:
-                job.logs.append(f"Lista de bloqueio, ignorado: {clean_url}")
-            else:
-                job.logs.append(f"Duplicado ignorado: {clean_url}")
-            continue
-
-        job.status = JobStatus.running
-        job.progress = min(95, 75 + created)
-        job.message = f"Salvando produto: {scraped.name[:50]}"
-        store.upsert_job(job)
-
-        product = Product(
-            project_id=payload.project_id,
-            name=scraped.name,
-            source_url=clean_url,
-            status=ProductStatus.collected,
-            ai_score="coletado_sem_curadoria",
-            tags=scraped.tags or (["link selecionado", "coleta"] if manual_links else ["coleta"]),
-            metadata={
-                "source": "makerworld",
-                "description": scraped.description,
-                "image_url": scraped.image_url,
-                "curator_decision": "COLETADO_SEM_CURADORIA_IA",
-                "manual_import": manual_links,
-                "ai_curation_skipped": True,
-                "model_download_error": scraped.model_error,
-            },
-        )
-        if scraped.sku:
-            product.metadata["sku"] = scraped.sku
-        else:
-            ensure_product_sku(product, sku_reference_products, project, store_profile)
-        sku_reference_products.append(product)
-        if scraped.local_image_path:
-            product.assets.append(
-                Asset(
-                    product_id=product.id,
-                    kind="cover_image",
-                    path=scraped.local_image_path,
-                    public_url=scraped.image_url,
-                )
-            )
-        if scraped.model_file_path:
-            product.assets.append(
-                Asset(
-                    product_id=product.id,
-                    kind="model_3mf",
-                    path=scraped.model_file_path,
-                )
-            )
-        if scraped.model_error:
-            job.logs.append(f"Falha ao baixar 3MF de {scraped.name}: {scraped.model_error}")
-        store.upsert_product(product)
-        skip_urls.add(clean_url)
-        product_urls.add(clean_url)
-        created += 1
-
+    job.metadata.pop("attention", None)
     job.metadata["ai_cost_total_usd"] = 0
     job.metadata["ai_request_count"] = 0
     job.metadata["created_products"] = created
+    job.metadata["failed_links"] = len(failures)
     job.metadata["rejected_products"] = 0
     job.metadata["manual_without_ai"] = True
     job.metadata["ai_curation_skipped"] = True
-    return _finish_job(job, f"{created} produto(s) coletado(s) e adicionados para revisão.")
+    if failures and not created:
+        job.status = JobStatus.failed
+        job.progress = 100
+        job.message = "Nenhum produto foi capturado"
+        job.logs.append(f"Nenhum produto foi capturado. Último erro: {failures[-1]}. Os links podem ser coletados de novo.")
+        return store.upsert_job(job)
+    message = f"{created} produto(s) coletado(s) e adicionados para revisão."
+    if failures:
+        message += f" {len(failures)} link(s) falharam e podem ser coletados de novo."
+    return _finish_job(job, message)
 
 
 def run_listing_job(job: Job, product: Product) -> Job:

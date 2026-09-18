@@ -1,4 +1,4 @@
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 import queue
 import os
 import threading
@@ -8,14 +8,23 @@ from typing import Any
 from urllib.parse import urlencode
 
 from playwright.sync_api import sync_playwright, Error as PlaywrightError
+from websockets.exceptions import ConnectionClosed
 
-from backend.app.services.makerworld_scraper import MAKERWORLD_HOME, makerworld_profile_dir, open_makerworld_context
+from backend.app.services.cdp_viewer import CdpError, CdpPage
+from backend.app.services.makerworld_scraper import (
+    MAKERWORLD_HOME,
+    is_cloudflare_challenge,
+    makerworld_profile_dir,
+    open_makerworld_context,
+)
 
 
 VIEWPORT_WIDTH = 1280
 VIEWPORT_HEIGHT = 720
 FRAME_INTERVAL_SECONDS = 0.45
 SESSION_IDLE_SECONDS = 30 * 60
+# A viewer attached to a collect browser stops capturing once nobody has fetched a frame for this long.
+VIEWER_IDLE_SECONDS = 60
 NAVIGATION_TIMEOUT_MS = 20_000
 # Downloads and 204 responses never reach DOMContentLoaded; stop showing them as loading.
 LOADING_MAX_SECONDS = 20
@@ -28,6 +37,9 @@ MAKERWORLD_LOGIN_URL = "https://bambulab.com/pt-br/sign-in?" + urlencode({
 CHALLENGE_MESSAGE = (
     "Verificação de segurança da Cloudflare: marque a caixa “Verify you are human” "
     "e aguarde alguns segundos. Se não avançar, use Recarregar."
+)
+COLLECT_MESSAGE = (
+    "Navegador da coleta: acompanhe e, se o MakerWorld pedir verificação ou puzzle, resolva por aqui."
 )
 
 
@@ -43,6 +55,8 @@ class MakerWorldSessionStatus:
     active_page_id: str | None = None
     loading: bool = False
     challenge: bool = False
+    attention: bool = False
+    mode: str = "login"
 
 
 class BrowserPages:
@@ -113,8 +127,16 @@ class BrowserPages:
 
 
 class RemoteBrowserSession:
-    def __init__(self, store_profile_id: str) -> None:
+    """Stream one MakerWorld browser to the panel and forward its input.
+
+    Without attach_endpoint it launches the store's login browser. With it, it attaches a passive
+    DevTools client to the browser a collect job is driving; the job keeps ownership.
+    """
+    def __init__(self, store_profile_id: str, attach_endpoint: str | None = None) -> None:
         self.store_profile_id = store_profile_id
+        self.attached = attach_endpoint is not None
+        self._endpoint = attach_endpoint
+        self._last_view = time.monotonic()
         self.commands: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=200)
         self._lock = threading.Lock()
         self._frame: bytes | None = None
@@ -141,10 +163,15 @@ class RemoteBrowserSession:
             loading = is_open and self._loading
             challenge = is_open and self._challenge
         configured = _configured(self.store_profile_id)
+        notice = _collect_notices.get(self.store_profile_id) if self.attached else None
         if error:
             message = f"Falha no navegador MakerWorld: {error}"
+        elif notice:
+            message = notice
         elif challenge:
             message = CHALLENGE_MESSAGE
+        elif self.attached:
+            message = COLLECT_MESSAGE
         elif is_open:
             message = (
                 "Navegador MakerWorld oculto no servidor e disponível para controle remoto."
@@ -157,9 +184,11 @@ class RemoteBrowserSession:
             message = "Sessão MakerWorld ainda não configurada para esta loja."
         return MakerWorldSessionStatus(open=is_open, url=url, message=message, configured=configured,
                                        pages=pages, active_page_id=active_page_id,
-                                       loading=loading, challenge=challenge)
+                                       loading=loading, challenge=challenge, attention=bool(notice),
+                                       mode="collect" if self.attached else "login")
 
     def frame(self) -> bytes | None:
+        self._last_view = time.monotonic()
         with self._lock:
             return self._frame
 
@@ -182,13 +211,17 @@ class RemoteBrowserSession:
         if kind == "close":
             return False
         if kind == "click":
-            page.mouse.click(
-                max(0, min(VIEWPORT_WIDTH, float(command.get("x", 0)))),
-                max(0, min(VIEWPORT_HEIGHT, float(command.get("y", 0)))),
-                button=command.get("button", "left"),
-            )
+            page.mouse.click(*_clamp(command.get("x", 0), command.get("y", 0)), button=command.get("button", "left"))
+        elif kind in ("down", "up"):
+            # Drags (slider puzzles) arrive as down, move paths and up.
+            page.mouse.move(*_clamp(command.get("x", 0), command.get("y", 0)))
+            press = page.mouse.down if kind == "down" else page.mouse.up
+            press(button=command.get("button", "left"))
         elif kind == "move":
-            page.mouse.move(float(command.get("x", 0)), float(command.get("y", 0)))
+            for x, y, delay_ms in command.get("path") or [(command.get("x", 0), command.get("y", 0), 0)]:
+                if delay_ms:
+                    page.wait_for_timeout(min(float(delay_ms), 200))
+                page.mouse.move(*_clamp(x, y))
         elif kind == "wheel":
             page.mouse.wheel(float(command.get("delta_x", 0)), float(command.get("delta_y", 0)))
         elif kind == "text":
@@ -215,6 +248,9 @@ class RemoteBrowserSession:
             self._loading = windows.is_loading(windows.active_id)
 
     def _run(self) -> None:
+        if self.attached:
+            self._run_attached()
+            return
         try:
             with sync_playwright() as playwright, ExitStack() as contexts:
                 context = contexts.enter_context(open_makerworld_context(
@@ -266,7 +302,7 @@ class RemoteBrowserSession:
                         if page_id != self._active_page_id:
                             page.bring_to_front()
                         frame = page.screenshot(type="jpeg", quality=68, animations="disabled", timeout=5_000)
-                        challenge = _is_cloudflare_challenge(page)
+                        challenge = is_cloudflare_challenge(page)
                         with self._lock:
                             if windows.active_id == page_id and not page.is_closed():
                                 self._frame = frame
@@ -290,17 +326,67 @@ class RemoteBrowserSession:
             with self._lock:
                 self._open = False
 
+    def _run_attached(self) -> None:
+        """Stream the collect job's tab and pass pointer and keyboard input; the job keeps driving it."""
+        page = None
+        try:
+            page = CdpPage(self._endpoint)
+            with self._lock:
+                self._open = True
+                self._active_page_id = "1"
+            while time.monotonic() - self._last_view < VIEWER_IDLE_SECONDS:
+                while True:
+                    try:
+                        command = self.commands.get_nowait()
+                    except queue.Empty:
+                        break
+                    if command.get("type") == "close":
+                        return
+                    # Navigation stays with the job; only pointer and keyboard input pass through.
+                    if command.get("type") in ("navigate", "select_page"):
+                        continue
+                    try:
+                        self._execute(page, command)
+                    except CdpError as exc:
+                        with self._lock:
+                            self._error = str(exc)
+                try:
+                    frame = page.screenshot()
+                    challenge, ready_state = page.evaluate("[Boolean(window._cf_chl_opt), document.readyState]")
+                except CdpError:
+                    # The tab is between pages; keep showing the last frame.
+                    frame, challenge, ready_state = None, False, "loading"
+                url = page.url
+                with self._lock:
+                    if frame:
+                        self._frame = frame
+                        self._error = None
+                    self._url = url
+                    self._pages = [{"id": "1", "url": url}]
+                    self._challenge = challenge
+                    self._loading = ready_state != "complete"
+                time.sleep(FRAME_INTERVAL_SECONDS)
+        except Exception as exc:
+            # A closed socket just means the collect finished with this browser.
+            if not isinstance(exc, ConnectionClosed):
+                with self._lock:
+                    self._error = str(exc)
+        finally:
+            if page is not None:
+                page.close()
+            with self._lock:
+                self._open = False
 
-def _is_cloudflare_challenge(page) -> bool:
-    # Cloudflare's interstitial defines this; MakerWorld pages do not.
-    try:
-        return bool(page.evaluate("() => Boolean(window._cf_chl_opt)"))
-    except PlaywrightError:
-        return False
+
+def _clamp(x, y) -> tuple[float, float]:
+    return max(0.0, min(VIEWPORT_WIDTH, float(x))), max(0.0, min(VIEWPORT_HEIGHT, float(y)))
 
 
 _sessions: dict[str, RemoteBrowserSession] = {}
 _sessions_lock = threading.Lock()
+# DevTools endpoints of browsers that collect jobs are driving, and what the job needs from the user.
+_collect_endpoints: dict[str, str] = {}
+_collect_notices: dict[str, str] = {}
 
 
 def _configured(store_profile_id: str) -> bool:
@@ -317,7 +403,51 @@ def _session(store_profile_id: str) -> RemoteBrowserSession | None:
         return session
 
 
+@contextmanager
+def watch_collect_browser(store_profile_id: str, endpoint: str | None):
+    """Let the panel watch a collect browser for as long as the job keeps it open."""
+    if endpoint:
+        with _sessions_lock:
+            _collect_endpoints[store_profile_id] = endpoint
+    try:
+        yield
+    finally:
+        viewer = None
+        with _sessions_lock:
+            _collect_endpoints.pop(store_profile_id, None)
+            _collect_notices.pop(store_profile_id, None)
+            if getattr(_sessions.get(store_profile_id), "attached", False):
+                viewer = _sessions.pop(store_profile_id)
+        if viewer is not None:
+            viewer.close()
+
+
+def set_collect_notice(store_profile_id: str, message: str | None) -> None:
+    if message:
+        _collect_notices[store_profile_id] = message
+    else:
+        _collect_notices.pop(store_profile_id, None)
+
+
+def _collect_viewer(store_profile_id: str) -> RemoteBrowserSession | None:
+    """Attach to the store's running collect browser; viewers start on demand and stop when unwatched."""
+    with _sessions_lock:
+        endpoint = _collect_endpoints.get(store_profile_id)
+        if not endpoint:
+            return None
+        session = _sessions.get(store_profile_id)
+        if session is None or not session._thread.is_alive():
+            session = RemoteBrowserSession(store_profile_id, attach_endpoint=endpoint)
+            _sessions[store_profile_id] = session
+            session.start()
+        return session
+
+
 def open_login_session(store_profile_id: str) -> MakerWorldSessionStatus:
+    # While a collect uses the profile, show that browser instead of launching another one.
+    viewer = _collect_viewer(store_profile_id)
+    if viewer is not None:
+        return viewer.status()
     with _sessions_lock:
         existing = _sessions.get(store_profile_id)
         if existing and existing._thread.is_alive():
@@ -353,6 +483,15 @@ def get_login_session_status(store_profile_id: str) -> MakerWorldSessionStatus:
     if session:
         return session.status()
     configured = _configured(store_profile_id)
+    if store_profile_id in _collect_endpoints:
+        notice = _collect_notices.get(store_profile_id)
+        return MakerWorldSessionStatus(
+            open=False,
+            configured=configured,
+            mode="collect",
+            attention=bool(notice),
+            message=notice or "Conectando ao navegador da coleta...",
+        )
     return MakerWorldSessionStatus(
         open=False,
         configured=configured,
@@ -361,12 +500,13 @@ def get_login_session_status(store_profile_id: str) -> MakerWorldSessionStatus:
 
 
 def get_login_session_frame(store_profile_id: str) -> bytes | None:
-    session = _session(store_profile_id)
+    # Frames are only requested by an open panel, so this is where a collect viewer starts.
+    session = _session(store_profile_id) or _collect_viewer(store_profile_id)
     return session.frame() if session else None
 
 
 def send_login_session_input(store_profile_id: str, command: dict[str, Any]) -> None:
-    session = _session(store_profile_id)
+    session = _session(store_profile_id) or _collect_viewer(store_profile_id)
     if not session:
         raise RuntimeError("Navegador MakerWorld não está aberto")
     session.send(command)
