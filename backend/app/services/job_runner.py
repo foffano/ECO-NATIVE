@@ -320,6 +320,7 @@ def run_image_job(
     product: Product,
     selected_colors: list[str] | None = None,
     generate_base_images: bool = True,
+    regenerate: bool = False,
 ) -> Job:
     job.status = JobStatus.running
     job.progress = 25
@@ -366,6 +367,7 @@ def run_image_job(
                 extra_prompt=store_profile.image_prompt,
                 image_prompts=active_prompts,
                 on_asset=_on_studio_asset,
+                regenerate=regenerate,
             )
 
         if selected_colors:
@@ -374,11 +376,11 @@ def run_image_job(
             job.logs.append("Usando prompt de variação de cor do exemplo, executado via Kie.ai/Qwen.")
             store.upsert_job(job)
 
-            source_asset = next((asset for asset in studio_assets if "studio_classic" in asset.kind), None)
+            source_asset = next((asset for asset in studio_assets if asset.kind == "generated_studio_classic"), None)
             if not source_asset and studio_assets:
                 source_asset = studio_assets[0]
             if not source_asset:
-                source_asset = next((asset for asset in product.assets if "generated_studio_classic" in asset.kind), None)
+                source_asset = next((asset for asset in product.assets if asset.kind == "generated_studio_classic"), None)
             if not source_asset:
                 source_asset = next((asset for asset in product.assets if asset.kind.startswith("generated_")), None)
             if source_asset:
@@ -391,6 +393,7 @@ def run_image_job(
                     store_profile.color_variation_prompt,
                     extra_prompt=store_profile.image_prompt,
                     on_asset=_on_color_asset,
+                    regenerate=regenerate,
                 )
                 color_count = color_done
             else:

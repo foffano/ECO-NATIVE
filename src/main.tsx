@@ -205,6 +205,7 @@ type Asset = {
   kind: string;
   path: string;
   public_url?: string | null;
+  created_at?: string;
 };
 
 type Product = {
@@ -589,8 +590,23 @@ async function readApiError(response: Response): Promise<string> {
   return fixPortugueseText(raw);
 }
 
+const PREVIOUS_VERSION_PREFIX = "previous_";
+
+// Earlier versions of regenerated images; only the "Versões anteriores" gallery lists them.
+function isPreviousVersion(asset: Asset): boolean {
+  return asset.kind.startsWith(PREVIOUS_VERSION_PREFIX);
+}
+
 function isImageAsset(asset: Asset): boolean {
+  if (isPreviousVersion(asset)) return false;
   return asset.kind.includes("image") || /\.(png|jpe?g|webp)$/i.test(asset.path);
+}
+
+function assetLabel(asset: Asset): string {
+  const previous = isPreviousVersion(asset);
+  const kind = previous ? asset.kind.slice(PREVIOUS_VERSION_PREFIX.length) : asset.kind;
+  const label = kind.replace(/^generated_/, "IA ").replace(/^color_/, "Cor ").replace(/_/g, " ");
+  return previous ? `${label} (anterior)` : label;
 }
 
 function getCoverAsset(product: Product): Asset | undefined {
@@ -600,6 +616,18 @@ function getCoverAsset(product: Product): Asset | undefined {
 
 function getImageAssets(product: Product): Asset[] {
   return product.assets.filter(isImageAsset);
+}
+
+// Once studio images exist the product is shown by the first one, as in its gallery.
+function getMainImageAsset(product: Product): Asset | undefined {
+  const generated = product.assets.filter((asset) => asset.kind.startsWith("generated_"));
+  return generated.find((asset) => asset.kind === "generated_studio_classic") ?? generated[0] ?? getCoverAsset(product);
+}
+
+function productThumbnailUrl(product?: Product): string | undefined {
+  const asset = product ? getMainImageAsset(product) : undefined;
+  // Replacing the cover keeps its asset id, so the product's update time busts the browser cache.
+  return asset && product ? assetUrl(asset, product.updated_at) : undefined;
 }
 
 function hasListingContent(product?: Product): boolean {
@@ -2539,15 +2567,27 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
     return runAction("Gerando imagens base", () =>
       (async () => {
         const product = projectProducts.find((item) => item.id === productId);
-        if (
-          hasBaseImages(product)
-          && !(await confirmRegeneration(`"${product?.name ?? "Este produto"}" já possui imagens base geradas. O sistema reutiliza arquivos existentes quando possível. Para recriar uma imagem específica, use o botão IA na miniatura. Deseja continuar?`))
-        ) {
-          throw new Error("__cancelled__");
+        const name = product?.name ?? "Este produto";
+        const disabled = new Set(activeStoreProfile?.disabled_image_prompts ?? []);
+        const existing = new Set(
+          (product?.assets ?? []).filter((asset) => asset.kind.startsWith("generated_")).map((asset) => asset.kind.slice("generated_".length)),
+        );
+        const missing = imageOptions.studio_prompts.filter((style) => !disabled.has(style.id) && !existing.has(style.id));
+        let regenerate = false;
+        if (existing.size && missing.length) {
+          // Finishing an interrupted batch only pays for the styles still missing.
+          if (!(await confirmRegeneration(`"${name}" ainda não tem imagem para ${missing.length} estilo(s): ${missing.map((style) => style.name).join(", ")}. Gerar só esses? Para refazer uma imagem existente, use o botão IA na miniatura.`))) {
+            throw new Error("__cancelled__");
+          }
+        } else if (existing.size) {
+          if (!(await confirmRegeneration(`"${name}" já possui imagens base geradas. Gerar novamente cria uma nova versão de cada imagem, com novo custo de IA. As imagens atuais continuam salvas em “Versões anteriores”, na aba Imagens. Deseja continuar?`))) {
+            throw new Error("__cancelled__");
+          }
+          regenerate = true;
         }
         return submitJob("/api/jobs/images", {
         method: "POST",
-        body: JSON.stringify({ product_id: productId, color_variations: [], generate_base_images: true }),
+        body: JSON.stringify({ product_id: productId, color_variations: [], generate_base_images: true, regenerate }),
         });
       })(),
     { refresh: "catalog", blockUi: true });
@@ -2569,13 +2609,18 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
         const alreadyGenerated = existingColorVariations(product, colorVariations);
         if (
           alreadyGenerated.length
-          && !(await confirmRegeneration(`Este produto já possui variação(ões) para: ${alreadyGenerated.join(", ")}. O sistema reutiliza arquivos existentes quando possível. Deseja continuar?`))
+          && !(await confirmRegeneration(`Este produto já possui variação(ões) para: ${alreadyGenerated.join(", ")}. Gerar novamente cria uma nova versão dessas cores, com novo custo de IA. As atuais continuam salvas em “Versões anteriores”, na aba Imagens. Deseja continuar?`))
         ) {
           throw new Error("__cancelled__");
         }
         return submitJob("/api/jobs/images", {
         method: "POST",
-        body: JSON.stringify({ product_id: productId, color_variations: colorVariations, generate_base_images: false }),
+        body: JSON.stringify({
+          product_id: productId,
+          color_variations: colorVariations,
+          generate_base_images: false,
+          regenerate: alreadyGenerated.length > 0,
+        }),
         });
       })(),
     { refresh: "catalog", blockUi: true });
@@ -4328,7 +4373,7 @@ const THUMB_PREVIEW_LAYOUT = {
 type ThumbPreviewVariant = keyof typeof THUMB_PREVIEW_LAYOUT;
 
 function useProductThumbPreview(product: Product, variant: ThumbPreviewVariant) {
-  const coverAsset = getCoverAsset(product);
+  const thumbnailUrl = productThumbnailUrl(product);
   const layout = THUMB_PREVIEW_LAYOUT[variant];
   const [previewOpen, setPreviewOpen] = useState(false);
   const [previewPos, setPreviewPos] = useState({ top: 0, left: 0 });
@@ -4350,7 +4395,7 @@ function useProductThumbPreview(product: Product, variant: ThumbPreviewVariant) 
 
   function openPreview() {
     const anchor = anchorRef.current;
-    if (!anchor || !coverAsset) return;
+    if (!anchor || !thumbnailUrl) return;
     const rect = anchor.getBoundingClientRect();
     const gap = 10;
     let left = rect.right + gap;
@@ -4365,7 +4410,7 @@ function useProductThumbPreview(product: Product, variant: ThumbPreviewVariant) 
   }
 
   function handleMouseEnter() {
-    if (!coverAsset) return;
+    if (!thumbnailUrl) return;
     clearHoverTimer();
     hoverTimerRef.current = window.setTimeout(openPreview, layout.delayMs);
   }
@@ -4377,7 +4422,7 @@ function useProductThumbPreview(product: Product, variant: ThumbPreviewVariant) 
 
   return {
     anchorRef,
-    coverAsset,
+    thumbnailUrl,
     handleMouseEnter,
     handleMouseLeave,
     layout,
@@ -4387,13 +4432,13 @@ function useProductThumbPreview(product: Product, variant: ThumbPreviewVariant) 
 }
 
 function ProductThumbPreviewPortal({
-  coverAsset,
+  imageUrl,
   layout,
   open,
   position,
   productName,
 }: {
-  coverAsset: Asset;
+  imageUrl: string;
   layout: (typeof THUMB_PREVIEW_LAYOUT)[ThumbPreviewVariant];
   open: boolean;
   position: { top: number; left: number };
@@ -4402,7 +4447,7 @@ function ProductThumbPreviewPortal({
   if (!open) return null;
   return createPortal(
     <div className={layout.previewClass} style={{ top: position.top, left: position.left }}>
-      <img src={assetUrl(coverAsset)} alt={productName} />
+      <img src={imageUrl} alt={productName} />
       <span className={layout.captionClass} title={productName}>{productName}</span>
     </div>,
     document.body,
@@ -4418,7 +4463,7 @@ function ProductCardThumb({
 }) {
   const {
     anchorRef,
-    coverAsset,
+    thumbnailUrl,
     handleMouseEnter,
     handleMouseLeave,
     layout,
@@ -4436,11 +4481,11 @@ function ProductCardThumb({
         onMouseEnter={handleMouseEnter}
         onMouseLeave={handleMouseLeave}
       >
-        {coverAsset ? <img src={assetUrl(coverAsset)} alt="" /> : <ShoppingBag size={22} />}
+        {thumbnailUrl ? <img src={thumbnailUrl} alt="" /> : <ShoppingBag size={22} />}
       </button>
-      {coverAsset && (
+      {thumbnailUrl && (
         <ProductThumbPreviewPortal
-          coverAsset={coverAsset}
+          imageUrl={thumbnailUrl}
           layout={layout}
           open={previewOpen}
           position={previewPos}
@@ -4455,7 +4500,7 @@ function CostsProductCell({ product }: { product: Product }) {
   const sku = productSku(product) || "—";
   const {
     anchorRef,
-    coverAsset,
+    thumbnailUrl,
     handleMouseEnter,
     handleMouseLeave,
     layout,
@@ -4473,8 +4518,8 @@ function CostsProductCell({ product }: { product: Product }) {
         title={product.name}
       >
         <div className="costs-product-thumb" aria-hidden="true">
-          {coverAsset ? (
-            <img src={assetUrl(coverAsset)} alt="" />
+          {thumbnailUrl ? (
+            <img src={thumbnailUrl} alt="" />
           ) : (
             <span className="costs-product-thumb-fallback">
               <ShoppingBag size={18} />
@@ -4483,9 +4528,9 @@ function CostsProductCell({ product }: { product: Product }) {
         </div>
         <code className="costs-product-sku">{sku}</code>
       </div>
-      {coverAsset && (
+      {thumbnailUrl && (
         <ProductThumbPreviewPortal
-          coverAsset={coverAsset}
+          imageUrl={thumbnailUrl}
           layout={layout}
           open={previewOpen}
           position={previewPos}
@@ -5546,7 +5591,7 @@ function ProductsTab({
                     <h4>Outros arquivos</h4>
                     {imageAssets.map((asset) => (
                       <div className="asset-row" key={asset.id}>
-                        <strong>{asset.kind.replace(/^generated_/, "IA ").replace(/^color_/, "Cor ").replace(/_/g, " ")}</strong>
+                        <strong>{assetLabel(asset)}</strong>
                         <code>{fileBasename(asset.path)}</code>
                       </div>
                     ))}
@@ -5608,8 +5653,8 @@ function ProductsTab({
         <div className="image-fullscreen-backdrop" onClick={() => setFullscreenAsset(null)}>
           <div className="image-fullscreen-viewer" onClick={(event) => event.stopPropagation()}>
             <button className="close-button fullscreen-close" onClick={() => setFullscreenAsset(null)}>Fechar</button>
-            <img src={assetUrl(fullscreenAsset)} alt="" />
-            <span>{fullscreenAsset.kind.replace(/^generated_/, "").replace(/^color_/, "").replace(/_/g, " ")}</span>
+            <img src={assetUrl(fullscreenAsset, selectedProduct?.updated_at)} alt="" />
+            <span>{assetLabel(fullscreenAsset)}</span>
           </div>
         </div>
       )}
@@ -5725,7 +5770,10 @@ function ProductImageGallery({
   const capturedImages = images.filter((asset) => asset.kind === "cover_image");
   const baseImages = images.filter((asset) => asset.kind.startsWith("generated_"));
   const colorImages = images.filter((asset) => asset.kind.startsWith("color_"));
-  const mainImage = baseImages[0] ?? capturedImages[0] ?? colorImages[0];
+  const mainImage = getMainImageAsset(product);
+  const previousImages = product.assets
+    .filter(isPreviousVersion)
+    .sort((left, right) => (right.created_at ?? "").localeCompare(left.created_at ?? ""));
   const colorSkus = productColorSkus(product);
   const colorLabels = productColorLabels(product);
   const imageVersion = product.updated_at;
@@ -5812,9 +5860,26 @@ function ProductImageGallery({
           onOpenImage={onOpenImage}
           onRegenerateImage={onRegenerateImage}
         />
+        {previousImages.length > 0 && (
+          <GalleryGroup
+            assets={previousImages}
+            emptyText=""
+            imageVersion={imageVersion}
+            labelFor={previousVersionLabel}
+            title={`Versões anteriores (${previousImages.length})`}
+            onOpenImage={onOpenImage}
+          />
+        )}
       </div>
     </div>
   );
+}
+
+function previousVersionLabel(asset: Asset): string {
+  const label = assetLabel(asset).replace(/ \(anterior\)$/, "");
+  if (!asset.created_at) return label;
+  const created = new Date(asset.created_at).toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
+  return `${label} · ${created}`;
 }
 
 function BaseStyleGallery({
@@ -6087,6 +6152,7 @@ function GalleryGroup({
   productId,
   skuByKey = {},
   labelByKey = {},
+  labelFor,
   onDeleteAsset,
   onExtraPromptChange,
   onOpenImage,
@@ -6103,6 +6169,7 @@ function GalleryGroup({
   productId?: string;
   skuByKey?: Record<string, string>;
   labelByKey?: Record<string, string>;
+  labelFor?: (asset: Asset) => string;
   onDeleteAsset?: (assetId: string) => void;
   onExtraPromptChange?: (promptKey: string, value: string) => void;
   onOpenImage: (asset: Asset) => void;
@@ -6118,7 +6185,8 @@ function GalleryGroup({
         {assets.map((asset) => {
           const promptKey = asset.kind.replace(/^generated_/, "");
           const slugKey = asset.kind.replace(/^color_/, "");
-          const label = labelByKey[slugKey]
+          const label = labelFor?.(asset)
+            || labelByKey[slugKey]
             || asset.kind.replace(/^generated_/, "").replace(/^color_/, "").replace(/_/g, " ");
           const sku = skuByKey[slugKey];
           const regenerateOpen = activeRegenerateKey === promptKey;
@@ -6428,7 +6496,7 @@ function ScheduleAgendaGrid({
     const displayColumnId = isPreview ? preview.columnId : columnId;
     if (displayColumnId !== columnId) return null;
     const linkedProduct = task.product_id ? products.find((product) => product.id === task.product_id) : undefined;
-    const coverAsset = linkedProduct ? getCoverAsset(linkedProduct) : undefined;
+    const thumbnailUrl = productThumbnailUrl(linkedProduct);
     const printer = printers.find((item) => item.id === task.printer_id);
     const top = agendaOffsetTop(startMinutes);
     const height = agendaBlockHeight(durationMinutes);
@@ -6455,7 +6523,7 @@ function ScheduleAgendaGrid({
         <div className="agenda-event-body">
           {!compactLane && (
             <div className="agenda-event-thumb" aria-hidden="true">
-              {coverAsset ? <img src={assetUrl(coverAsset)} alt="" /> : <ShoppingBag size={14} />}
+              {thumbnailUrl ? <img src={thumbnailUrl} alt="" /> : <ShoppingBag size={14} />}
             </div>
           )}
           <div className="agenda-event-copy">
@@ -6626,7 +6694,7 @@ function ScheduleTab({
     () => filterProducts(products, { query: productSearchQuery, status: "all", characteristic: "all" }),
     [products, productSearchQuery],
   );
-  const selectedCoverAsset = selectedProduct ? getCoverAsset(selectedProduct) : undefined;
+  const selectedThumbnailUrl = productThumbnailUrl(selectedProduct);
   const selectedTask = tasks.find((task) => task.id === selectedTaskId) || null;
   const dayAgendaColumns = useMemo(
     () => printers.map((printer) => ({
@@ -6864,11 +6932,11 @@ function ScheduleTab({
                       <div className="agenda-month-events">
                         {dateTasks.slice(0, 4).map((task) => {
                           const linkedProduct = task.product_id ? products.find((product) => product.id === task.product_id) : undefined;
-                          const coverAsset = linkedProduct ? getCoverAsset(linkedProduct) : undefined;
+                          const thumbnailUrl = productThumbnailUrl(linkedProduct);
                           return (
                             <span className={`agenda-month-chip status-${task.status}`} key={task.id} title={task.title}>
                               <span className="agenda-month-chip-thumb" aria-hidden="true">
-                                {coverAsset ? <img src={assetUrl(coverAsset)} alt="" /> : <ShoppingBag size={10} />}
+                                {thumbnailUrl ? <img src={thumbnailUrl} alt="" /> : <ShoppingBag size={10} />}
                               </span>
                               <span className="agenda-month-chip-copy">
                                 <strong>{task.start_time}</strong> {task.title}
@@ -6957,8 +7025,8 @@ function ScheduleTab({
                       {selectedProduct ? (
                         <>
                           <div className="schedule-product-thumb" aria-hidden="true">
-                            {selectedCoverAsset ? (
-                              <img src={assetUrl(selectedCoverAsset)} alt="" />
+                            {selectedThumbnailUrl ? (
+                              <img src={selectedThumbnailUrl} alt="" />
                             ) : (
                               <ShoppingBag size={18} />
                             )}
@@ -6986,7 +7054,7 @@ function ScheduleTab({
                         </div>
                         <div className="schedule-product-list" role="listbox" aria-label="Selecionar produto">
                           {filteredScheduleProducts.map((product) => {
-                            const coverAsset = getCoverAsset(product);
+                            const thumbnailUrl = productThumbnailUrl(product);
                             const project = projectById.get(product.project_id);
                             const isSelected = selectedProductId === product.id;
                             return (
@@ -7004,8 +7072,8 @@ function ScheduleTab({
                                 }}
                               >
                                 <div className="schedule-product-thumb" aria-hidden="true">
-                                  {coverAsset ? (
-                                    <img src={assetUrl(coverAsset)} alt="" />
+                                  {thumbnailUrl ? (
+                                    <img src={thumbnailUrl} alt="" />
                                   ) : (
                                     <ShoppingBag size={18} />
                                   )}

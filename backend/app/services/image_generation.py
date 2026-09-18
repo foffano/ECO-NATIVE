@@ -1,6 +1,7 @@
 import json
 import time
 from collections.abc import Callable
+from functools import partial
 from pathlib import Path
 from urllib.parse import quote
 
@@ -14,6 +15,7 @@ from backend.app.services.cost_tracker import add_kie_image_cost
 from backend.app.services.cover_image import cover_r2_public_url, ensure_product_cover
 from backend.app.services.http_client import HttpResponseError, download as http_download, read_response_json, read_response_text, request as http_request
 from backend.app.services.image_models import DEFAULT_IMAGE_MODEL, get_image_model
+from backend.app.services.image_versions import replace_with_new_version
 from backend.app.services.image_options import color_description_map
 from backend.app.services.product_paths import (
     color_variation_filename,
@@ -243,8 +245,13 @@ def generate_studio_images(
     extra_prompt: str = "",
     image_prompts: dict[str, str] | None = None,
     on_asset: Callable[[Asset], None] | None = None,
+    regenerate: bool = False,
 ) -> list[Asset]:
     """Gera as imagens de estúdio (uma por prompt).
+
+    Sem `regenerate`, estilos que já têm imagem são reaproveitados (retomar um lote que
+    falhou no meio). Com `regenerate`, todos ganham uma nova versão e as atuais ficam
+    guardadas como versões anteriores.
 
     `on_asset`, se fornecido, é chamado logo após CADA imagem ser gerada e ter
     seu Asset criado. Isso permite ao chamador persistir incrementalmente cada
@@ -276,7 +283,7 @@ def generate_studio_images(
     for prompt_key, prompt in prompts.items():
         kind = f"generated_{prompt_key}"
         output_path = output_dir / studio_image_filename(sku, prompt_key)
-        if output_path.exists():
+        if output_path.exists() and not regenerate:
             public_url = upload_file_to_r2(output_path, r2_key_prefix(product), force=True)
             asset = Asset(
                 product_id=product.id,
@@ -289,15 +296,16 @@ def generate_studio_images(
                 on_asset(asset)
             continue
         try:
-            render_image_edit(
+            render = partial(
+                render_image_edit,
                 product,
                 source_ref,
                 f"{prompt} {extra_prompt}".strip(),
-                output_path,
                 settings=settings,
                 kie_model=kie_model,
                 cost_label=f"Imagem base: {prompt_key}",
             )
+            replace_with_new_version(product, kind, output_path, render)
         except Exception as exc:
             # Um estilo com falha não deve impedir que os demais estilos do
             # mesmo lote sejam tentados.
@@ -341,17 +349,19 @@ def regenerate_studio_image(
     source_ref = resolve_source_ref(product, cover, settings)
     final_prompt = " ".join(part.strip() for part in [prompt, store_extra_prompt, specific_extra_prompt] if part.strip())
 
-    render_image_edit(
+    kind = f"generated_{prompt_key}"
+    render = partial(
+        render_image_edit,
         product,
         source_ref,
         final_prompt,
-        output_path,
         settings=settings,
         kie_model=kie_model,
         cost_label=f"Recriação de imagem: {prompt_key}",
     )
+    replace_with_new_version(product, kind, output_path, render)
     public_url = upload_file_to_r2(output_path, r2_key_prefix(product), force=True)
-    return Asset(product_id=product.id, kind=f"generated_{prompt_key}", path=str(output_path), public_url=public_url)
+    return Asset(product_id=product.id, kind=kind, path=str(output_path), public_url=public_url)
 
 
 def regenerate_color_variation_with_kie(
@@ -379,17 +389,19 @@ def regenerate_color_variation_with_kie(
     output_path = output_dir / color_variation_filename(sku, source_prompt_key, color_name)
     source_ref = resolve_source_ref(product, source_asset, settings)
 
-    render_image_edit(
+    kind = f"color_{color_name}"
+    render = partial(
+        render_image_edit,
         product,
         source_ref,
         render_color_variation_prompt(color_prompt_template, color_desc, extra_prompt),
-        output_path,
         settings=settings,
         kie_model=kie_model,
         cost_label=f"Recriação de variação de cor: {color_name}",
     )
+    replace_with_new_version(product, kind, output_path, render)
     public_url = upload_file_to_r2(output_path, r2_key_prefix(product), force=True)
-    return Asset(product_id=product.id, kind=f"color_{color_name}", path=str(output_path), public_url=public_url)
+    return Asset(product_id=product.id, kind=kind, path=str(output_path), public_url=public_url)
 
 
 def generate_color_variations_with_kie(
@@ -399,8 +411,12 @@ def generate_color_variations_with_kie(
     color_prompt_template: str,
     extra_prompt: str = "",
     on_asset: Callable[[Asset], None] | None = None,
+    regenerate: bool = False,
 ) -> list[Asset]:
     """Gera as variações de cor selecionadas (uma por cor).
+
+    Com `regenerate`, cores que já têm imagem ganham uma nova versão e a atual fica
+    guardada como versão anterior; sem ele, são reaproveitadas.
 
     Igual a `generate_studio_images`, aceita `on_asset` para persistência
     incremental: cada variação concluída é entregue ao callback antes de seguir
@@ -428,7 +444,7 @@ def generate_color_variations_with_kie(
 
         output_path = output_dir / color_variation_filename(sku, source_prompt_key, color_name)
         kind = f"color_{color_name}"
-        if output_path.exists():
+        if output_path.exists() and not regenerate:
             public_url = upload_file_to_r2(output_path, r2_key_prefix(product), force=True)
             asset = Asset(
                 product_id=product.id,
@@ -441,15 +457,16 @@ def generate_color_variations_with_kie(
                 on_asset(asset)
             continue
 
-        render_image_edit(
+        render = partial(
+            render_image_edit,
             product,
             source_ref,
             render_color_variation_prompt(color_prompt_template, color_desc, extra_prompt),
-            output_path,
             settings=settings,
             kie_model=kie_model,
             cost_label=f"Variação de cor: {color_name}",
         )
+        replace_with_new_version(product, kind, output_path, render)
         public_url = upload_file_to_r2(output_path, r2_key_prefix(product), force=True)
         asset = Asset(product_id=product.id, kind=kind, path=str(output_path), public_url=public_url)
         created_assets.append(asset)

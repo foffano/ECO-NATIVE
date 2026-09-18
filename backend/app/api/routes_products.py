@@ -42,6 +42,7 @@ from backend.app.services.source_url_blacklist import block_product_source_url
 from backend.app.services.sku import ensure_color_skus, ensure_product_sku, variation_sku
 from backend.app.services.store_profiles import get_store_profile
 from backend.app.services.authorization import current_store_id, require_project, store_project_ids
+from backend.app.services.image_versions import replace_with_new_version
 
 router = APIRouter()
 
@@ -269,7 +270,11 @@ def download_product_files(product_id: str) -> FileResponse:
         raise HTTPException(status_code=404, detail="Produto nao encontrado")
 
     folder = product_folder(product)
-    files = [path for path in folder.rglob("*") if path.is_file()] if folder.exists() else []
+    # Dot-prefixed names are images still being generated.
+    files = [
+        path for path in folder.rglob("*")
+        if path.is_file() and not any(part.startswith(".") for part in path.relative_to(folder).parts)
+    ] if folder.exists() else []
     if not files:
         raise HTTPException(status_code=404, detail="Este produto ainda não possui arquivos locais")
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
@@ -437,21 +442,19 @@ async def upload_style_image(product_id: str, prompt_key: str, file: UploadFile 
     folder = product_folder(product)
     folder.mkdir(parents=True, exist_ok=True)
     output_path = folder / studio_image_filename(sku, prompt_key)
+    kind = f"generated_{prompt_key}"
+
+    def save_upload(path: Path) -> None:
+        with Image.open(io.BytesIO(content)) as image:
+            image.convert("RGB").save(path, format="PNG")
 
     try:
-        with Image.open(io.BytesIO(content)) as image:
-            image.convert("RGB").save(output_path, format="PNG")
+        replace_with_new_version(product, kind, output_path, save_upload)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Imagem invalida: {exc}") from exc
 
-    kind = f"generated_{prompt_key}"
-    asset = next((item for item in product.assets if item.kind == kind), None)
-    if asset:
-        asset.path = str(output_path)
-        asset.public_url = None
-    else:
-        asset = Asset(product_id=product.id, kind=kind, path=str(output_path))
-        product.assets.append(asset)
+    asset = Asset(product_id=product.id, kind=kind, path=str(output_path))
+    product.assets.append(asset)
 
     if r2_configured():
         try:

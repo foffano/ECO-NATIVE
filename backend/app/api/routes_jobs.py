@@ -38,6 +38,8 @@ class ProductJobRequest(BaseModel):
     product_id: str
     color_variations: list[str] = Field(default_factory=list)
     generate_base_images: bool = True
+    # New versions for images that already exist; the current ones are kept as previous versions.
+    regenerate: bool = False
 
 
 class RegenerateImageRequest(BaseModel):
@@ -158,7 +160,10 @@ def generate_images(payload: ProductJobRequest, request: Request) -> Job:
         product = require_product(state, payload.product_id, store_id)
 
         job = Job(type="generate_images", project_id=product.project_id, product_id=product.id)
-        return job_queue.submit(job, lambda: run_image_job(job, product, payload.color_variations, payload.generate_base_images))
+        return job_queue.submit(
+            job,
+            lambda: run_image_job(job, product, payload.color_variations, payload.generate_base_images, payload.regenerate),
+        )
 
 
 @router.post("/image-regenerate", status_code=202)
