@@ -47,8 +47,9 @@ class RegenerateImageRequest(BaseModel):
 
 
 class RemoteBrowserInput(BaseModel):
-    type: Literal["click", "move", "wheel", "text", "key", "select_page"]
+    type: Literal["click", "move", "wheel", "text", "key", "select_page", "navigate"]
     page_id: str | None = Field(default=None, max_length=32)
+    action: Literal["back", "reload", "home", "login"] | None = None
     x: float | None = Field(default=None, ge=0, le=1280)
     y: float | None = Field(default=None, ge=0, le=720)
     delta_x: float | None = Field(default=None, ge=-5000, le=5000)

@@ -5,6 +5,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any
+from urllib.parse import urlencode
 
 from playwright.sync_api import sync_playwright, Error as PlaywrightError
 
@@ -15,6 +16,19 @@ VIEWPORT_WIDTH = 1280
 VIEWPORT_HEIGHT = 720
 FRAME_INTERVAL_SECONDS = 0.45
 SESSION_IDLE_SECONDS = 30 * 60
+NAVIGATION_TIMEOUT_MS = 20_000
+# Downloads and 204 responses never reach DOMContentLoaded; stop showing them as loading.
+LOADING_MAX_SECONDS = 20
+# Same destination as MakerWorld's own login button. After Bambu Lab signs in,
+# the ticket redirect creates the MakerWorld session in this profile.
+MAKERWORLD_LOGIN_URL = "https://bambulab.com/pt-br/sign-in?" + urlencode({
+    "ticket": "1",
+    "to": "https://makerworld.com/api/sign-in/ticket?" + urlencode({"to": MAKERWORLD_HOME}),
+})
+CHALLENGE_MESSAGE = (
+    "Verificação de segurança da Cloudflare: marque a caixa “Verify you are human” "
+    "e aguarde alguns segundos. Se não avançar, use Recarregar."
+)
 
 
 @dataclass
@@ -27,14 +41,18 @@ class MakerWorldSessionStatus:
     height: int = VIEWPORT_HEIGHT
     pages: list[dict[str, str]] = field(default_factory=list)
     active_page_id: str | None = None
+    loading: bool = False
+    challenge: bool = False
 
 
 class BrowserPages:
     """Track popup lifetime independently of context.pages ordering."""
-    def __init__(self, context):
+    def __init__(self, context, on_loading_change=None):
         self.pages = {}
         self.active_id = None
         self._next_id = 0
+        self._navigations = {}
+        self._on_loading_change = on_loading_change or (lambda windows: None)
         context.on("page", self.add)
         for page in context.pages:
             self.add(page)
@@ -47,9 +65,36 @@ class BrowserPages:
         self.pages[key] = page
         self.active_id = key
         page.on("close", lambda _: self.remove(key))
+        # Events arrive during screenshots, so the panel shows the navigation before the new page paints.
+        page.on("request", lambda request: self._navigation_started(key, page, request))
+        page.on("requestfailed", lambda request: self._navigation_failed(key, request))
+        page.on("domcontentloaded", lambda _: self._navigation_finished(key))
+
+    def _navigation_started(self, key, page, request):
+        try:
+            if not request.is_navigation_request() or request.frame != page.main_frame:
+                return
+        except PlaywrightError:
+            return
+        self._navigations[key] = (request, time.monotonic())
+        self._on_loading_change(self)
+
+    def _navigation_failed(self, key, request):
+        navigation = self._navigations.get(key)
+        if navigation and navigation[0] is request:
+            self._navigation_finished(key)
+
+    def _navigation_finished(self, key):
+        if self._navigations.pop(key, None):
+            self._on_loading_change(self)
+
+    def is_loading(self, key):
+        navigation = self._navigations.get(key)
+        return bool(navigation) and time.monotonic() - navigation[1] < LOADING_MAX_SECONDS
 
     def remove(self, key):
         self.pages.pop(key, None)
+        self._navigations.pop(key, None)
         if self.active_id == key:
             self.active_id = next(reversed(self.pages), None)
 
@@ -78,6 +123,8 @@ class RemoteBrowserSession:
         self._open = False
         self._pages = []
         self._active_page_id = None
+        self._loading = False
+        self._challenge = False
         self._last_activity = time.monotonic()
         self._thread = threading.Thread(target=self._run, name=f"makerworld-{store_profile_id[:8]}", daemon=True)
 
@@ -91,9 +138,13 @@ class RemoteBrowserSession:
             error = self._error
             pages = list(self._pages)
             active_page_id = self._active_page_id
+            loading = is_open and self._loading
+            challenge = is_open and self._challenge
         configured = _configured(self.store_profile_id)
         if error:
             message = f"Falha no navegador MakerWorld: {error}"
+        elif challenge:
+            message = CHALLENGE_MESSAGE
         elif is_open:
             message = (
                 "Navegador MakerWorld oculto no servidor e disponível para controle remoto."
@@ -105,7 +156,8 @@ class RemoteBrowserSession:
         else:
             message = "Sessão MakerWorld ainda não configurada para esta loja."
         return MakerWorldSessionStatus(open=is_open, url=url, message=message, configured=configured,
-                                       pages=pages, active_page_id=active_page_id)
+                                       pages=pages, active_page_id=active_page_id,
+                                       loading=loading, challenge=challenge)
 
     def frame(self) -> bytes | None:
         with self._lock:
@@ -145,7 +197,22 @@ class RemoteBrowserSession:
             key = str(command.get("key", ""))[:80]
             if key:
                 page.keyboard.press(key)
+        elif kind == "navigate":
+            # Fixed destinations only: the panel must not turn the server browser into an open proxy.
+            action = command.get("action")
+            if action == "login":
+                page.goto(MAKERWORLD_LOGIN_URL, wait_until="commit", timeout=NAVIGATION_TIMEOUT_MS)
+            elif action == "home":
+                page.goto(MAKERWORLD_HOME, wait_until="commit", timeout=NAVIGATION_TIMEOUT_MS)
+            elif action == "back":
+                page.go_back(wait_until="commit", timeout=NAVIGATION_TIMEOUT_MS)
+            elif action == "reload":
+                page.reload(wait_until="commit", timeout=NAVIGATION_TIMEOUT_MS)
         return True
+
+    def _track_loading(self, windows: BrowserPages) -> None:
+        with self._lock:
+            self._loading = windows.is_loading(windows.active_id)
 
     def _run(self) -> None:
         try:
@@ -156,7 +223,7 @@ class RemoteBrowserSession:
                     store_profile_id=self.store_profile_id,
                     viewport={"width": VIEWPORT_WIDTH, "height": VIEWPORT_HEIGHT},
                 ))
-                windows = BrowserPages(context)
+                windows = BrowserPages(context, on_loading_change=self._track_loading)
                 page = windows.current() or context.new_page()
                 page.goto(os.getenv("ECO_NATIVE_MAKERWORLD_URL", MAKERWORLD_HOME), wait_until="domcontentloaded", timeout=60_000)
                 with self._lock:
@@ -199,13 +266,16 @@ class RemoteBrowserSession:
                         if page_id != self._active_page_id:
                             page.bring_to_front()
                         frame = page.screenshot(type="jpeg", quality=68, animations="disabled", timeout=5_000)
+                        challenge = _is_cloudflare_challenge(page)
                         with self._lock:
                             if windows.active_id == page_id and not page.is_closed():
                                 self._frame = frame
                                 self._url = page.url
                                 self._active_page_id = page_id
                                 self._error = None
+                                self._challenge = challenge
                             self._pages = windows.describe()
+                            self._loading = windows.is_loading(windows.active_id)
                         # Pump Playwright events while idle so popup/close events arrive.
                         page.wait_for_timeout(FRAME_INTERVAL_SECONDS * 1000)
                     except PlaywrightError as exc:
@@ -219,6 +289,14 @@ class RemoteBrowserSession:
         finally:
             with self._lock:
                 self._open = False
+
+
+def _is_cloudflare_challenge(page) -> bool:
+    # Cloudflare's interstitial defines this; MakerWorld pages do not.
+    try:
+        return bool(page.evaluate("() => Boolean(window._cf_chl_opt)"))
+    except PlaywrightError:
+        return False
 
 
 _sessions: dict[str, RemoteBrowserSession] = {}

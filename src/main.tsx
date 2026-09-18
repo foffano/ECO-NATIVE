@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { createPortal } from "react-dom";
 import { createRoot } from "react-dom/client";
 import {
+  ArrowLeft,
   BadgeCheck,
   BarChart3,
   BrainCircuit,
@@ -12,6 +13,7 @@ import {
   FolderOpen,
   FolderPlus,
   Gauge,
+  House,
   Link2,
   LogIn,
   LogOut,
@@ -309,6 +311,8 @@ type MakerWorldLoginStatus = {
   remote_control?: boolean;
   width?: number;
   height?: number;
+  loading?: boolean;
+  challenge?: boolean;
 };
 
 type StoreProfile = {
@@ -3242,6 +3246,7 @@ function MakerWorldRemoteBrowser({
   const [frameReady, setFrameReady] = useState(false);
   const [liveStatus, setLiveStatus] = useState(status);
   const [inputError, setInputError] = useState("");
+  const frameRef = useRef<HTMLImageElement>(null);
   const viewportWidth = liveStatus?.width || 1280;
   const viewportHeight = liveStatus?.height || 720;
 
@@ -3273,7 +3278,8 @@ function MakerWorldRemoteBrowser({
   }
 
   function point(event: React.MouseEvent<HTMLDivElement>) {
-    const rect = event.currentTarget.getBoundingClientRect();
+    // Measure the drawn frame itself so layout changes cannot shift clicks away from what the user sees.
+    const rect = (frameRef.current ?? event.currentTarget).getBoundingClientRect();
     const scale = Math.min(rect.width / viewportWidth, rect.height / viewportHeight);
     const renderedWidth = viewportWidth * scale;
     const renderedHeight = viewportHeight * scale;
@@ -3305,7 +3311,10 @@ function MakerWorldRemoteBrowser({
         <header className="remote-browser-toolbar">
           <div>
             <strong>MakerWorld · navegador local</strong>
-            <span>{liveStatus?.url || liveStatus?.message || "Iniciando Chromium no PC..."}</span>
+            <span>
+              {liveStatus?.loading && <Loader2 className="spin" size={12} aria-label="Carregando página" />}
+              {liveStatus?.url || liveStatus?.message || "Iniciando Chromium no PC..."}
+            </span>
             {!!liveStatus?.pages?.length && (
               <label>Janela: <select
                 aria-label="Janela do navegador"
@@ -3319,6 +3328,18 @@ function MakerWorldRemoteBrowser({
             )}
           </div>
           <div className="remote-browser-actions">
+            <button className="primary ghost" title="Voltar" aria-label="Voltar" onClick={() => sendInput({ type: "navigate", action: "back" })}>
+              <ArrowLeft size={16} />
+            </button>
+            <button className="primary ghost" title="Recarregar" aria-label="Recarregar" onClick={() => sendInput({ type: "navigate", action: "reload" })}>
+              <RefreshCw size={16} />
+            </button>
+            <button className="primary ghost" title="Página inicial do MakerWorld" aria-label="Página inicial do MakerWorld" onClick={() => sendInput({ type: "navigate", action: "home" })}>
+              <House size={16} />
+            </button>
+            <button className="primary ghost" title="Abre a página de login da Bambu Lab, que volta ao MakerWorld após entrar" onClick={() => sendInput({ type: "navigate", action: "login" })}>
+              <LogIn size={16} /> Tela de login
+            </button>
             <button className="primary ghost" onClick={onCloseViewer}>Ocultar</button>
             <button className="primary" onClick={onFinish}>Concluir e salvar sessão</button>
           </div>
@@ -3343,13 +3364,16 @@ function MakerWorldRemoteBrowser({
         >
           {!frameReady && <div className="remote-browser-loading"><Loader2 className="spin" size={28} /> Aguardando imagem do navegador...</div>}
           <img
+            ref={frameRef}
             src={`${API_BASE}/api/jobs/makerworld-login/frame?t=${frameNonce}`}
             alt="Tela interativa do MakerWorld"
             draggable={false}
             onLoad={() => setFrameReady(true)}
           />
         </div>
-        <footer className="remote-browser-help">{inputError || liveStatus?.message} · Novas janelas aparecem automaticamente. Use “Janela” para alternar entre elas.</footer>
+        <footer className={liveStatus?.challenge ? "remote-browser-help attention" : "remote-browser-help"}>
+          {inputError || liveStatus?.message} · Novas janelas aparecem automaticamente. Use “Janela” para alternar entre elas.
+        </footer>
       </section>
     </div>
   );

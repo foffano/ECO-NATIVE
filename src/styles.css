@@ -177,11 +177,14 @@ body {
 .remote-browser-toolbar > div:first-child { min-width: 0; display: grid; gap: 3px; }
 .remote-browser-toolbar span { overflow: hidden; color: var(--eco-sidebar-text-muted); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
 .remote-browser-actions { display: flex; gap: 8px; flex-shrink: 0; }
-.remote-browser-viewport { position: relative; min-height: 0; display: grid; place-items: center; overflow: hidden; outline: none; background: #151b17; cursor: default; }
+.remote-browser-viewport { position: relative; min-height: 0; overflow: hidden; outline: none; background: #151b17; cursor: default; }
 .remote-browser-viewport:focus { box-shadow: inset 0 0 0 2px var(--eco-green); }
-.remote-browser-viewport img { display: block; width: 100%; height: 100%; object-fit: contain; user-select: none; }
+/* Absolute sizing keeps the whole frame inside the viewport; a grid item grew to the image's aspect ratio and was clipped. */
+.remote-browser-viewport img { position: absolute; inset: 0; display: block; width: 100%; height: 100%; object-fit: contain; user-select: none; }
 .remote-browser-loading { position: absolute; inset: 0; z-index: 1; display: flex; align-items: center; justify-content: center; gap: 10px; color: var(--eco-sidebar-text); background: #151b17; }
+.remote-browser-toolbar span .spin { margin-right: 6px; vertical-align: -2px; }
 .remote-browser-help { padding: 9px 16px; color: var(--eco-sidebar-text-muted); background: var(--eco-forest); font-size: 12px; text-align: center; }
+.remote-browser-help.attention { color: var(--eco-on-sidebar); font-weight: 700; }
 
 button,
 input,
