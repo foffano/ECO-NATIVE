@@ -4,6 +4,8 @@ from collections.abc import Callable
 from pathlib import Path
 from urllib.parse import quote
 
+from PIL import Image
+
 from backend.app.core.settings import AppSettings, get_settings
 from backend.app.db.models import Asset, Product
 from backend.app.services.cloudflare_r2 import upload_file_to_r2
@@ -11,6 +13,7 @@ from backend.app.services.codex_image import edit_image_with_codex
 from backend.app.services.cost_tracker import add_kie_image_cost
 from backend.app.services.cover_image import cover_r2_public_url, ensure_product_cover
 from backend.app.services.http_client import HttpResponseError, download as http_download, read_response_json, read_response_text, request as http_request
+from backend.app.services.image_models import DEFAULT_IMAGE_MODEL, get_image_model
 from backend.app.services.image_options import color_description_map
 from backend.app.services.product_paths import (
     color_variation_filename,
@@ -111,6 +114,7 @@ def render_image_edit(
             task_id = create_kie_task(prompt, source_ref, settings.kie_api_key, kie_model)
             result_url = poll_kie_task(task_id, settings.kie_api_key)
             download_url(result_url, output_path)
+            save_as_png(output_path)
             # Só contabilizamos uma imagem depois que o provedor concluiu e o
             # arquivo foi baixado. Tasks que terminam em erro não viram custo
             # de imagem gerada no painel.
@@ -146,28 +150,19 @@ def _is_retryable_kie_error(exc: Exception) -> bool:
     )
 
 
-def create_kie_task(prompt: str, image_url: str, api_key: str, model: str = "qwen/image-edit") -> str:
+def create_kie_task(prompt: str, image_url: str, api_key: str, model: str = DEFAULT_IMAGE_MODEL) -> str:
+    image_model = get_image_model(model)
+    if len(prompt) > image_model.max_prompt_chars:
+        raise RuntimeError(
+            f"O prompt tem {len(prompt)} caracteres; o limite do {image_model.label} é {image_model.max_prompt_chars}."
+        )
     # Conta como "new generation request" na Kie (limite 20/10s). Throttle global.
     kie_generation_limiter.acquire()
     response = http_request(
         "POST",
         "https://api.kie.ai/api/v1/jobs/createTask",
         headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-        json={
-            "model": model,
-            "input": {
-                "prompt": prompt,
-                "image_url": image_url,
-                "acceleration": "none",
-                "image_size": "square",
-                "num_inference_steps": 25,
-                "guidance_scale": 4,
-                "sync_mode": False,
-                "enable_safety_checker": True,
-                "output_format": "png",
-                "negative_prompt": "blurry, ugly",
-            },
-        },
+        json={"model": image_model.id, "input": image_model.build_input(prompt, image_url)},
         timeout=40,
     )
     try:
@@ -225,6 +220,17 @@ def poll_kie_task(task_id: str, api_key: str, max_wait_seconds: int = 300) -> st
     raise RuntimeError("Timeout aguardando task Kie.ai.")
 
 
+def save_as_png(path: Path) -> None:
+    """Nano Banana answers in JPEG even when asked for PNG; generated images are named .png."""
+    if path.suffix.lower() != ".png":
+        return
+    with Image.open(path) as image:
+        if image.format == "PNG":
+            return
+        converted = image.convert("RGB")
+    converted.save(path, format="PNG")
+
+
 def download_url(url: str, output_path: Path) -> None:
     try:
         http_download(url, output_path, timeout=60)
@@ -250,7 +256,7 @@ def generate_studio_images(
     settings = get_settings()
     if not settings.use_codex_image_gen and not settings.kie_api_key:
         raise RuntimeError("KIE_API_KEY nao configurada.")
-    kie_model = settings.kie_image_model or "qwen/image-edit"
+    kie_model = settings.kie_image_model or DEFAULT_IMAGE_MODEL
     cover = next((asset for asset in product.assets if asset.kind == "cover_image"), None)
     if not cover:
         raise RuntimeError("Produto sem imagem base capturada.")
@@ -320,7 +326,7 @@ def regenerate_studio_image(
     settings = get_settings()
     if not settings.use_codex_image_gen and not settings.kie_api_key:
         raise RuntimeError("KIE_API_KEY nao configurada.")
-    kie_model = settings.kie_image_model or "qwen/image-edit"
+    kie_model = settings.kie_image_model or DEFAULT_IMAGE_MODEL
     cover = next((asset for asset in product.assets if asset.kind == "cover_image"), None)
     if not cover:
         raise RuntimeError("Produto sem imagem base capturada.")
@@ -358,7 +364,7 @@ def regenerate_color_variation_with_kie(
     settings = get_settings()
     if not settings.use_codex_image_gen and not settings.kie_api_key:
         raise RuntimeError("KIE_API_KEY nao configurada.")
-    kie_model = settings.kie_image_model or "qwen/image-edit"
+    kie_model = settings.kie_image_model or DEFAULT_IMAGE_MODEL
 
     color_desc = color_description_map().get(color_name)
     if not color_desc:
@@ -404,7 +410,7 @@ def generate_color_variations_with_kie(
     settings = get_settings()
     if not settings.use_codex_image_gen and not settings.kie_api_key:
         raise RuntimeError("KIE_API_KEY nao configurada.")
-    kie_model = settings.kie_image_model or "qwen/image-edit"
+    kie_model = settings.kie_image_model or DEFAULT_IMAGE_MODEL
 
     sku = product_sku(product)
     if not sku:

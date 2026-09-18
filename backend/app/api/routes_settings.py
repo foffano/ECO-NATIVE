@@ -1,8 +1,9 @@
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 from backend.app.core.settings import get_settings, set_env_values
 from backend.app.services.authorization import require_admin
+from backend.app.services.image_models import IMAGE_MODELS, image_model_options
 
 router = APIRouter()
 
@@ -30,6 +31,7 @@ def read_settings() -> dict[str, object]:
             "openrouter_model": settings.openrouter_model,
             "kie_ai": bool(settings.kie_api_key),
             "kie_image_model": settings.kie_image_model,
+            "image_models": image_model_options(),
             "codex_image_gen": settings.use_codex_image_gen,
             "codex_bin": settings.codex_bin,
             "cloudflare_r2": bool(
@@ -72,6 +74,9 @@ def update_settings(payload: SettingsUpdate, request: Request) -> dict[str, obje
     if payload.kie_api_key:
         values["KIE_API_KEY"] = payload.kie_api_key
     if payload.kie_image_model:
+        # Each model needs its own request format, so only models the app knows are accepted.
+        if payload.kie_image_model not in IMAGE_MODELS:
+            raise HTTPException(422, f"Modelo de imagem não suportado: {payload.kie_image_model}")
         values["KIE_IMAGE_MODEL"] = payload.kie_image_model
     if payload.use_codex_image_gen is not None:
         values["USE_CODEX_IMAGE_GEN"] = "true" if payload.use_codex_image_gen else "false"

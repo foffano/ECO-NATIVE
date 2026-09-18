@@ -245,12 +245,20 @@ type Job = {
   metadata?: Record<string, unknown>;
 };
 
+type ImageModelOption = {
+  id: string;
+  label: string;
+  description: string;
+  cost_usd: number;
+};
+
 type SettingsPayload = {
   integrations: {
     openrouter: boolean;
     openrouter_model?: string;
     kie_ai: boolean;
     kie_image_model?: string;
+    image_models?: ImageModelOption[];
     codex_image_gen: boolean;
     codex_bin?: string | null;
     cloudflare_r2: boolean;
@@ -2521,11 +2529,11 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
   function generateImages(productId = selectedProduct?.id) {
     if (!productId) return Promise.resolve();
     if (!settings?.integrations.kie_ai) {
-      setNotice("Configure KIE_API_KEY em Ajustes para gerar imagens com Kie.ai/Qwen.");
+      setNotice("Configure KIE_API_KEY em Ajustes para gerar imagens com Kie.ai.");
       return Promise.resolve();
     }
     if (!settings?.integrations.cloudflare_r2) {
-      setNotice("Configure Cloudflare R2 em Ajustes para salvar imagens permanentes e enviar URLs ao Kie.ai/Qwen.");
+      setNotice("Configure Cloudflare R2 em Ajustes para salvar imagens permanentes e enviar URLs ao Kie.ai.");
       return Promise.resolve();
     }
     return runAction("Gerando imagens base", () =>
@@ -2548,7 +2556,7 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
   function generateColorVariations(productId = selectedProduct?.id, colorVariations = selectedColorVariations) {
     if (!productId || !colorVariations.length) return Promise.resolve();
     if (!settings?.integrations.kie_ai) {
-      setNotice("Configure KIE_API_KEY em Ajustes para gerar variações de cor com Kie.ai/Qwen.");
+      setNotice("Configure KIE_API_KEY em Ajustes para gerar variações de cor com Kie.ai.");
       return Promise.resolve();
     }
     if (!settings?.integrations.cloudflare_r2) {
@@ -2575,7 +2583,7 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
 
   function regenerateImage(productId: string, promptKey: string, extraPrompt: string) {
     if (!settings?.integrations.kie_ai) {
-      setNotice("Configure KIE_API_KEY em Ajustes para recriar imagens com Kie.ai/Qwen.");
+      setNotice("Configure KIE_API_KEY em Ajustes para recriar imagens com Kie.ai.");
       return Promise.resolve();
     }
     if (!settings?.integrations.cloudflare_r2) {
@@ -2898,11 +2906,11 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
 
   function generateImagesBatch(productIds = selectedProductIds) {
     if (!settings?.integrations.kie_ai) {
-      setNotice("Configure KIE_API_KEY em Ajustes para gerar imagens com Kie.ai/Qwen.");
+      setNotice("Configure KIE_API_KEY em Ajustes para gerar imagens com Kie.ai.");
       return Promise.resolve();
     }
     if (!settings?.integrations.cloudflare_r2) {
-      setNotice("Configure Cloudflare R2 em Ajustes para salvar imagens permanentes e enviar URLs ao Kie.ai/Qwen.");
+      setNotice("Configure Cloudflare R2 em Ajustes para salvar imagens permanentes e enviar URLs ao Kie.ai.");
       return Promise.resolve();
     }
     return runBatchProductAction(
@@ -3223,6 +3231,7 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
           storeProfile={activeStoreProfile}
           openRouterModel={openRouterModelDraft}
           kieImageModel={kieImageModelDraft}
+          imageModels={settings?.integrations.image_models ?? []}
           onFinish={finishOnboarding}
           onSkip={skipOnboarding}
         />
@@ -3514,9 +3523,36 @@ function ConfirmModal({
   );
 }
 
+// Only models the backend knows how to call can be chosen: each one needs its own request format.
+function ImageModelSelect({
+  value,
+  models,
+  onChange,
+}: {
+  value: string;
+  models: ImageModelOption[];
+  onChange: (value: string) => void;
+}) {
+  const selected = models.find((model) => model.id === value);
+  return (
+    <>
+      <select value={value} onChange={(event) => onChange(event.target.value)}>
+        {!selected && value && <option value={value}>{models.length ? `${value} (não suportado)` : value}</option>}
+        {models.map((model) => (
+          <option key={model.id} value={model.id}>
+            {model.label} · ~US$ {model.cost_usd.toLocaleString("pt-BR", { minimumFractionDigits: 2 })} por imagem
+          </option>
+        ))}
+      </select>
+      {selected && <small>{selected.description}</small>}
+    </>
+  );
+}
+
 function OnboardingModal({
   busy,
   kieImageModel,
+  imageModels,
   openRouterModel,
   storeProfile,
   onFinish,
@@ -3524,6 +3560,7 @@ function OnboardingModal({
 }: {
   busy: boolean;
   kieImageModel: string;
+  imageModels: ImageModelOption[];
   openRouterModel: string;
   storeProfile?: StoreProfile;
   onFinish: (payload: OnboardingPayload) => Promise<unknown>;
@@ -3625,7 +3662,7 @@ function OnboardingModal({
             </label>
             <label>
               Modelo de imagem Kie
-              <input value={kieImageModelValue} onChange={(event) => setKieImageModelValue(event.target.value)} />
+              <ImageModelSelect value={kieImageModelValue} models={imageModels} onChange={setKieImageModelValue} />
             </label>
           </section>
 
@@ -7913,11 +7950,10 @@ function SettingsTab({
                 </label>
                 <label>
                   Modelo de imagem Kie
-                  <small>Modelo enviado no campo model da API Kie. Padrão atual: qwen/image-edit.</small>
-                  <input
+                  <ImageModelSelect
                     value={kieImageModelDraft}
-                    onChange={(event) => onKieImageModelChange(event.target.value)}
-                    placeholder={settings?.integrations.kie_image_model || "qwen/image-edit"}
+                    models={settings?.integrations.image_models ?? []}
+                    onChange={onKieImageModelChange}
                   />
                 </label>
               </section>
@@ -8087,7 +8123,12 @@ function AdminConsole({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Pr
   }
 
   async function saveIntegrations() {
-    await api("/api/settings", { method: "PATCH", body: JSON.stringify(secrets) });
+    try {
+      await api("/api/settings", { method: "PATCH", body: JSON.stringify(secrets) });
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : String(error));
+      return;
+    }
     setNotice("Integrações atualizadas.");
     await reload();
   }
@@ -8188,7 +8229,7 @@ function AdminConsole({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Pr
             <label>OpenRouter API key<input type="password" value={secrets.openrouter_api_key ?? ""} onChange={(e) => setSecrets({ ...secrets, openrouter_api_key: e.target.value })} /></label>
             <label>Modelo OpenRouter<input value={secrets.openrouter_model ?? ""} onChange={(e) => setSecrets({ ...secrets, openrouter_model: e.target.value })} /></label>
             <label>Kie API key<input type="password" value={secrets.kie_api_key ?? ""} onChange={(e) => setSecrets({ ...secrets, kie_api_key: e.target.value })} /></label>
-            <label>Modelo Kie<input value={secrets.kie_image_model ?? ""} onChange={(e) => setSecrets({ ...secrets, kie_image_model: e.target.value })} /></label>
+            <label>Modelo Kie<ImageModelSelect value={secrets.kie_image_model ?? ""} models={settings?.integrations.image_models ?? []} onChange={(value) => setSecrets({ ...secrets, kie_image_model: value })} /></label>
             <label>R2 Account ID<input value={secrets.cloudflare_account_id ?? ""} onChange={(e) => setSecrets({ ...secrets, cloudflare_account_id: e.target.value })} /></label>
             <label>R2 Bucket<input value={secrets.cloudflare_r2_bucket_name ?? ""} onChange={(e) => setSecrets({ ...secrets, cloudflare_r2_bucket_name: e.target.value })} /></label>
             <label>R2 Access key<input type="password" value={secrets.cloudflare_r2_access_key ?? ""} onChange={(e) => setSecrets({ ...secrets, cloudflare_r2_access_key: e.target.value })} /></label>

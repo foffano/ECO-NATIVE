@@ -2,6 +2,7 @@ import os
 from typing import Any
 
 from backend.app.db.models import Product, now_iso
+from backend.app.services.image_models import DEFAULT_IMAGE_MODEL, IMAGE_MODELS
 
 
 def _float_env(name: str, default: float) -> float:
@@ -11,8 +12,10 @@ def _float_env(name: str, default: float) -> float:
         return default
 
 
-def kie_image_cost_usd() -> float:
-    return _float_env("KIE_IMAGE_COST_USD", 0.01)
+def kie_image_cost_usd(model: str = DEFAULT_IMAGE_MODEL) -> float:
+    # KIE_IMAGE_COST_USD, when set, still overrides the model's estimate.
+    known = IMAGE_MODELS.get(model) or IMAGE_MODELS[DEFAULT_IMAGE_MODEL]
+    return _float_env("KIE_IMAGE_COST_USD", known.cost_usd)
 
 
 def estimate_openrouter_cost(prompt_tokens: int = 0, completion_tokens: int = 0) -> float:
@@ -74,16 +77,18 @@ def add_openrouter_cost(product: Product, action: str, result) -> dict[str, Any]
     )
 
 
-def add_kie_image_cost(product: Product, action: str, model: str = "qwen/image-edit", units: int = 1) -> dict[str, Any]:
+def add_kie_image_cost(product: Product, action: str, model: str = DEFAULT_IMAGE_MODEL, units: int = 1) -> dict[str, Any]:
+    unit_cost = kie_image_cost_usd(model)
     return add_cost_event(
         product,
         provider="Kie.ai",
         action=action,
         model=model,
-        cost_usd=kie_image_cost_usd() * units,
+        cost_usd=unit_cost * units,
         source="estimated_env",
         units=units,
-        metadata={"unit_cost_usd": kie_image_cost_usd(), "credits_per_image": 2, "usd_per_1000_credits": 5},
+        # Kie.ai sells credits at US$ 5 per 1000.
+        metadata={"unit_cost_usd": unit_cost, "credits_per_image": round(unit_cost / 0.005), "usd_per_1000_credits": 5},
     )
 
 
