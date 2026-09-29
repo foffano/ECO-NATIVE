@@ -263,6 +263,7 @@ type SettingsPayload = {
     codex_image_gen: boolean;
     codex_bin?: string | null;
     cloudflare_r2: boolean;
+    mercado_livre?: boolean;
   };
 };
 
@@ -277,6 +278,9 @@ type SettingsSecrets = {
   cloudflare_r2_access_key?: string | null;
   cloudflare_r2_secret_key?: string | null;
   cloudflare_r2_public_url?: string | null;
+  mercadolivre_app_id?: string | null;
+  mercadolivre_client_secret?: string | null;
+  mercadolivre_redirect_uri?: string | null;
 };
 
 type RuntimeStatus = {
@@ -1764,6 +1768,23 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
   const [filaments, setFilaments] = useState<FilamentSpool[]>([]);
   const [productionSettings, setProductionSettings] = useState<ProductionSettings | null>(null);
 
+  // Mercado Livre sends the seller back here after the OAuth consent screen.
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const result = params.get("mercadolivre");
+    if (!result) return;
+    const messages: Record<string, string> = {
+      connected: "Conta do Mercado Livre conectada. Publique pela aba Anúncio de cada produto.",
+      denied: "A conexão com o Mercado Livre foi cancelada.",
+      error: "Não foi possível conectar ao Mercado Livre. Tente novamente.",
+    };
+    setNotice(messages[result] ?? messages.error);
+    setActiveTab("settings");
+    params.delete("mercadolivre");
+    const query = params.toString();
+    window.history.replaceState(null, "", `${window.location.pathname}${query ? `?${query}` : ""}${window.location.hash}`);
+  }, []);
+
   const activeStoreProfile = storeProfiles.find((profile) => profile.id === activeStoreProfileId) ?? storeProfiles[0];
   const activeStoreProjects = useMemo(() => {
     if (!activeStoreProfile) return [];
@@ -3207,6 +3228,7 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
             onSelectProduct={setSelectedProductId}
             projects={activeStoreProjects}
             onSelectProject={selectProject}
+            onProductsChanged={() => void refreshProducts()}
           />
         )}
 
@@ -4963,6 +4985,7 @@ function ProductsTab({
   onSelectProduct,
   projects,
   onSelectProject,
+  onProductsChanged,
 }: {
   activeProject?: Project;
   batchProgress: BatchProgress;
@@ -5015,8 +5038,10 @@ function ProductsTab({
   onSelectProduct: (id: string) => void;
   projects: Project[];
   onSelectProject: (projectId: string) => void;
+  onProductsChanged: () => void;
 }) {
   const [fullscreenAsset, setFullscreenAsset] = useState<Asset | null>(null);
+  const [mercadoLivreOpen, setMercadoLivreOpen] = useState(false);
   const [imageExtraPrompts, setImageExtraPrompts] = useState<Record<string, string>>({});
   const [costDetailsOpen, setCostDetailsOpen] = useState(false);
   const [colorDialogOpen, setColorDialogOpen] = useState(false);
@@ -5375,6 +5400,9 @@ function ProductsTab({
                 <button onClick={onApproveProduct} disabled={busy || !listingDraft?.title || !listingDraft?.description}>
                   <BadgeCheck size={16} /> Aprovar
                 </button>
+                <button onClick={() => setMercadoLivreOpen(true)} disabled={busy || !listingDraft?.title}>
+                  <ShoppingBag size={16} /> {mercadoLivrePublished(selectedProduct).length ? "No Mercado Livre" : "Mercado Livre"}
+                </button>
               </div>
             </div>
 
@@ -5648,6 +5676,13 @@ function ProductsTab({
         )}
           </div>
         </div>
+      )}
+      {mercadoLivreOpen && selectedProduct && (
+        <MercadoLivrePublishModal
+          product={selectedProduct}
+          onClose={() => setMercadoLivreOpen(false)}
+          onPublished={onProductsChanged}
+        />
       )}
       {fullscreenAsset && (
         <div className="image-fullscreen-backdrop" onClick={() => setFullscreenAsset(null)}>
@@ -7572,6 +7607,7 @@ function SettingsTab({
             </div>
           ))}
         </div>
+        <MercadoLivreConnection />
         {isAdmin && (
           <button className="primary profile-create-button" onClick={() => setNewStoreOpen(true)}>
             <FolderPlus size={18} /> Criar perfil de loja
@@ -8148,6 +8184,389 @@ function SettingsTab({
   );
 }
 
+type MercadoLivreStatus = {
+  configured: boolean;
+  connected: boolean;
+  nickname?: string | null;
+  user_product_seller: boolean;
+  redirect_uri: string;
+};
+
+type MercadoLivreAttribute = {
+  id: string;
+  name: string;
+  value_type: string;
+  values: { id?: string | null; name: string }[];
+  allowed_units: string[];
+  default_unit?: string | null;
+  required: boolean;
+  hint: string;
+};
+
+type MercadoLivreSuggestion = {
+  category_id: string;
+  category_name: string;
+  domain_name: string;
+  remembered?: boolean;
+};
+
+type MercadoLivrePublishedItem = { id: string; permalink?: string; status?: string; color?: string; title?: string };
+
+type MercadoLivreDraft = {
+  connection: { nickname?: string | null; user_product_seller: boolean };
+  query: string;
+  suggestions: MercadoLivreSuggestion[];
+  category: {
+    category_id: string;
+    category_name: string;
+    path: string;
+    listing_allowed: boolean;
+    max_title_length: number;
+    attributes: MercadoLivreAttribute[];
+  } | null;
+  values: Record<string, string>;
+  missing_required: string[];
+  family_name: string;
+  price: string;
+  quantity: number;
+  listing_type_id: string;
+  listing_types: Record<string, string>;
+  warranty_time: string;
+  colors: string[];
+  image_count: number;
+  r2_configured: boolean;
+  published: MercadoLivrePublishedItem[];
+};
+
+const MERCADO_LIVRE_STATUS: Record<string, string> = {
+  active: "ativo",
+  paused: "pausado",
+  under_review: "em revisão",
+  inactive: "inativo",
+  closed: "finalizado",
+};
+
+function mercadoLivrePublished(product?: Product): MercadoLivrePublishedItem[] {
+  const record = product?.metadata?.mercado_livre as { items?: MercadoLivrePublishedItem[] } | undefined;
+  return Array.isArray(record?.items) ? record.items : [];
+}
+
+function MercadoLivreConnection() {
+  const [status, setStatus] = useState<MercadoLivreStatus | null>(null);
+  const [error, setError] = useState("");
+  const [working, setWorking] = useState(false);
+
+  const load = useCallback(async () => {
+    try {
+      setStatus(await api<MercadoLivreStatus>("/api/integrations/mercado-livre/status"));
+    } catch (loadError) {
+      setError(loadError instanceof Error ? loadError.message : String(loadError));
+    }
+  }, []);
+
+  useEffect(() => { void load(); }, [load]);
+
+  async function connect() {
+    setWorking(true);
+    setError("");
+    try {
+      const { url } = await api<{ url: string }>("/api/integrations/mercado-livre/connect", { method: "POST" });
+      window.location.assign(url);
+    } catch (connectError) {
+      setError(connectError instanceof Error ? connectError.message : String(connectError));
+      setWorking(false);
+    }
+  }
+
+  async function disconnect() {
+    setWorking(true);
+    try {
+      await api("/api/integrations/mercado-livre/connection", { method: "DELETE" });
+      await load();
+    } finally {
+      setWorking(false);
+    }
+  }
+
+  return (
+    <div className="marketplace-connection">
+      <div>
+        <strong>Mercado Livre</strong>
+        <small>
+          {!status
+            ? "Verificando conexão..."
+            : !status.configured
+              ? "O administrador precisa cadastrar o App ID e a chave secreta do Mercado Livre."
+              : status.connected
+                ? `Conectado como ${status.nickname ?? "vendedor"}. Os produtos podem ser publicados pela aba Anúncio.`
+                : "Conecte a conta de vendedor desta loja para publicar anúncios direto do app."}
+        </small>
+        {error && <small className="marketplace-error">{error}</small>}
+      </div>
+      {status?.configured && (status.connected ? (
+        <button className="quiet-button" onClick={() => void disconnect()} disabled={working}>Desconectar</button>
+      ) : (
+        <button className="primary" onClick={() => void connect()} disabled={working}>
+          <Link2 size={16} /> Conectar conta
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function MercadoLivrePublishModal({
+  product,
+  onClose,
+  onPublished,
+}: {
+  product: Product;
+  onClose: () => void;
+  onPublished: () => void;
+}) {
+  const [draft, setDraft] = useState<MercadoLivreDraft | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [search, setSearch] = useState("");
+  const [values, setValues] = useState<Record<string, string>>({});
+  const [familyName, setFamilyName] = useState("");
+  const [price, setPrice] = useState("");
+  const [quantity, setQuantity] = useState(10);
+  const [listingType, setListingType] = useState("gold_special");
+  const [warranty, setWarranty] = useState("90 dias");
+  const [publishColors, setPublishColors] = useState(true);
+  const [publishing, setPublishing] = useState(false);
+  const [published, setPublished] = useState<MercadoLivrePublishedItem[]>(mercadoLivrePublished(product));
+  const [warnings, setWarnings] = useState<string[]>([]);
+
+  const load = useCallback(async (options: { categoryId?: string; query?: string; initial?: boolean } = {}) => {
+    setLoading(true);
+    setError("");
+    const params = new URLSearchParams();
+    if (options.categoryId) params.set("category_id", options.categoryId);
+    if (options.query) params.set("q", options.query);
+    try {
+      const next = await api<MercadoLivreDraft>(`/api/integrations/mercado-livre/products/${product.id}/draft?${params}`);
+      setDraft(next);
+      setValues(next.values);
+      if (options.initial) {
+        setSearch(next.query);
+        setFamilyName(next.family_name);
+        setPrice(next.price);
+        setQuantity(next.quantity);
+        setListingType(next.listing_type_id);
+        setWarranty(next.warranty_time);
+        if (next.published.length) setPublished(next.published);
+      }
+    } catch (loadError) {
+      setError(loadError instanceof Error ? loadError.message : String(loadError));
+    } finally {
+      setLoading(false);
+    }
+  }, [product.id]);
+
+  useEffect(() => { void load({ initial: true }); }, [load]);
+
+  const category = draft?.category ?? null;
+  const maxTitle = category?.max_title_length ?? 60;
+  const missing = (category?.attributes ?? []).filter((attribute) => {
+    if (!attribute.required || values[attribute.id]?.trim()) return false;
+    return !(attribute.id === "GTIN" && values.EMPTY_GTIN_REASON?.trim());
+  });
+  const canPublish = Boolean(
+    category && category.listing_allowed && !missing.length && familyName.trim() && price.trim() &&
+    draft?.r2_configured && draft.image_count > 0 && familyName.length <= maxTitle,
+  );
+  const colorCount = publishColors ? draft?.colors.length ?? 0 : 0;
+
+  async function publish() {
+    if (!category) return;
+    setPublishing(true);
+    setError("");
+    try {
+      const result = await api<{ items: MercadoLivrePublishedItem[]; warnings: string[] }>(
+        `/api/integrations/mercado-livre/products/${product.id}/publish`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            category_id: category.category_id,
+            listing_type_id: listingType,
+            family_name: familyName.trim(),
+            price,
+            quantity,
+            warranty_time: warranty,
+            attributes: values,
+            publish_colors: publishColors,
+          }),
+        },
+      );
+      setPublished(result.items);
+      setWarnings(result.warnings);
+      onPublished();
+    } catch (publishError) {
+      setError(publishError instanceof Error ? publishError.message : String(publishError));
+      onPublished();
+    } finally {
+      setPublishing(false);
+    }
+  }
+
+  // Portal: the product details panel creates its own stacking context.
+  return createPortal(
+    <div className="confirm-backdrop" role="presentation" onClick={onClose}>
+      <div className="ml-publish-dialog" role="dialog" aria-modal="true" aria-labelledby="ml-publish-title" onClick={(event) => event.stopPropagation()}>
+        <div className="ml-publish-header">
+          <div>
+            <p className="eyebrow">Mercado Livre{draft?.connection.nickname ? ` · ${draft.connection.nickname}` : ""}</p>
+            <h2 id="ml-publish-title">{published.length ? "Anúncio publicado" : "Publicar anúncio"}</h2>
+          </div>
+          <button className="close-button" onClick={onClose}>Fechar</button>
+        </div>
+
+        {error && <p className="notice ml-publish-error">{error}</p>}
+
+        {published.length > 0 ? (
+          <div className="ml-publish-body">
+            <p className="settings-note">Este produto já está no Mercado Livre. Alterações de preço e estoque são feitas pelo painel do Mercado Livre.</p>
+            <ul className="ml-published-list">
+              {published.map((item) => (
+                <li key={item.id}>
+                  <div>
+                    <strong>{item.color || item.title || item.id}</strong>
+                    <small>{item.id}{item.status ? ` · ${MERCADO_LIVRE_STATUS[item.status] ?? item.status}` : ""}</small>
+                  </div>
+                  {item.permalink && <a href={item.permalink} target="_blank" rel="noreferrer">Ver anúncio</a>}
+                </li>
+              ))}
+            </ul>
+            {warnings.map((warning) => <p className="settings-note" key={warning}>{warning}</p>)}
+          </div>
+        ) : !draft && loading ? (
+          <div className="ml-publish-body"><p className="settings-note"><Loader2 size={14} className="spin" /> Consultando o Mercado Livre...</p></div>
+        ) : draft ? (
+          <div className="ml-publish-body">
+            <section className="ml-publish-section">
+              <h3>Categoria no Mercado Livre</h3>
+              <p className="settings-note">
+                Sugerida pelo próprio Mercado Livre a partir do título. A categoria gerada pela IA ({product.listing.category || "vazia"}) serve só como referência; a escolha fica memorizada para os próximos produtos com a mesma categoria.
+              </p>
+              <form
+                className="ml-category-search"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  void load({ query: search });
+                }}
+              >
+                <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Buscar categoria (ex.: organizador de mesa)" />
+                <button className="quiet-button" disabled={loading || !search.trim()}><Search size={14} /> Buscar</button>
+              </form>
+              <div className="ml-category-options" role="radiogroup" aria-label="Categorias sugeridas">
+                {draft.suggestions.map((suggestion) => (
+                  <label key={suggestion.category_id} className={suggestion.category_id === category?.category_id ? "ml-category-option active" : "ml-category-option"}>
+                    <input
+                      type="radio"
+                      name="ml-category"
+                      checked={suggestion.category_id === category?.category_id}
+                      onChange={() => void load({ categoryId: suggestion.category_id, query: search !== draft.query ? search : undefined })}
+                      disabled={loading}
+                    />
+                    <span>
+                      <strong>{suggestion.category_name}</strong>
+                      <small>{suggestion.remembered ? `Usada antes · ${suggestion.domain_name}` : suggestion.domain_name}</small>
+                    </span>
+                  </label>
+                ))}
+                {!draft.suggestions.length && <p className="settings-note">Nenhuma sugestão. Tente outras palavras na busca.</p>}
+              </div>
+              {category && (
+                <p className={category.listing_allowed ? "ml-category-path" : "ml-category-path invalid"}>
+                  {category.path} <code>{category.category_id}</code>
+                  {!category.listing_allowed && " — esta categoria não aceita anúncios, escolha outra."}
+                </p>
+              )}
+            </section>
+
+            <section className="ml-publish-section">
+              <h3>Anúncio</h3>
+              <div className="listing-editor">
+                <label className="full-span">
+                  {draft.connection.user_product_seller ? "Nome da família (o Mercado Livre gera o título final)" : "Título"}
+                  <input value={familyName} onChange={(event) => setFamilyName(event.target.value)} />
+                  <small className={familyName.length > maxTitle ? "ml-counter invalid" : "ml-counter"}>{familyName.length}/{maxTitle}</small>
+                </label>
+                <label>
+                  Preço (R$)
+                  <input value={price} onChange={(event) => setPrice(event.target.value)} />
+                </label>
+                <label>
+                  Estoque{colorCount > 1 ? " por cor" : ""}
+                  <input type="number" min="1" value={quantity} onChange={(event) => setQuantity(Math.max(1, Number(event.target.value) || 1))} />
+                </label>
+                <label>
+                  Tipo de anúncio
+                  <select value={listingType} onChange={(event) => setListingType(event.target.value)}>
+                    {Object.entries(draft.listing_types).map(([id, label]) => <option key={id} value={id}>{label}</option>)}
+                  </select>
+                </label>
+                <label>
+                  Garantia do vendedor
+                  <input value={warranty} onChange={(event) => setWarranty(event.target.value)} />
+                </label>
+              </div>
+            </section>
+
+            {category && category.attributes.length > 0 && (
+              <section className="ml-publish-section">
+                <h3>Ficha técnica</h3>
+                <div className="listing-editor">
+                  {category.attributes.map((attribute) => (
+                    <label key={attribute.id}>
+                      {attribute.name}{attribute.required ? " *" : ""}
+                      <input
+                        list={attribute.values.length ? `ml-values-${attribute.id}` : undefined}
+                        value={values[attribute.id] ?? ""}
+                        placeholder={attribute.allowed_units.length ? `ex.: 10 ${attribute.default_unit ?? attribute.allowed_units[0]}` : undefined}
+                        onChange={(event) => setValues({ ...values, [attribute.id]: event.target.value })}
+                      />
+                      {attribute.values.length > 0 && (
+                        <datalist id={`ml-values-${attribute.id}`}>
+                          {attribute.values.map((value) => <option key={`${value.id}-${value.name}`} value={value.name} />)}
+                        </datalist>
+                      )}
+                      {attribute.hint && <small>{attribute.hint}</small>}
+                    </label>
+                  ))}
+                </div>
+              </section>
+            )}
+
+            <section className="ml-publish-section ml-publish-summary">
+              <span>{draft.image_count} imagem(ns) do produto</span>
+              {draft.colors.length > 0 && (
+                <label className="checkbox-row">
+                  <input type="checkbox" checked={publishColors} onChange={(event) => setPublishColors(event.target.checked)} />
+                  Publicar as {draft.colors.length} cores ({draft.colors.join(", ")}){draft.connection.user_product_seller ? " como variações da mesma família" : " como variações"}
+                </label>
+              )}
+              {!draft.r2_configured && <span className="ml-category-path invalid">O Cloudflare R2 não está configurado: o Mercado Livre precisa de URLs públicas das imagens.</span>}
+              {missing.length > 0 && <span className="ml-category-path invalid">Falta preencher: {missing.map((attribute) => attribute.name).join(", ")}</span>}
+            </section>
+          </div>
+        ) : null}
+
+        <div className="confirm-actions ml-publish-footer">
+          <button className="primary ghost" onClick={onClose}>{published.length ? "Fechar" : "Cancelar"}</button>
+          {!published.length && (
+            <button className="primary" onClick={() => void publish()} disabled={!canPublish || publishing || loading}>
+              {publishing ? <Loader2 size={16} className="spin" /> : <ShoppingBag size={16} />} Publicar no Mercado Livre
+            </button>
+          )}
+        </div>
+      </div>
+    </div>,
+    document.body,
+  );
+}
+
 function SummaryItem({ label, value }: { label: string; value: string }) {
   return (
     <div className="summary-item">
@@ -8291,6 +8710,7 @@ function AdminConsole({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Pr
             <Integration label="OpenRouter" enabled={Boolean(settings?.integrations.openrouter)} />
             <Integration label="Kie.ai" enabled={Boolean(settings?.integrations.kie_ai)} />
             <Integration label="Cloudflare R2" enabled={Boolean(settings?.integrations.cloudflare_r2)} />
+            <Integration label="Mercado Livre" enabled={Boolean(settings?.integrations.mercado_livre)} />
           </div>
           <button className="quiet-button" onClick={() => void loadSecrets()}>Carregar configuração</button>
           <div className="form-grid">
@@ -8303,6 +8723,12 @@ function AdminConsole({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Pr
             <label>R2 Access key<input type="password" value={secrets.cloudflare_r2_access_key ?? ""} onChange={(e) => setSecrets({ ...secrets, cloudflare_r2_access_key: e.target.value })} /></label>
             <label>R2 Secret key<input type="password" value={secrets.cloudflare_r2_secret_key ?? ""} onChange={(e) => setSecrets({ ...secrets, cloudflare_r2_secret_key: e.target.value })} /></label>
             <label>R2 URL pública<input value={secrets.cloudflare_r2_public_url ?? ""} onChange={(e) => setSecrets({ ...secrets, cloudflare_r2_public_url: e.target.value })} /></label>
+            <label>Mercado Livre App ID<input value={secrets.mercadolivre_app_id ?? ""} onChange={(e) => setSecrets({ ...secrets, mercadolivre_app_id: e.target.value })} /></label>
+            <label>Mercado Livre chave secreta<input type="password" value={secrets.mercadolivre_client_secret ?? ""} onChange={(e) => setSecrets({ ...secrets, mercadolivre_client_secret: e.target.value })} /></label>
+            <label>Mercado Livre URL de redirecionamento
+              <input value={secrets.mercadolivre_redirect_uri ?? ""} placeholder={`${window.location.origin}/api/auth/mercado-livre/callback`} onChange={(e) => setSecrets({ ...secrets, mercadolivre_redirect_uri: e.target.value })} />
+              <small>Cadastre exatamente esta URL (HTTPS) no aplicativo em developers.mercadolivre.com.br. Deixe vazio para usar o endereço acima.</small>
+            </label>
           </div>
           <button className="primary" onClick={() => void saveIntegrations()}><Check size={16} /> Salvar integrações</button>
         </div>

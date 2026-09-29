@@ -16,6 +16,7 @@ from backend.app.api.routes_assets import router as assets_router
 from backend.app.api.routes_backups import router as backups_router
 from backend.app.api.routes_image_options import router as image_options_router
 from backend.app.api.routes_jobs import router as jobs_router
+from backend.app.api.routes_mercadolivre import callback_router as mercadolivre_callback_router, router as mercadolivre_router
 from backend.app.api.routes_products import router as products_router
 from backend.app.api.routes_projects import router as projects_router
 from backend.app.api.routes_r2 import router as r2_router
@@ -152,6 +153,8 @@ app.include_router(image_options_router, prefix="/api/image-options", tags=["ima
 app.include_router(r2_router, prefix="/api/r2", tags=["r2"])
 app.include_router(auth_router, prefix="/api/auth", tags=["auth"])
 app.include_router(admin_router, prefix="/api/admin", tags=["admin"])
+app.include_router(mercadolivre_router, prefix="/api/integrations/mercado-livre", tags=["mercado-livre"])
+app.include_router(mercadolivre_callback_router, prefix="/api/auth/mercado-livre", tags=["mercado-livre"])
 
 # In production the same local process serves the compiled React application.
 # Cloudflare Tunnel therefore exposes one origin while all files and work stay here.

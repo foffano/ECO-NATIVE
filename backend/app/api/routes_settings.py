@@ -20,6 +20,9 @@ class SettingsUpdate(BaseModel):
     cloudflare_r2_access_key: str | None = None
     cloudflare_r2_secret_key: str | None = None
     cloudflare_r2_public_url: str | None = None
+    mercadolivre_app_id: str | None = None
+    mercadolivre_client_secret: str | None = None
+    mercadolivre_redirect_uri: str | None = None
 
 
 @router.get("")
@@ -41,6 +44,7 @@ def read_settings() -> dict[str, object]:
                 and settings.cloudflare_r2_secret_key
                 and settings.cloudflare_r2_public_url
             ),
+            "mercado_livre": bool(settings.mercadolivre_app_id and settings.mercadolivre_client_secret),
         },
     }
 
@@ -60,6 +64,9 @@ def read_setting_secrets(request: Request) -> dict[str, str | None]:
         "cloudflare_r2_access_key": settings.cloudflare_r2_access_key,
         "cloudflare_r2_secret_key": settings.cloudflare_r2_secret_key,
         "cloudflare_r2_public_url": settings.cloudflare_r2_public_url,
+        "mercadolivre_app_id": settings.mercadolivre_app_id,
+        "mercadolivre_client_secret": settings.mercadolivre_client_secret,
+        "mercadolivre_redirect_uri": settings.mercadolivre_redirect_uri,
     }
 
 
@@ -92,6 +99,12 @@ def update_settings(payload: SettingsUpdate, request: Request) -> dict[str, obje
         values["CLOUDFLARE_R2_SECRET_KEY"] = payload.cloudflare_r2_secret_key
     if payload.cloudflare_r2_public_url:
         values["CLOUDFLARE_R2_PUBLIC_URL"] = payload.cloudflare_r2_public_url
+    if payload.mercadolivre_app_id:
+        values["MERCADOLIVRE_APP_ID"] = payload.mercadolivre_app_id
+    if payload.mercadolivre_client_secret:
+        values["MERCADOLIVRE_CLIENT_SECRET"] = payload.mercadolivre_client_secret
+    if payload.mercadolivre_redirect_uri:
+        values["MERCADOLIVRE_REDIRECT_URI"] = payload.mercadolivre_redirect_uri
 
     if values:
         set_env_values(values)

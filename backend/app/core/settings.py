@@ -36,6 +36,9 @@ class AppSettings:
     cloudflare_r2_access_key: str | None
     cloudflare_r2_secret_key: str | None
     cloudflare_r2_public_url: str | None
+    mercadolivre_app_id: str | None
+    mercadolivre_client_secret: str | None
+    mercadolivre_redirect_uri: str | None
 
 
 def get_settings() -> AppSettings:
@@ -62,6 +65,9 @@ def get_settings() -> AppSettings:
         cloudflare_r2_access_key=os.getenv("CLOUDFLARE_R2_ACCESS_KEY"),
         cloudflare_r2_secret_key=os.getenv("CLOUDFLARE_R2_SECRET_KEY"),
         cloudflare_r2_public_url=os.getenv("CLOUDFLARE_R2_PUBLIC_URL"),
+        mercadolivre_app_id=os.getenv("MERCADOLIVRE_APP_ID"),
+        mercadolivre_client_secret=os.getenv("MERCADOLIVRE_CLIENT_SECRET"),
+        mercadolivre_redirect_uri=os.getenv("MERCADOLIVRE_REDIRECT_URI"),
     )
 
 
