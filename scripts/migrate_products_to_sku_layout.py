@@ -12,7 +12,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+from backend.app.core.atomic_files import atomic_write_text  # noqa: E402
 from backend.app.core.paths import DATA_DIR, PROJECTS_DIR  # noqa: E402
+from backend.app.db.store import store  # noqa: E402
 from backend.app.db.models import Product, Project, StoreProfile, StudioState  # noqa: E402
 from backend.app.services.product_paths import (  # noqa: E402
     color_variation_filename,
@@ -131,11 +133,10 @@ def already_in_sku_layout(product: Product, asset: dict) -> bool:
 
 def migrate(data_dir: Path | None = None) -> dict:
     data_dir = data_dir or DATA_DIR
-    studio_path = data_dir / "studio.json"
-    state = StudioState.model_validate(json.loads(studio_path.read_text(encoding="utf-8")))
+    state = store.load()
 
     backup_path = data_dir / f"studio.pre_sku_layout_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.json"
-    shutil.copy2(studio_path, backup_path)
+    atomic_write_text(backup_path, state.model_dump_json())
 
     migrated_assets = 0
     missing_assets = 0
@@ -176,8 +177,7 @@ def migrate(data_dir: Path | None = None) -> dict:
             asset.path = str(destination)
             migrated_assets += 1
 
-    store_path = studio_path
-    store_path.write_text(state.model_dump_json(indent=2), encoding="utf-8")
+    store.replace(state)
 
     legacy_dirs: set[Path] = set()
     for product in state.products:
@@ -229,6 +229,6 @@ def cleanup_legacy_folders(state: StudioState) -> dict[str, int]:
 
 if __name__ == "__main__":
     summary = migrate()
-    state = StudioState.model_validate(json.loads((DATA_DIR / "studio.json").read_text(encoding="utf-8")))
+    state = store.load()
     summary["legacy_dirs"] = cleanup_legacy_folders(state)
     print(json.dumps(summary, ensure_ascii=False, indent=2))

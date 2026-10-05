@@ -14,7 +14,9 @@ sys.path.insert(0, str(ROOT))
 
 from PIL import Image  # noqa: E402
 
+from backend.app.core.atomic_files import atomic_write_text  # noqa: E402
 from backend.app.core.paths import DATA_DIR, PROJECTS_DIR  # noqa: E402
+from backend.app.db.store import store  # noqa: E402
 from backend.app.db.models import Asset, Product, ProductStatus, Project, StudioState, new_id, now_iso  # noqa: E402
 from backend.app.services.product_paths import (  # noqa: E402
     color_variation_filename,
@@ -276,10 +278,9 @@ def main() -> dict:
     if not SOURCE_ROOT.exists():
         raise SystemExit(f"Pasta de origem não encontrada: {SOURCE_ROOT}")
 
-    studio_path = DATA_DIR / "studio.json"
-    state = StudioState.model_validate(json.loads(studio_path.read_text(encoding="utf-8")))
+    state = store.load()
     backup_path = DATA_DIR / f"studio.pre_toffa_import_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.json"
-    shutil.copy2(studio_path, backup_path)
+    atomic_write_text(backup_path, state.model_dump_json())
 
     project = ensure_project(state)
     store_profile = get_store_profile(TOFFA_PROFILE_ID)
@@ -335,7 +336,7 @@ def main() -> dict:
             }
         )
 
-    studio_path.write_text(state.model_dump_json(indent=2), encoding="utf-8")
+    store.replace(state)
 
     summary = {
         "backup": str(backup_path),

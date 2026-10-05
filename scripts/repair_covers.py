@@ -1,4 +1,4 @@
-"""Repair missing or corrupted product cover images in studio.json."""
+"""Repair missing or corrupted product cover images in the studio database."""
 
 from __future__ import annotations
 

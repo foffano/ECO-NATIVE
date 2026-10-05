@@ -4,18 +4,18 @@ from datetime import datetime, timezone
 
 import uvicorn
 
-from backend.app.core.paths import DB_PATH, EXPORTS_DIR
+from backend.app.core.paths import EXPORTS_DIR, LEGACY_JSON_PATH
 
 
 def preserve_pre_web_database() -> None:
-    if not DB_PATH.exists():
+    if not LEGACY_JSON_PATH.exists():
         return
     backup_dir = EXPORTS_DIR / "pre_web_migration"
     backup_dir.mkdir(parents=True, exist_ok=True)
     if any(backup_dir.glob("studio.pre_web_*.json")):
         return
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-    shutil.copy2(DB_PATH, backup_dir / f"studio.pre_web_{timestamp}.json")
+    shutil.copy2(LEGACY_JSON_PATH, backup_dir / f"studio.pre_web_{timestamp}.json")
 
 
 def main(**server_options) -> None:

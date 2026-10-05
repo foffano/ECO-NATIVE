@@ -1,6 +1,3 @@
-import json
-import os
-
 from fastapi.testclient import TestClient
 from PIL import Image
 
@@ -31,17 +28,19 @@ def client_for(shop):
     return client
 
 
-def test_snapshot_is_cached_until_the_file_changes():
+def test_snapshot_is_cached_until_another_connection_commits():
+    from backend.app.db.store import StudioStore
+
     store.upsert_project(Project(name="Primeiro"))
     first = store.snapshot()
     assert store.snapshot() is first
 
-    # A write made outside this store (maintenance script, backup restore).
-    data = json.loads(store.path.read_text(encoding="utf-8"))
-    data["projects"][0]["name"] = "Editado fora"
-    store.path.write_text(json.dumps(data), encoding="utf-8")
-    stat = store.path.stat()
-    os.utime(store.path, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000))
+    # A write made outside this store (maintenance command, script).
+    other = StudioStore(store.path, legacy_json_path=None)
+    try:
+        other.mutate(lambda state: setattr(state.projects[0], "name", "Editado fora"))
+    finally:
+        other.close()
 
     assert store.snapshot().projects[0].name == "Editado fora"
 

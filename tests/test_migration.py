@@ -15,12 +15,20 @@ def test_windows_paths_are_remapped_without_touching_urls(tmp_path):
 
 
 def test_operational_backup_roundtrip(tmp_path, monkeypatch):
+    from backend.app.db.models import Asset, Product, StudioState
+    from backend.app.db.store import StudioStore
+
     source, target = tmp_path / "source", tmp_path / "target"
     source.mkdir()
     target.mkdir()
     monkeypatch.setattr(maintenance, "DATA_DIR", source)
-    monkeypatch.setattr(maintenance, "DB_PATH", source / "studio.json")
+    monkeypatch.setattr(maintenance, "DB_PATH", source / "studio.db")
+    monkeypatch.setattr(maintenance, "LEGACY_JSON_PATH", source / "studio.json")
     monkeypatch.setattr(maintenance, "ENV_PATH", source / ".env")
+    product = Product(project_id="p", name="P", assets=[Asset(product_id="x", kind="cover_image", path=str(source / "projects/a.png"))])
+    studio = StudioStore(source / "studio.db", legacy_json_path=None)
+    studio.replace(StudioState(products=[product]))
+    studio.close()
     (source / "studio.json").write_text(json.dumps({"file": str(source / "projects/a.png")}))
     (source / ".maintenance").touch()
     for name in ("auth.json", ".session-secret", ".env", "browser_data/makerworld/a/Preferences", "projects/a.png"):
@@ -30,16 +38,38 @@ def test_operational_backup_roundtrip(tmp_path, monkeypatch):
     archive = tmp_path / "backup.zip"
     maintenance.backup(archive)
     with ZipFile(archive) as zipfile:
-        assert "data/.maintenance" not in zipfile.namelist()
+        names = zipfile.namelist()
+        assert "data/.maintenance" not in names
+        assert "data/studio.db" in names
+        assert not [name for name in names if name.endswith(("-wal", "-shm"))]
     monkeypatch.setattr(maintenance, "DATA_DIR", target)
-    monkeypatch.setattr(maintenance, "DB_PATH", target / "studio.json")
+    monkeypatch.setattr(maintenance, "DB_PATH", target / "studio.db")
+    monkeypatch.setattr(maintenance, "LEGACY_JSON_PATH", target / "studio.json")
     maintenance.restore(archive)
     assert (target / "auth.json").read_text() == "preserved"
     assert (target / ".session-secret").read_text() == "preserved"
     assert (target / "browser_data/makerworld/a/Preferences").exists()
+    restored = StudioStore(target / "studio.db", legacy_json_path=None)
+    assert restored.load().products[0].assets[0].path == str(target / "projects/a.png")
+    restored.close()
     assert json.loads((target / "studio.json").read_text())["file"] == str(target / "projects/a.png")
     with pytest.raises(ValueError, match="vazio"):
         maintenance.restore(archive)
+
+
+def test_restore_of_json_only_backup_remaps_the_legacy_file(tmp_path, monkeypatch):
+    target = tmp_path / "target"
+    target.mkdir()
+    monkeypatch.setattr(maintenance, "DATA_DIR", target)
+    monkeypatch.setattr(maintenance, "DB_PATH", target / "studio.db")
+    monkeypatch.setattr(maintenance, "LEGACY_JSON_PATH", target / "studio.json")
+    archive = tmp_path / "old.zip"
+    with ZipFile(archive, "w") as zipfile:
+        zipfile.writestr("manifest.json", json.dumps({"kind": "eco-operational", "version": 1, "data_dir": "/old"}))
+        zipfile.writestr("data/studio.json", json.dumps({"file": "/old/projects/a.png"}))
+    maintenance.restore(archive)
+    assert json.loads((target / "studio.json").read_text())["file"] == str(target / "projects/a.png")
+    assert not (target / "studio.db").exists()
 
 
 def test_restore_rejects_traversal_before_extracting(tmp_path, monkeypatch):

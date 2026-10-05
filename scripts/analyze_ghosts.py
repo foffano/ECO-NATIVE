@@ -3,8 +3,14 @@ import json
 import re
 from pathlib import Path
 
+import sys
+
 ROOT = Path(__file__).resolve().parents[1]
-studio = json.loads((ROOT / "data/studio.json").read_text(encoding="utf-8"))
+sys.path.insert(0, str(ROOT))
+
+from backend.app.db.store import store  # noqa: E402
+
+studio = json.loads(store.export_json())
 products = studio.get("products", [])
 
 

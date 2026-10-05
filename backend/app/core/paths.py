@@ -19,7 +19,7 @@ def get_data_dir() -> Path:
             appdata_path / APP_NAME,
         )
         for candidate in production_candidates:
-            if (candidate / "studio.json").exists():
+            if (candidate / "studio.db").exists() or (candidate / "studio.json").exists():
                 return candidate
 
     cwd = Path.cwd()
@@ -36,7 +36,10 @@ DATA_DIR = get_data_dir()
 PROJECTS_DIR = DATA_DIR / "projects"
 EXPORTS_DIR = DATA_DIR / "exports"
 CACHE_DIR = DATA_DIR / "cache"
-DB_PATH = DATA_DIR / "studio.json"
+DB_PATH = DATA_DIR / "studio.db"
+# Database format up to v0.1.52. It is imported into DB_PATH once and then
+# left untouched, so an older release can still start from it on rollback.
+LEGACY_JSON_PATH = DATA_DIR / "studio.json"
 
 
 def ensure_app_dirs() -> None:

@@ -2,11 +2,13 @@
 import argparse
 import json
 import os
+import sqlite3
+import tempfile
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from zipfile import ZIP_DEFLATED, ZipFile
 
 from backend.app.core.atomic_files import atomic_write_text
-from backend.app.core.paths import DATA_DIR, DB_PATH
+from backend.app.core.paths import DATA_DIR, DB_PATH, LEGACY_JSON_PATH
 from backend.app.core.server_lock import server_lock
 from backend.app.core.settings import ENV_PATH
 
@@ -28,14 +30,45 @@ def remap_paths(value, old_root: str, new_root: Path):
 
 
 def migrate(old_root: str):
-    if not DB_PATH.is_file():
-        raise ValueError("studio.json não encontrado")
-    original = DB_PATH.read_text(encoding="utf-8")
-    payload = remap_paths(json.loads(original), old_root, DATA_DIR)
-    backup = DATA_DIR / "studio.before-path-migration.json"
-    if not backup.exists():
-        atomic_write_text(backup, original)
-    atomic_write_text(DB_PATH, json.dumps(payload, ensure_ascii=False))
+    if not DB_PATH.is_file() and not LEGACY_JSON_PATH.is_file():
+        raise ValueError("Banco de dados não encontrado")
+    if DB_PATH.is_file():
+        from backend.app.db.models import StudioState
+        from backend.app.db.store import StudioStore
+
+        studio = StudioStore(DB_PATH, legacy_json_path=None)
+        try:
+            original = studio.export_json()
+            backup = DATA_DIR / "studio.before-path-migration.json"
+            if not backup.exists():
+                atomic_write_text(backup, original)
+            payload = remap_paths(json.loads(original), old_root, DATA_DIR)
+            studio.replace(StudioState.model_validate(payload))
+        finally:
+            studio.close()
+    if LEGACY_JSON_PATH.is_file():
+        # Kept in step so a rollback to a JSON-only release finds valid paths.
+        original = LEGACY_JSON_PATH.read_text(encoding="utf-8")
+        payload = remap_paths(json.loads(original), old_root, DATA_DIR)
+        if not DB_PATH.is_file():
+            backup = DATA_DIR / "studio.before-path-migration.json"
+            if not backup.exists():
+                atomic_write_text(backup, original)
+        atomic_write_text(LEGACY_JSON_PATH, json.dumps(payload, ensure_ascii=False))
+
+
+def _database_copy(directory: Path) -> Path:
+    """Consistent copy of the SQLite database, including WAL contents."""
+    descriptor, name = tempfile.mkstemp(prefix=".studio-backup-", suffix=".db", dir=directory)
+    os.close(descriptor)
+    source = sqlite3.connect(DB_PATH)
+    target = sqlite3.connect(name)
+    try:
+        source.backup(target)
+    finally:
+        target.close()
+        source.close()
+    return Path(name)
 
 
 def backup(destination: Path):
@@ -45,12 +78,23 @@ def backup(destination: Path):
     if destination.exists():
         raise ValueError("O arquivo de destino já existe")
     destination.parent.mkdir(parents=True, exist_ok=True)
+    database = DB_PATH.relative_to(DATA_DIR).as_posix()
+    skipped_database_files = {database, database + "-wal", database + "-shm", database + "-journal"}
     with ZipFile(destination, "x", ZIP_DEFLATED) as archive:
         archive.writestr("manifest.json", json.dumps({"kind": "eco-operational", "version": 1, "data_dir": str(DATA_DIR)}))
+        if DB_PATH.is_file():
+            copy = _database_copy(destination.parent)
+            try:
+                archive.write(copy, "data/" + database)
+            finally:
+                copy.unlink(missing_ok=True)
         for path in DATA_DIR.rglob("*"):
             if path.is_symlink() or not path.is_file() or path.name in {".server.lock", ".maintenance", "SingletonLock", "SingletonCookie", "SingletonSocket"}:
                 continue
-            archive.write(path, "data/" + path.relative_to(DATA_DIR).as_posix())
+            relative = path.relative_to(DATA_DIR).as_posix()
+            if relative in skipped_database_files:
+                continue
+            archive.write(path, "data/" + relative)
         if ENV_PATH.is_file() and not ENV_PATH.is_relative_to(DATA_DIR):
             archive.write(ENV_PATH, "data/.env")
 
@@ -62,8 +106,9 @@ def restore(source: Path):
         manifest = json.loads(archive.read("manifest.json"))
         if manifest.get("kind") != "eco-operational" or manifest.get("version") != 1:
             raise ValueError("Use um backup operacional gerado por backend.maintenance")
-        if "data/studio.json" not in archive.namelist():
-            raise ValueError("Backup sem studio.json")
+        names = archive.namelist()
+        if "data/studio.db" not in names and "data/studio.json" not in names:
+            raise ValueError("Backup sem banco de dados (studio.db ou studio.json)")
         members = []
         for entry in archive.infolist():
             if entry.filename == "manifest.json":

@@ -1,4 +1,4 @@
-"""Scan studio.json for corrupted product cover images."""
+"""Scan the studio database for corrupted product cover images."""
 
 from __future__ import annotations
 
@@ -10,11 +10,12 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from backend.app.core.paths import DB_PATH
+from backend.app.db.store import store
 from backend.app.services.cover_image import sniff_image_format
 
 
 def main() -> None:
-    data = json.loads(DB_PATH.read_text(encoding="utf-8"))
+    data = json.loads(store.export_json())
     bad: list[dict] = []
     for product in data.get("products", []):
         for asset in product.get("assets", []):
