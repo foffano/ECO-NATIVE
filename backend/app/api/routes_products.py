@@ -30,7 +30,7 @@ from backend.app.services.product_paths import (
 )
 from backend.app.services.prompt_library import IMAGE_PROMPTS
 from backend.app.services.product_cleanup import purge_product_data
-from backend.app.services.product_health import product_file_warnings
+from backend.app.services.product_health import cached_product_file_warnings
 from backend.app.services.production_cost import (
     ProductionCost,
     build_production_cost_breakdown,
@@ -102,7 +102,8 @@ def product_folder(product: Product) -> Path:
 
 
 def ensure_skus_for_state_products() -> list[Product]:
-    preview = store.load()
+    """Backfill missing SKUs. The returned products are read-only when nothing changed."""
+    preview = store.snapshot()
 
     def needs_sku_updates(state: StudioState) -> bool:
         for product in state.products:
@@ -137,27 +138,36 @@ def ensure_skus_for_state_products() -> list[Product]:
     return store.mutate(apply)
 
 
-def _public_product(product: Product) -> Product:
-    public = product.model_copy(deep=True)
-    warnings = product_file_warnings(product)
+# Prompts the AI used and the scraped description are stored for reference
+# only; they make up most of the catalog payload and the list view never reads
+# them. PATCH merges metadata, so omitting them here never erases them.
+LIST_OMITTED_METADATA = {"image_prompts", "listing_prompt", "image_prompt", "color_variation_prompt", "description"}
+
+
+def _public_product(product: Product, *, summary: bool = False) -> Product:
+    # Shallow copy: the result is only serialized, so it may share nested
+    # values with the cached store state as long as nothing here mutates them.
+    metadata = {
+        key: value
+        for key, value in product.metadata.items()
+        if key != "file_warnings" and not (summary and key in LIST_OMITTED_METADATA)
+    }
+    warnings = cached_product_file_warnings(product)
     if warnings:
-        public.metadata["file_warnings"] = warnings
-    else:
-        public.metadata.pop("file_warnings", None)
-    for asset in public.assets:
-        asset.path = Path(asset.path).name
-    return public
+        metadata["file_warnings"] = warnings
+    assets = [asset.model_copy(update={"path": Path(asset.path).name}) for asset in product.assets]
+    return product.model_copy(update={"metadata": metadata, "assets": assets})
 
 
 @router.get("")
 def list_products(request: Request, project_id: str | None = None) -> list[Product]:
     products = ensure_skus_for_state_products()
-    state = store.load()
+    state = store.snapshot()
     allowed_projects = store_project_ids(state, current_store_id(request))
     products = [p for p in products if p.project_id in allowed_projects]
     if project_id:
         products = [p for p in products if p.project_id == project_id]
-    return sorted((_public_product(p) for p in products), key=lambda p: p.created_at, reverse=True)
+    return sorted((_public_product(p, summary=True) for p in products), key=lambda p: p.created_at, reverse=True)
 
 
 @router.post("")

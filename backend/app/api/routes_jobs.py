@@ -79,7 +79,7 @@ def _makerworld_status(request: Request) -> dict[str, Any]:
 
 @router.get("")
 def list_jobs(request: Request) -> list[Job]:
-    state = store.load()
+    state = store.snapshot()
     allowed = store_project_ids(state, current_store_id(request))
     return sorted((job for job in state.jobs if job.project_id in allowed), key=lambda j: j.created_at, reverse=True)
 
@@ -181,7 +181,7 @@ def regenerate_image(payload: RegenerateImageRequest, request: Request) -> Job:
 
 @router.get("/{job_id}")
 def get_job(job_id: str, request: Request) -> Job:
-    state = store.load()
+    state = store.snapshot()
     allowed = store_project_ids(state, current_store_id(request))
     job = next((item for item in state.jobs if item.id == job_id and item.project_id in allowed), None)
     if job is None:

@@ -498,10 +498,13 @@ function isJobResult(value: unknown): value is Job {
   return Boolean(value && typeof value === "object" && "status" in value && "message" in value);
 }
 
-function assetUrl(asset: Asset, version?: string): string {
-  const base = `${API_BASE}/api/assets/${asset.id}`;
-  if (!version) return base;
-  return `${base}?v=${encodeURIComponent(version)}`;
+// `width` asks the server for a cached WebP thumbnail (snapped to 160, 384 or 768 px).
+function assetUrl(asset: Asset, version?: string, width?: number): string {
+  const params = new URLSearchParams();
+  if (version) params.set("v", version);
+  if (width) params.set("w", String(width));
+  const query = params.toString();
+  return `${API_BASE}/api/assets/${asset.id}${query ? `?${query}` : ""}`;
 }
 
 function storePhotoUrl(profile?: StoreProfile): string | undefined {
@@ -628,10 +631,10 @@ function getMainImageAsset(product: Product): Asset | undefined {
   return generated.find((asset) => asset.kind === "generated_studio_classic") ?? generated[0] ?? getCoverAsset(product);
 }
 
-function productThumbnailUrl(product?: Product): string | undefined {
+function productThumbnailUrl(product?: Product, width = 160): string | undefined {
   const asset = product ? getMainImageAsset(product) : undefined;
   // Replacing the cover keeps its asset id, so the product's update time busts the browser cache.
-  return asset && product ? assetUrl(asset, product.updated_at) : undefined;
+  return asset && product ? assetUrl(asset, product.updated_at, width) : undefined;
 }
 
 function hasListingContent(product?: Product): boolean {
@@ -4381,6 +4384,7 @@ const THUMB_PREVIEW_LAYOUT = {
     captionClass: "costs-thumb-preview-caption",
     width: 236,
     height: 248,
+    imageWidth: 384,
     delayMs: 500,
   },
   products: {
@@ -4388,6 +4392,7 @@ const THUMB_PREVIEW_LAYOUT = {
     captionClass: "product-thumb-preview-caption",
     width: 380,
     height: 400,
+    imageWidth: 768,
     delayMs: 500,
   },
 } as const;
@@ -4395,8 +4400,9 @@ const THUMB_PREVIEW_LAYOUT = {
 type ThumbPreviewVariant = keyof typeof THUMB_PREVIEW_LAYOUT;
 
 function useProductThumbPreview(product: Product, variant: ThumbPreviewVariant) {
-  const thumbnailUrl = productThumbnailUrl(product);
   const layout = THUMB_PREVIEW_LAYOUT[variant];
+  const thumbnailUrl = productThumbnailUrl(product);
+  const previewUrl = productThumbnailUrl(product, layout.imageWidth);
   const [previewOpen, setPreviewOpen] = useState(false);
   const [previewPos, setPreviewPos] = useState({ top: 0, left: 0 });
   const hoverTimerRef = useRef<number | null>(null);
@@ -4445,6 +4451,7 @@ function useProductThumbPreview(product: Product, variant: ThumbPreviewVariant) 
   return {
     anchorRef,
     thumbnailUrl,
+    previewUrl,
     handleMouseEnter,
     handleMouseLeave,
     layout,
@@ -4486,6 +4493,7 @@ function ProductCardThumb({
   const {
     anchorRef,
     thumbnailUrl,
+    previewUrl,
     handleMouseEnter,
     handleMouseLeave,
     layout,
@@ -4503,11 +4511,11 @@ function ProductCardThumb({
         onMouseEnter={handleMouseEnter}
         onMouseLeave={handleMouseLeave}
       >
-        {thumbnailUrl ? <img src={thumbnailUrl} alt="" /> : <ShoppingBag size={22} />}
+        {thumbnailUrl ? <img src={thumbnailUrl} alt="" loading="lazy" decoding="async" /> : <ShoppingBag size={22} />}
       </button>
-      {thumbnailUrl && (
+      {previewUrl && (
         <ProductThumbPreviewPortal
-          imageUrl={thumbnailUrl}
+          imageUrl={previewUrl}
           layout={layout}
           open={previewOpen}
           position={previewPos}
@@ -4523,6 +4531,7 @@ function CostsProductCell({ product }: { product: Product }) {
   const {
     anchorRef,
     thumbnailUrl,
+    previewUrl,
     handleMouseEnter,
     handleMouseLeave,
     layout,
@@ -4541,7 +4550,7 @@ function CostsProductCell({ product }: { product: Product }) {
       >
         <div className="costs-product-thumb" aria-hidden="true">
           {thumbnailUrl ? (
-            <img src={thumbnailUrl} alt="" />
+            <img src={thumbnailUrl} alt="" loading="lazy" decoding="async" />
           ) : (
             <span className="costs-product-thumb-fallback">
               <ShoppingBag size={18} />
@@ -4550,9 +4559,9 @@ function CostsProductCell({ product }: { product: Product }) {
         </div>
         <code className="costs-product-sku">{sku}</code>
       </div>
-      {thumbnailUrl && (
+      {previewUrl && (
         <ProductThumbPreviewPortal
-          imageUrl={thumbnailUrl}
+          imageUrl={previewUrl}
           layout={layout}
           open={previewOpen}
           position={previewPos}
@@ -5960,7 +5969,7 @@ function BaseStyleGallery({
               <div className="thumb-image-frame">
                 {asset ? (
                   <button className="thumb-open" onClick={() => onOpenImage(asset)}>
-                    <img src={assetUrl(asset, imageVersion)} alt="" />
+                    <img src={assetUrl(asset, imageVersion, 384)} alt="" loading="lazy" decoding="async" />
                   </button>
                 ) : (
                   <div className="thumb-empty">
@@ -6132,7 +6141,7 @@ function VariationsManager({
               <div className="thumb-image-frame">
                 {asset ? (
                   <button className="thumb-open" onClick={() => onOpenImage(asset)}>
-                    <img src={assetUrl(asset, imageVersion)} alt="" />
+                    <img src={assetUrl(asset, imageVersion, 384)} alt="" loading="lazy" decoding="async" />
                   </button>
                 ) : (
                   <div className="thumb-empty">
@@ -6230,7 +6239,7 @@ function GalleryGroup({
             <div className="gallery-thumb" key={asset.id}>
               <div className="thumb-image-frame">
                 <button className="thumb-open" onClick={() => onOpenImage(asset)}>
-                  <img src={assetUrl(asset, imageVersion)} alt="" />
+                  <img src={assetUrl(asset, imageVersion, 384)} alt="" loading="lazy" decoding="async" />
                 </button>
                 {allowRegenerate && productId && onRegenerateImage && onExtraPromptChange && (
                   <button
@@ -6558,7 +6567,7 @@ function ScheduleAgendaGrid({
         <div className="agenda-event-body">
           {!compactLane && (
             <div className="agenda-event-thumb" aria-hidden="true">
-              {thumbnailUrl ? <img src={thumbnailUrl} alt="" /> : <ShoppingBag size={14} />}
+              {thumbnailUrl ? <img src={thumbnailUrl} alt="" loading="lazy" decoding="async" /> : <ShoppingBag size={14} />}
             </div>
           )}
           <div className="agenda-event-copy">
@@ -6971,7 +6980,7 @@ function ScheduleTab({
                           return (
                             <span className={`agenda-month-chip status-${task.status}`} key={task.id} title={task.title}>
                               <span className="agenda-month-chip-thumb" aria-hidden="true">
-                                {thumbnailUrl ? <img src={thumbnailUrl} alt="" /> : <ShoppingBag size={10} />}
+                                {thumbnailUrl ? <img src={thumbnailUrl} alt="" loading="lazy" decoding="async" /> : <ShoppingBag size={10} />}
                               </span>
                               <span className="agenda-month-chip-copy">
                                 <strong>{task.start_time}</strong> {task.title}
@@ -7061,7 +7070,7 @@ function ScheduleTab({
                         <>
                           <div className="schedule-product-thumb" aria-hidden="true">
                             {selectedThumbnailUrl ? (
-                              <img src={selectedThumbnailUrl} alt="" />
+                              <img src={selectedThumbnailUrl} alt="" decoding="async" />
                             ) : (
                               <ShoppingBag size={18} />
                             )}
@@ -7108,7 +7117,7 @@ function ScheduleTab({
                               >
                                 <div className="schedule-product-thumb" aria-hidden="true">
                                   {thumbnailUrl ? (
-                                    <img src={thumbnailUrl} alt="" />
+                                    <img src={thumbnailUrl} alt="" loading="lazy" decoding="async" />
                                   ) : (
                                     <ShoppingBag size={18} />
                                   )}

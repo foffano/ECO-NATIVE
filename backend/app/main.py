@@ -8,7 +8,9 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.concurrency import run_in_threadpool
 from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.middleware.gzip import GZipMiddleware
 
 from backend.app.api.routes_exports import router as exports_router
 from backend.app.api.routes_ai_profiles import router as ai_profiles_router
@@ -69,6 +71,36 @@ app.add_middleware(
 )
 
 
+def _outside_store_scope(path: str, store_profile_id: str | None) -> bool:
+    parts = [part for part in path.split("/") if part]
+    if len(parts) < 3:
+        return False
+    if parts[1] == "store-profiles":
+        return parts[2] != store_profile_id
+    if parts[1] not in {"projects", "products", "assets"}:
+        return False
+
+    state = store.snapshot()
+    project_id: str | None = None
+    if parts[1] == "projects":
+        project_id = parts[2]
+    elif parts[1] == "products":
+        product = next((item for item in state.products if item.id == parts[2]), None)
+        if not product:
+            return False
+        project_id = product.project_id
+    else:
+        found = store.find_asset(parts[2])
+        if not found:
+            return False
+        project_id = found[0].project_id
+
+    project = next((item for item in state.projects if item.id == project_id), None)
+    if parts[1] == "projects" and not project:
+        return False
+    return not project or project.id not in store_project_ids(state, store_profile_id)
+
+
 class StoreAuthenticationMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         path = request.url.path
@@ -92,30 +124,36 @@ class StoreAuthenticationMiddleware(BaseHTTPMiddleware):
 
         # Defense in depth for endpoints addressed by object id. List/create routes
         # apply their own store scope below.
-        state = store.load()
-        allowed_projects = store_project_ids(state, user.store_profile_id)
-        parts = [part for part in path.split("/") if part]
-        if len(parts) >= 3 and parts[1] == "projects":
-            project = next((item for item in state.projects if item.id == parts[2]), None)
-            if project and project.id not in allowed_projects:
-                return JSONResponse({"detail": "Recurso não encontrado"}, status_code=404)
-        if len(parts) >= 3 and parts[1] == "products":
-            product = next((item for item in state.products if item.id == parts[2]), None)
-            if product:
-                project = next((item for item in state.projects if item.id == product.project_id), None)
-                if not project or project.id not in allowed_projects:
-                    return JSONResponse({"detail": "Recurso não encontrado"}, status_code=404)
-        if len(parts) >= 3 and parts[1] == "assets":
-            product = next((product for product in state.products if any(asset.id == parts[2] for asset in product.assets)), None)
-            project = next((item for item in state.projects if product and item.id == product.project_id), None)
-            if product and (not project or project.id not in allowed_projects):
-                return JSONResponse({"detail": "Recurso não encontrado"}, status_code=404)
-        if len(parts) >= 3 and parts[1] == "store-profiles" and parts[2] != user.store_profile_id:
+        if await run_in_threadpool(_outside_store_scope, path, user.store_profile_id):
             return JSONResponse({"detail": "Recurso não encontrado"}, status_code=404)
         return await call_next(request)
 
 
 app.add_middleware(StoreAuthenticationMiddleware)
+
+
+_BINARY_API_PATHS = ("/api/assets/", "/api/backups/download")
+_BINARY_API_SUFFIXES = ("/download-files", "/photo", "/frame")
+
+
+class TextGZipMiddleware:
+    """Gzip JSON and frontend bundles; images and archives are already compressed."""
+
+    def __init__(self, app) -> None:
+        self.app = app
+        self.gzip = GZipMiddleware(app, minimum_size=1024)
+
+    async def __call__(self, scope, receive, send) -> None:
+        path = scope.get("path", "") if scope["type"] == "http" else ""
+        binary = path.startswith(_BINARY_API_PATHS) or path.endswith(_BINARY_API_SUFFIXES)
+        text = path.startswith("/api/") or path == "/" or path.endswith((".js", ".css", ".html", ".svg", ".json"))
+        if text and not binary:
+            await self.gzip(scope, receive, send)
+        else:
+            await self.app(scope, receive, send)
+
+
+app.add_middleware(TextGZipMiddleware)
 
 
 @app.get("/health")
@@ -133,7 +171,7 @@ def health() -> dict:
             "maintenance": maintenance,
         }
         if maintenance:
-            payload["active_jobs"] = sum(str(job.status) in {"queued", "running"} for job in store.load().jobs)
+            payload["active_jobs"] = sum(str(job.status) in {"queued", "running"} for job in store.snapshot().jobs)
             payload["active_login_sessions"] = active_login_sessions()
         return payload
 

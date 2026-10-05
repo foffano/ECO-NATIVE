@@ -57,9 +57,9 @@ def normalize_store_profile(profile: StoreProfile) -> StoreProfile:
 
 
 def ensure_default_store_profile() -> StoreProfile:
-    state = store.load()
+    state = store.snapshot()
     if state.store_profiles:
-        return state.store_profiles[0]
+        return state.store_profiles[0].model_copy(deep=True)
 
     ai_profile = ensure_default_profile()
     profile = StoreProfile(
@@ -79,7 +79,8 @@ def ensure_default_store_profile() -> StoreProfile:
 
 def list_store_profiles() -> list[StoreProfile]:
     ensure_default_store_profile()
-    profiles = [normalize_store_profile(profile) for profile in store.load().store_profiles]
+    # Copy only the profiles; a full load() would deep-copy every product too.
+    profiles = [normalize_store_profile(profile.model_copy(deep=True)) for profile in store.snapshot().store_profiles]
     return sorted(profiles, key=lambda profile: profile.created_at)
 
 

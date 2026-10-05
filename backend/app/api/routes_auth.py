@@ -54,7 +54,7 @@ def _session_payload(request: Request) -> dict:
             "is_admin": True,
             "store": None,
         }
-    state = store.load()
+    state = store.snapshot()
     profile = next((item for item in state.store_profiles if item.id == user.store_profile_id), None)
     if not profile:
         raise HTTPException(status_code=401, detail="A loja deste login não existe mais")

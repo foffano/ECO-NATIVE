@@ -9,7 +9,7 @@ from typing import TypeVar
 
 from backend.app.core.paths import DB_PATH, EXPORTS_DIR, ensure_app_dirs
 from backend.app.core.atomic_files import atomic_write_text
-from backend.app.db.models import AiProfile, Job, Product, Project, StoreProfile, StudioState, now_iso
+from backend.app.db.models import AiProfile, Asset, Job, Product, Project, StoreProfile, StudioState, now_iso
 from backend.app.services.product_status_migration import migrate_product_status_payload, migrate_product_statuses
 
 logger = logging.getLogger(__name__)
@@ -22,11 +22,29 @@ MAX_AUTO_SNAPSHOTS = 20
 
 
 class JsonStore:
+    """studio.json with a parsed in-memory copy.
+
+    The cached state is shared: `snapshot()` hands it out without copying, so
+    callers must treat it as read-only. `load()` and `mutate()` work on deep
+    copies. The cache is dropped on every write and whenever the file's
+    mtime/size changes, so edits made by other processes are still picked up.
+    """
+
     def __init__(self, path: Path = DB_PATH) -> None:
         self.path = path
+        self._cache: StudioState | None = None
+        self._cache_stat: tuple[int, int] | None = None
+        self._asset_index: dict[str, tuple[Product, Asset]] | None = None
         ensure_app_dirs()
 
-    def _load_unlocked(self) -> StudioState:
+    def _file_stat(self) -> tuple[int, int] | None:
+        try:
+            stat = self.path.stat()
+        except FileNotFoundError:
+            return None
+        return stat.st_mtime_ns, stat.st_size
+
+    def _read_disk_unlocked(self) -> StudioState:
         if not self.path.exists():
             return StudioState()
         data = json.loads(self.path.read_text(encoding="utf-8"))
@@ -37,13 +55,22 @@ class JsonStore:
             self._write_unlocked(state)
         return state
 
+    def _current_unlocked(self) -> StudioState:
+        stat = self._file_stat()
+        if self._cache is None or stat != self._cache_stat:
+            state = self._read_disk_unlocked()
+            self._cache = state
+            self._cache_stat = self._file_stat()
+            self._asset_index = None
+        return self._cache
+
+    def _load_unlocked(self) -> StudioState:
+        return self._current_unlocked().model_copy(deep=True)
+
     def _product_count_on_disk(self) -> int:
-        if not self.path.exists():
-            return 0
         try:
-            data = json.loads(self.path.read_text(encoding="utf-8"))
-            return len(data.get("products", []))
-        except (json.JSONDecodeError, OSError):
+            return len(self._current_unlocked().products)
+        except (json.JSONDecodeError, OSError, ValueError):
             return 0
 
     def _snapshot_path(self, label: str) -> Path:
@@ -79,6 +106,11 @@ class JsonStore:
         return list(merged.values())
 
     def _write_unlocked(self, state: StudioState) -> None:
+        # Callers may keep mutating the objects they saved, so the cache is
+        # rebuilt from disk on the next read instead of adopting `state`.
+        self._cache = None
+        self._cache_stat = None
+        self._asset_index = None
         atomic_write_text(self.path, state.model_dump_json())
 
     def _save_unlocked(
@@ -105,7 +137,8 @@ class JsonStore:
 
         previous_count = self._product_count_on_disk()
         if not allow_product_shrink:
-            current = self._load_unlocked()
+            # Read-only use: the merge only picks objects, it never edits them.
+            current = self._current_unlocked()
             state.products = self._merge_products(current.products, state.products)
             state.jobs = self._merge_jobs(current.jobs, state.jobs)
         elif previous_count > len(state.products):
@@ -122,8 +155,22 @@ class JsonStore:
 
     def load(self) -> StudioState:
         with _lock:
-            state = self._load_unlocked()
-            return state.model_copy(deep=True)
+            return self._load_unlocked()
+
+    def snapshot(self) -> StudioState:
+        """Shared cached state for read-only paths. Never mutate the result."""
+        with _lock:
+            return self._current_unlocked()
+
+    def find_asset(self, asset_id: str) -> tuple[Product, Asset] | None:
+        """Read-only lookup of an asset and its product in the cached state."""
+        with _lock:
+            state = self._current_unlocked()
+            if self._asset_index is None:
+                self._asset_index = {
+                    asset.id: (product, asset) for product in state.products for asset in product.assets
+                }
+            return self._asset_index.get(asset_id)
 
     def mutate(
         self,

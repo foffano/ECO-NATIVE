@@ -19,7 +19,7 @@ class ProjectCreate(BaseModel):
 
 @router.get("")
 def list_projects(request: Request) -> list[Project]:
-    state = store.load()
+    state = store.snapshot()
     allowed = store_project_ids(state, current_store_id(request))
     return sorted((item for item in state.projects if item.id in allowed), key=lambda p: p.created_at, reverse=True)
 
