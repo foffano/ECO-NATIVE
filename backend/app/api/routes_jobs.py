@@ -78,10 +78,13 @@ def _makerworld_status(request: Request) -> dict[str, Any]:
 
 
 @router.get("")
-def list_jobs(request: Request) -> list[Job]:
+def list_jobs(request: Request, since: str | None = None) -> list[Job]:
+    """All jobs of the store, or with `since` only those updated at or after it
+    (timestamps have one-second resolution, so callers merge by id)."""
     state = store.snapshot()
     allowed = store_project_ids(state, current_store_id(request))
-    return sorted((job for job in state.jobs if job.project_id in allowed), key=lambda j: j.created_at, reverse=True)
+    jobs = (job for job in state.jobs if job.project_id in allowed and (since is None or job.updated_at >= since))
+    return sorted(jobs, key=lambda j: j.created_at, reverse=True)
 
 
 @router.get("/makerworld-login")

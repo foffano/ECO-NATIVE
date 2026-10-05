@@ -6,7 +6,7 @@ from pathlib import Path
 
 import unicodedata
 
-from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse
 from starlette.background import BackgroundTask
 from PIL import Image
@@ -31,6 +31,7 @@ from backend.app.services.product_paths import (
 from backend.app.services.prompt_library import IMAGE_PROMPTS
 from backend.app.services.product_cleanup import purge_product_data
 from backend.app.services.product_health import cached_product_file_warnings
+from backend.app.services.product_queries import CHARACTERISTICS, catalog_stats, page_products, product_matches
 from backend.app.services.production_cost import (
     ProductionCost,
     build_production_cost_breakdown,
@@ -168,6 +169,62 @@ def list_products(request: Request, project_id: str | None = None) -> list[Produ
     if project_id:
         products = [p for p in products if p.project_id == project_id]
     return sorted((_public_product(p, summary=True) for p in products), key=lambda p: p.created_at, reverse=True)
+
+
+def _store_products(request: Request) -> list[Product]:
+    products = ensure_skus_for_state_products()
+    allowed_projects = store_project_ids(store.snapshot(), current_store_id(request))
+    return [product for product in products if product.project_id in allowed_projects]
+
+
+@router.get("/page")
+def list_products_page(
+    request: Request,
+    q: str = "",
+    status: str = "all",
+    characteristic: str = "all",
+    project_id: str | None = None,
+    limit: int = Query(40, ge=1, le=200),
+    cursor: str | None = None,
+) -> dict:
+    """One page of the store catalog, newest first, filtered on the server."""
+    if status != "all" and status not in {item.value for item in ProductStatus}:
+        raise HTTPException(status_code=422, detail="Status inválido")
+    if characteristic not in CHARACTERISTICS:
+        raise HTTPException(status_code=422, detail="Característica inválida")
+    products = _store_products(request)
+    store_total = len(products)
+    if project_id:
+        products = [product for product in products if product.project_id == project_id]
+    matched = [
+        product
+        for product in products
+        if product_matches(product, query=q, status=status, characteristic=characteristic)
+    ]
+    try:
+        page, next_cursor = page_products(matched, limit=limit, cursor=cursor)
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    return {
+        "items": [_public_product(product, summary=True) for product in page],
+        "next_cursor": next_cursor,
+        "total": len(matched),
+        "with_title": sum(1 for product in matched if product.listing.title),
+        "store_total": store_total,
+    }
+
+
+@router.get("/stats")
+def products_stats(request: Request) -> dict:
+    return catalog_stats(_store_products(request))
+
+
+@router.get("/{product_id}")
+def get_product(product_id: str, request: Request) -> Product:
+    product = next((item for item in _store_products(request) if item.id == product_id), None)
+    if not product:
+        raise HTTPException(status_code=404, detail="Produto nao encontrado")
+    return _public_product(product)
 
 
 @router.post("")

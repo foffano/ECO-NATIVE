@@ -244,6 +244,8 @@ type Job = {
   message: string;
   logs?: string[];
   metadata?: Record<string, unknown>;
+  created_at?: string;
+  updated_at?: string;
 };
 
 type ImageModelOption = {
@@ -421,6 +423,67 @@ type ProductFilters = {
     | "listed"
     | "not_listed";
 };
+
+type ProductPage = {
+  items: Product[];
+  next_cursor: string | null;
+  total: number;
+  with_title: number;
+  store_total: number;
+};
+
+// One loaded window of the catalog: pages are appended as the list scrolls.
+type ProductListState = {
+  items: Product[];
+  nextCursor: string | null;
+  total: number;
+  withTitle: number;
+  storeTotal: number;
+  loading: boolean;
+  loaded: boolean;
+};
+
+type CatalogStats = {
+  total: number;
+  ready: number;
+  with_image: number;
+  with_model: number;
+  exported: number;
+  ai_cost_usd: number;
+  ai_cost_by_provider: { openrouter: number; kie: number; other: number };
+  by_project: Record<string, number>;
+};
+
+const PRODUCT_PAGE_SIZE = 40;
+const MAX_PRODUCT_RELOAD = 200;
+const EMPTY_PRODUCT_LIST: ProductListState = {
+  items: [],
+  nextCursor: null,
+  total: 0,
+  withTitle: 0,
+  storeTotal: 0,
+  loading: false,
+  loaded: false,
+};
+
+function productPagePath(filters: ProductFilters, limit: number, cursor?: string | null): string {
+  const params = new URLSearchParams({ limit: String(limit) });
+  const query = filters.query.trim();
+  if (query) params.set("q", query);
+  if (filters.status !== "all") params.set("status", filters.status);
+  if (filters.characteristic !== "all") params.set("characteristic", filters.characteristic);
+  if (cursor) params.set("cursor", cursor);
+  return `/api/products/page?${params.toString()}`;
+}
+
+function mergeJobs(current: Job[], changed: Job[]): Job[] {
+  if (!changed.length) return current;
+  const byId = new Map(changed.map((job) => [job.id, job]));
+  const merged = current.map((job) => byId.get(job.id) ?? job);
+  const known = new Set(current.map((job) => job.id));
+  // New jobs go first, like the server's newest-first order.
+  return [...changed.filter((job) => !known.has(job.id)), ...merged];
+}
 
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${API_BASE}${path}`, {
@@ -1725,7 +1788,14 @@ const tabInfo: Record<AppTab, { title: string; eyebrow: string }> = {
 
 function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<void> }) {
   const [projects, setProjects] = useState<Project[]>([]);
-  const [products, setProducts] = useState<Product[]>([]);
+  const [productList, setProductList] = useState<ProductListState>(EMPTY_PRODUCT_LIST);
+  // Full products fetched by id (open details, recently changed). The list
+  // holds lighter summaries, so details win when both have the product.
+  const [productDetails, setProductDetails] = useState<Record<string, Product>>({});
+  const [catalogStats, setCatalogStats] = useState<CatalogStats | null>(null);
+  // The costs table edits every product of the store, so it loads the whole
+  // catalog itself, and only while that tab is open.
+  const [costProducts, setCostProducts] = useState<Product[] | null>(null);
   const [jobs, setJobs] = useState<Job[]>([]);
   const [storeProfiles, setStoreProfiles] = useState<StoreProfile[]>([]);
   const [settings, setSettings] = useState<SettingsPayload | null>(null);
@@ -1806,20 +1876,115 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
     () => jobs.filter((job) => !job.project_id || activeStoreProjectIds.has(job.project_id)),
     [jobs, activeStoreProjectIds],
   );
-  const projectProducts = useMemo(
-    () => products.filter((product) => activeStoreProjectIds.has(product.project_id)),
-    [products, activeStoreProjectIds],
+  const [debouncedProductQuery, setDebouncedProductQuery] = useState(productFilters.query);
+  useEffect(() => {
+    const timeout = window.setTimeout(() => setDebouncedProductQuery(productFilters.query), 300);
+    return () => window.clearTimeout(timeout);
+  }, [productFilters.query]);
+  const listFilters = useMemo<ProductFilters>(
+    () => ({ query: debouncedProductQuery, status: productFilters.status, characteristic: productFilters.characteristic }),
+    [debouncedProductQuery, productFilters.status, productFilters.characteristic],
   );
-  const filteredProjectProducts = useMemo(
-    () => filterProducts(projectProducts, productFilters),
-    [projectProducts, productFilters],
-  );
-  const selectedProduct = projectProducts.find((product) => product.id === selectedProductId) ?? filteredProjectProducts[0] ?? projectProducts[0];
+
+  // Refs let long-lived callbacks (job polling, batch actions) see the latest
+  // list and filters without being recreated.
+  const productListRef = useRef(productList);
+  productListRef.current = productList;
+  const listFiltersRef = useRef(listFilters);
+  const selectedProductIdRef = useRef(selectedProductId);
+  selectedProductIdRef.current = selectedProductId;
+  const productListRequestRef = useRef(0);
+  const statsTimerRef = useRef<number | null>(null);
+
+  const listedProducts = productList.items;
+  const selectedProduct = (selectedProductId
+    ? productDetails[selectedProductId] ?? listedProducts.find((product) => product.id === selectedProductId)
+    : undefined) ?? listedProducts[0];
+
+  function findProduct(productId: string): Product | undefined {
+    return productDetails[productId]
+      ?? productList.items.find((product) => product.id === productId)
+      ?? costProducts?.find((product) => product.id === productId);
+  }
+
+  async function refreshStats() {
+    const stats = await api<CatalogStats>("/api/products/stats");
+    setCatalogStats(stats);
+    return stats;
+  }
+
+  function scheduleStatsRefresh() {
+    if (statsTimerRef.current !== null) window.clearTimeout(statsTimerRef.current);
+    statsTimerRef.current = window.setTimeout(() => {
+      statsTimerRef.current = null;
+      refreshStats().catch(() => undefined);
+    }, 800);
+  }
+
+  // Reloads the list from the top. With keepLoaded it fetches as many items as
+  // are already on screen (up to MAX_PRODUCT_RELOAD), so the scroll position holds.
+  async function reloadProductList(keepLoaded = true) {
+    const request = ++productListRequestRef.current;
+    const loadedCount = productListRef.current.items.length;
+    const limit = keepLoaded ? Math.min(MAX_PRODUCT_RELOAD, Math.max(PRODUCT_PAGE_SIZE, loadedCount)) : PRODUCT_PAGE_SIZE;
+    setProductList((current) => ({ ...current, loading: true }));
+    try {
+      const page = await api<ProductPage>(productPagePath(listFiltersRef.current, limit));
+      if (request !== productListRequestRef.current) return;
+      setProductList({
+        items: page.items,
+        nextCursor: page.next_cursor,
+        total: page.total,
+        withTitle: page.with_title,
+        storeTotal: page.store_total,
+        loading: false,
+        loaded: true,
+      });
+    } catch (error) {
+      if (request === productListRequestRef.current) setProductList((current) => ({ ...current, loading: false }));
+      throw error;
+    }
+  }
+
+  async function loadMoreProducts() {
+    const current = productListRef.current;
+    if (current.loading || !current.nextCursor) return;
+    const request = productListRequestRef.current;
+    setProductList((state) => ({ ...state, loading: true }));
+    try {
+      const page = await api<ProductPage>(productPagePath(listFiltersRef.current, PRODUCT_PAGE_SIZE, current.nextCursor));
+      // A reload started meanwhile owns the list now.
+      if (request !== productListRequestRef.current) return;
+      setProductList((state) => {
+        const known = new Set(state.items.map((product) => product.id));
+        return {
+          ...state,
+          items: [...state.items, ...page.items.filter((product) => !known.has(product.id))],
+          nextCursor: page.next_cursor,
+          total: page.total,
+          withTitle: page.with_title,
+          storeTotal: page.store_total,
+          loading: false,
+        };
+      });
+    } catch (error) {
+      if (request === productListRequestRef.current) setProductList((state) => ({ ...state, loading: false }));
+      setNotice(error instanceof Error ? error.message : "Não foi possível carregar mais produtos");
+    }
+  }
+
+  useEffect(() => {
+    listFiltersRef.current = listFilters;
+    // A selection may include products the new filter hides; batch actions
+    // should only ever touch products the user can see.
+    setSelectedProductIds([]);
+    reloadProductList(false).catch((error) => setNotice(error.message));
+  }, [listFilters, activeStoreProfileId]);
 
   async function refresh() {
-    const [nextProjects, nextProducts, nextJobs, nextSettings, nextStoreProfiles, nextImageOptions, nextRuntimeStatus] = await Promise.all([
+    const [nextProjects, nextStats, nextJobs, nextSettings, nextStoreProfiles, nextImageOptions, nextRuntimeStatus] = await Promise.all([
       api<Project[]>("/api/projects"),
-      api<Product[]>("/api/products"),
+      api<CatalogStats>("/api/products/stats"),
       api<Job[]>("/api/jobs"),
       api<SettingsPayload>("/api/settings"),
       api<StoreProfile[]>("/api/store-profiles"),
@@ -1827,7 +1992,7 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
       api<RuntimeStatus>("/api/runtime/status"),
     ]);
     setProjects(nextProjects);
-    setProducts(nextProducts);
+    setCatalogStats(nextStats);
     setJobs(nextJobs);
     setStoreProfiles(nextStoreProfiles);
     const nextStore = nextStoreProfiles.find((profile) => profile.id === activeStoreProfileId) ?? nextStoreProfiles[0];
@@ -1852,7 +2017,7 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
     const isCleanDefaultWorkspace =
       (nextStoreProfiles.length === 0 || (nextStoreProfiles.length === 1 && nextStoreProfiles[0]?.name === "Loja principal")) &&
       nextProjects.length === 0 &&
-      nextProducts.length === 0;
+      nextStats.total === 0;
     if (isCleanDefaultWorkspace && window.localStorage.getItem(ONBOARDING_COMPLETE_KEY) !== "true") {
       setOnboardingOpen(true);
     }
@@ -1864,30 +2029,59 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
   }
 
   async function refreshCatalog() {
-    const [nextProjects, nextProducts, nextJobs] = await Promise.all([
+    const [nextProjects, nextJobs] = await Promise.all([
       api<Project[]>("/api/projects"),
-      api<Product[]>("/api/products"),
       api<Job[]>("/api/jobs"),
+      reloadProductList(true),
+      refreshStats(),
     ]);
     setProjects(nextProjects);
-    setProducts(nextProducts);
     setJobs(nextJobs);
+  }
+
+  // Fetches one product again and patches it wherever it is shown.
+  async function refreshProduct(productId: string) {
+    try {
+      patchProduct(await api<Product>(`/api/products/${productId}`));
+    } catch {
+      /* Deleted or no longer in this store; the next reload drops it. */
+    }
   }
 
   useEffect(() => {
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout>;
     let active = new Set<string>();
+    let since = "";
+    let polls = 0;
     async function poll() {
       try {
-        const next = await api<Job[]>("/api/jobs");
+        // Only jobs changed since the last poll; a full list now and then also
+        // drops jobs deleted on the server.
+        const full = !since || polls % 24 === 0;
+        const changed = await api<Job[]>(full ? "/api/jobs" : `/api/jobs?since=${encodeURIComponent(since)}`);
         if (cancelled) return;
-        setJobs(next);
-        const finished = next.some((job) => active.has(job.id) && ["completed", "failed"].includes(job.status));
-        active = new Set(next.filter((job) => ["queued", "running"].includes(job.status)).map((job) => job.id));
-        if (finished) {
-          const catalog = await api<Product[]>("/api/products");
-          if (!cancelled) setProducts(catalog);
+        polls += 1;
+        for (const job of changed) {
+          if (job.updated_at && job.updated_at > since) since = job.updated_at;
+        }
+        setJobs((current) => (full ? changed : mergeJobs(current, changed)));
+        const finished = changed.filter((job) => active.has(job.id) && ["completed", "failed"].includes(job.status));
+        if (full) active = new Set();
+        for (const job of changed) {
+          if (["queued", "running"].includes(job.status)) active.add(job.id);
+          else active.delete(job.id);
+        }
+        if (finished.length) {
+          // Product jobs refresh just their product; collections add new
+          // products, so those reload the list.
+          const productIds = [...new Set(finished.map((job) => job.product_id).filter((id): id is string => Boolean(id)))];
+          const reloadList = finished.some((job) => !job.product_id);
+          await Promise.all([
+            ...productIds.map(refreshProduct),
+            reloadList ? reloadProductList(true) : Promise.resolve(),
+            refreshStats(),
+          ]);
         }
       } catch { /* Other API calls handle authentication and user-facing errors. */ }
       if (!cancelled) timer = setTimeout(poll, 2500);
@@ -1897,16 +2091,61 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
   }, []);
 
   async function refreshProducts() {
-    const nextProducts = await api<Product[]>("/api/products");
-    setProducts(nextProducts);
+    await Promise.all([reloadProductList(true), refreshStats()]);
   }
 
-  function patchProduct(updated: Product) {
-    setProducts((current) => {
-      const exists = current.some((product) => product.id === updated.id);
-      if (!exists) return [...current, updated];
-      return current.map((product) => (product.id === updated.id ? updated : product));
+  useEffect(() => {
+    if (!detailsOpen || !selectedProductId) return;
+    void refreshProduct(selectedProductId);
+  }, [detailsOpen, selectedProductId]);
+
+  useEffect(() => {
+    if (activeTab !== "costs") return undefined;
+    let cancelled = false;
+    api<Product[]>("/api/products")
+      .then((items) => {
+        if (!cancelled) setCostProducts(items);
+      })
+      .catch((error) => setNotice(error instanceof Error ? error.message : "Não foi possível carregar os custos"));
+    return () => {
+      cancelled = true;
+    };
+  }, [activeTab, activeStoreProfileId]);
+
+  // `insert` is for a product just created here: it goes to the top of the
+  // list. Otherwise only products already shown are updated, and one that no
+  // longer matches the filters leaves the list (its open details stay).
+  function patchProduct(updated: Product, insert = false) {
+    const stillMatches = filterProducts([updated], listFiltersRef.current).length > 0;
+    if (!stillMatches && !insert) setSelectedProductIds((current) => current.filter((id) => id !== updated.id));
+    setProductList((current) => {
+      const exists = current.items.some((product) => product.id === updated.id);
+      if (!exists) {
+        if (!insert) return current;
+        return {
+          ...current,
+          items: [updated, ...current.items],
+          total: current.total + 1,
+          storeTotal: current.storeTotal + 1,
+          withTitle: current.withTitle + (updated.listing.title ? 1 : 0),
+        };
+      }
+      if (!stillMatches) {
+        return { ...current, items: current.items.filter((product) => product.id !== updated.id), total: Math.max(0, current.total - 1) };
+      }
+      return { ...current, items: current.items.map((product) => (product.id === updated.id ? updated : product)) };
     });
+    setProductDetails((current) =>
+      current[updated.id] || updated.id === selectedProductIdRef.current || insert
+        ? { ...current, [updated.id]: updated }
+        : current,
+    );
+    setCostProducts((current) =>
+      current?.some((product) => product.id === updated.id)
+        ? current.map((product) => (product.id === updated.id ? updated : product))
+        : current,
+    );
+    scheduleStatsRefresh();
   }
 
   function patchProject(updated: Project) {
@@ -1929,7 +2168,23 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
   }
 
   function removeProductFromState(productId: string) {
-    setProducts((current) => current.filter((product) => product.id !== productId));
+    setProductList((current) => {
+      if (!current.items.some((product) => product.id === productId)) return current;
+      return {
+        ...current,
+        items: current.items.filter((product) => product.id !== productId),
+        total: Math.max(0, current.total - 1),
+        storeTotal: Math.max(0, current.storeTotal - 1),
+      };
+    });
+    setProductDetails((current) => {
+      if (!current[productId]) return current;
+      const next = { ...current };
+      delete next[productId];
+      return next;
+    });
+    setCostProducts((current) => current?.filter((product) => product.id !== productId) ?? current);
+    scheduleStatsRefresh();
     setSelectedProductIds((current) => current.filter((id) => id !== productId));
     if (selectedProductId === productId) {
       setSelectedProductId("");
@@ -1946,7 +2201,7 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
   };
 
   async function applyRefresh(mode: RefreshMode) {
-    if (mode === "all") await refresh();
+    if (mode === "all") await Promise.all([refresh(), reloadProductList(true)]);
     else if (mode === "catalog") await refreshCatalog();
   }
 
@@ -2002,7 +2257,7 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
     return () => {
       cancelled = true;
     };
-  }, [activeProject?.id, products.length]);
+  }, [activeProject?.id, catalogStats?.total]);
 
   useEffect(() => {
     if (!activeStoreProfile?.id) {
@@ -2027,7 +2282,7 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
     return () => {
       cancelled = true;
     };
-  }, [activeStoreProfile?.id, products.length]);
+  }, [activeStoreProfile?.id, catalogStats?.total]);
 
   async function removeBlockedUrl(entryId: string) {
     if (!activeProject?.id) return;
@@ -2123,7 +2378,7 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
   ) => {
     if (!entries.length) return;
     const updates = new Map(entries.map((entry) => [entry.productId, entry.productionCost]));
-    setProducts((current) => current.map((product) => {
+    function apply(product: Product): Product {
       const draft = updates.get(product.id);
       if (!draft) return product;
       return {
@@ -2133,7 +2388,10 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
           production_cost: productionCostPayloadFromDraft(draft),
         },
       };
-    }));
+    }
+    setCostProducts((current) => current?.map(apply) ?? current);
+    setProductList((current) => ({ ...current, items: current.items.map(apply) }));
+    setProductDetails((current) => Object.fromEntries(Object.entries(current).map(([id, product]) => [id, apply(product)])));
   }, []);
 
   async function runAction<T>(label: string, action: () => Promise<T>): Promise<T | undefined>;
@@ -2563,7 +2821,7 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
     }
     return runAction("Gerando anúncio", () =>
       (async () => {
-        const product = projectProducts.find((item) => item.id === productId);
+        const product = findProduct(productId);
         if (
           hasListingContent(product)
           && !(await confirmRegeneration(`"${product?.name ?? "Este produto"}" já possui descrição/anúncio gerado. Gerar novamente pode substituir o texto atual e somar novo custo de IA. Deseja continuar?`))
@@ -2590,7 +2848,7 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
     }
     return runAction("Gerando imagens base", () =>
       (async () => {
-        const product = projectProducts.find((item) => item.id === productId);
+        const product = findProduct(productId);
         const name = product?.name ?? "Este produto";
         const disabled = new Set(activeStoreProfile?.disabled_image_prompts ?? []);
         const existing = new Set(
@@ -2629,7 +2887,7 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
     }
     return runAction("Gerando variações de cor", () =>
       (async () => {
-        const product = projectProducts.find((item) => item.id === productId);
+        const product = findProduct(productId);
         const alreadyGenerated = existingColorVariations(product, colorVariations);
         if (
           alreadyGenerated.length
@@ -2804,7 +3062,7 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
 
   async function deleteProduct(productId = selectedProduct?.id) {
     if (!productId) return Promise.resolve();
-    const product = projectProducts.find((item) => item.id === productId);
+    const product = findProduct(productId);
     if (!(await confirmDangerousDelete(`Apagar o produto "${product?.name ?? productId}"?`))) return Promise.resolve();
     return runFluidAction("Apagando produto", async () => {
       await api<{ status: string; product_id: string }>(`/api/products/${productId}`, {
@@ -2834,7 +3092,7 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
           source_url: sourceUrl?.trim() || null,
         }),
       });
-      patchProduct(created);
+      patchProduct(created, true);
       setSelectedProductId(created.id);
       setDetailsOpen(true);
       setNotice(`Produto "${created.name}" criado.`);
@@ -2870,14 +3128,6 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
     }
   }
 
-  useEffect(() => {
-    setSelectedProductIds((current) => {
-      const projectIds = new Set(projectProducts.map((product) => product.id));
-      const next = current.filter((id) => projectIds.has(id));
-      return next.length === current.length ? current : next;
-    });
-  }, [projectProducts]);
-
   async function runBatchProductAction(
     label: string,
     productIds: string[],
@@ -2890,7 +3140,7 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
     }
     if (kind === "listing") {
       const withExisting = productIds
-        .map((id) => projectProducts.find((product) => product.id === id))
+        .map((id) => findProduct(id))
         .filter((product): product is Product => Boolean(product && hasListingContent(product)));
       if (
         withExisting.length
@@ -2901,7 +3151,7 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
     }
     if (kind === "images") {
       const withExisting = productIds
-        .map((id) => projectProducts.find((product) => product.id === id))
+        .map((id) => findProduct(id))
         .filter((product): product is Product => Boolean(product && hasBaseImages(product)));
       if (
         withExisting.length
@@ -2922,7 +3172,7 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
       // lock + merge por id, então salvar em paralelo é seguro.
       await Promise.all(
         productIds.map(async (productId) => {
-          const product = projectProducts.find((item) => item.id === productId);
+          const product = findProduct(productId);
           const current = product?.name ?? productId;
           try {
             const job = await action(productId);
@@ -2938,7 +3188,7 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
             done += 1;
             setBatchProgress({ label, total, done, current });
             setNotice(`${label}: ${done}/${total}`);
-            await refreshCatalog();
+            await refreshProduct(productId);
           }
         }),
       );
@@ -3022,7 +3272,7 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
       return;
     }
     const pendingIds = productIds.filter((id) => {
-      const product = projectProducts.find((item) => item.id === id);
+      const product = findProduct(id);
       return !productListed(product);
     });
     if (!pendingIds.length) {
@@ -3049,13 +3299,13 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
   }
 
   function exportCsv(productIds = selectedProductIds) {
-    if (!activeProject && !projectProducts.length) return Promise.resolve();
+    if (!activeProject && !listedProducts.length) return Promise.resolve();
     if (!productIds.length) {
       setNotice("Selecione pelo menos um produto pronto para exportar.");
       return Promise.resolve();
     }
     const readySelectedIds = productIds.filter((id) => {
-      const product = projectProducts.find((item) => item.id === id);
+      const product = findProduct(id);
       return Boolean(product?.listing.title && product?.listing.description);
     });
     if (!readySelectedIds.length) {
@@ -3068,7 +3318,7 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
         credentials: "same-origin",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          project_id: activeProject?.id ?? projectProducts[0]?.project_id,
+          project_id: activeProject?.id ?? findProduct(readySelectedIds[0])?.project_id,
           marketplace: activeStoreProfile?.marketplace ?? activeProject?.marketplace ?? "shopee",
           product_ids: readySelectedIds,
         }),
@@ -3139,7 +3389,7 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
             activeStoreProfile={activeStoreProfile}
             jobs={storeJobs}
             lastExport={lastExport}
-            products={projectProducts}
+            stats={catalogStats}
             projects={activeStoreProjects}
             runtimeStatus={runtimeStatus}
           />
@@ -3155,7 +3405,7 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
             limit={collectLimit}
             loginStatus={makerWorldLogin}
             manualUrl={manualUrl}
-            productCount={projectProducts.filter((product) => product.project_id === activeProject?.id).length}
+            productCount={activeProject ? catalogStats?.by_project[activeProject.id] ?? 0 : 0}
             projectName={projectName}
             projects={activeStoreProjects}
             scrolls={collectScrolls}
@@ -3185,8 +3435,14 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
             listingDraft={listingDraft}
             productNameDraft={productNameDraft}
             filters={productFilters}
-            products={filteredProjectProducts}
-            totalProductCount={projectProducts.length}
+            products={listedProducts}
+            matchedProductCount={productList.total}
+            matchedWithTitleCount={productList.withTitle}
+            totalProductCount={productList.storeTotal}
+            hasMoreProducts={Boolean(productList.nextCursor)}
+            productsLoading={productList.loading}
+            productsLoaded={productList.loaded}
+            onLoadMoreProducts={() => void loadMoreProducts()}
             selectedProduct={selectedProduct}
             selectedProductIds={selectedProductIds}
             selectedColorVariations={selectedColorVariations}
@@ -3241,7 +3497,8 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
             busy={busy}
             filaments={filaments}
             productionSettings={productionSettings}
-            products={projectProducts}
+            products={costProducts ?? []}
+            productsLoading={costProducts === null}
             runtimeStatus={runtimeStatus}
             onSaveAllProductionCosts={saveProductionCostsBatch}
             onProductionCostsSaved={syncProductionCostsInProducts}
@@ -3781,32 +4038,37 @@ function DashboardTab({
   activeStoreProfile,
   jobs,
   lastExport,
-  products,
+  stats,
   projects,
   runtimeStatus,
 }: {
   activeStoreProfile?: StoreProfile;
   jobs: Job[];
   lastExport: { filename: string; count: number; marketplace: string } | null;
-  products: Product[];
+  stats: CatalogStats | null;
   projects: Project[];
   runtimeStatus: RuntimeStatus | null;
 }) {
-  const readyCount = products.filter((product) => product.listing.title && product.listing.description).length;
-  const imageCount = products.filter((product) => product.assets.some(isImageAsset)).length;
-  const modelCount = products.filter((product) => product.assets.some(isModelAsset)).length;
-  const exportedCount = products.filter((product) => product.status === "exported").length;
-  const pendingCount = Math.max(products.length - readyCount, 0);
-  const totalCost = products.reduce((sum, product) => sum + productCostTotal(product), 0);
-  const costEvents = products.flatMap(productCostEvents);
-  const costSummary = summarizeCostEvents(costEvents);
+  // Counted on the server, so the dashboard never needs the whole catalog.
+  const productCount = stats?.total ?? 0;
+  const readyCount = stats?.ready ?? 0;
+  const imageCount = stats?.with_image ?? 0;
+  const modelCount = stats?.with_model ?? 0;
+  const exportedCount = stats?.exported ?? 0;
+  const pendingCount = Math.max(productCount - readyCount, 0);
+  const totalCost = stats?.ai_cost_usd ?? 0;
+  const costSummary = {
+    openRouter: stats?.ai_cost_by_provider.openrouter ?? 0,
+    kie: stats?.ai_cost_by_provider.kie ?? 0,
+    other: stats?.ai_cost_by_provider.other ?? 0,
+  };
   const collectJobs = jobs.filter((job) => job.type === "collect_products").slice(0, 5);
   const collectSummary = collectJobsSummary(jobs.filter((job) => job.type === "collect_products"));
-  const readyPercent = products.length ? Math.round((readyCount / products.length) * 100) : 0;
+  const readyPercent = productCount ? Math.round((readyCount / productCount) * 100) : 0;
   const chartReady = readyPercent;
-  const chartImage = products.length ? Math.round((imageCount / products.length) * 100) : 0;
-  const chartModel = products.length ? Math.round((modelCount / products.length) * 100) : 0;
-  const chartExported = products.length ? Math.round((exportedCount / products.length) * 100) : 0;
+  const chartImage = productCount ? Math.round((imageCount / productCount) * 100) : 0;
+  const chartModel = productCount ? Math.round((modelCount / productCount) * 100) : 0;
+  const chartExported = productCount ? Math.round((exportedCount / productCount) * 100) : 0;
   const maxCost = Math.max(costSummary.openRouter, costSummary.kie, costSummary.other, 0.000001);
   const usdBrl = Number(runtimeStatus?.exchange.usd_brl);
   const totalCostBrl = Number.isFinite(usdBrl) && usdBrl > 0 ? totalCost * usdBrl : null;
@@ -3842,7 +4104,7 @@ function DashboardTab({
               <span>{readyPercent}%</span>
             </div>
             <div className="donut-legend">
-              <strong>{readyCount} de {products.length}</strong>
+              <strong>{readyCount} de {productCount}</strong>
               <span>{pendingCount} pendente(s) de anúncio completo</span>
             </div>
           </div>
@@ -3854,10 +4116,10 @@ function DashboardTab({
             <h2>Pipeline de produtos</h2>
           </div>
           <div className="bar-chart-list">
-            <ChartBar label="Imagens" value={imageCount} total={products.length} percent={chartImage} />
-            <ChartBar label="3MF" value={modelCount} total={products.length} percent={chartModel} />
-            <ChartBar label="Anúncios" value={readyCount} total={products.length} percent={chartReady} />
-            <ChartBar label="Exportados" value={exportedCount} total={products.length} percent={chartExported} />
+            <ChartBar label="Imagens" value={imageCount} total={productCount} percent={chartImage} />
+            <ChartBar label="3MF" value={modelCount} total={productCount} percent={chartModel} />
+            <ChartBar label="Anúncios" value={readyCount} total={productCount} percent={chartReady} />
+            <ChartBar label="Exportados" value={exportedCount} total={productCount} percent={chartExported} />
           </div>
         </div>
 
@@ -3876,7 +4138,7 @@ function DashboardTab({
 
       <div className="dashboard-grid">
         <SummaryItem label="Projetos" value={projects.length.toString()} />
-        <SummaryItem label="Produtos" value={products.length.toString()} />
+        <SummaryItem label="Produtos" value={productCount.toString()} />
         <SummaryItem label="Coletas" value={collectSummary.totalJobs.toString()} />
         <SummaryItem label="Coletados" value={collectSummary.totalProducts.toString()} />
         <SummaryItem label="Curadoria" value="Manual" />
@@ -4581,6 +4843,7 @@ function CostsTab({
   filaments,
   productionSettings,
   products,
+  productsLoading,
   runtimeStatus,
   onSaveAllProductionCosts,
   onProductionCostsSaved,
@@ -4590,6 +4853,7 @@ function CostsTab({
   filaments: FilamentSpool[];
   productionSettings: ProductionSettings | null;
   products: Product[];
+  productsLoading: boolean;
   runtimeStatus: RuntimeStatus | null;
   onSaveAllProductionCosts: (entries: Array<{ productId: string; productionCost: ProductionCost }>) => Promise<void>;
   onProductionCostsSaved: (entries: Array<{ productId: string; productionCost: ProductionCost }>) => void;
@@ -4932,7 +5196,9 @@ function CostsTab({
               </tr>
             </tfoot>
           </table>
-          {!products.length && <p className="empty table-empty">Nenhum produto nesta loja.</p>}
+          {!products.length && (
+            <p className="empty table-empty">{productsLoading ? "Carregando produtos..." : "Nenhum produto nesta loja."}</p>
+          )}
           {products.length > 0 && !filteredProducts.length && (
             <p className="empty table-empty">Nenhum produto corresponde à busca.</p>
           )}
@@ -4956,7 +5222,13 @@ function ProductsTab({
   selectedProduct,
   selectedProductIds,
   selectedColorVariations,
+  matchedProductCount,
+  matchedWithTitleCount,
   totalProductCount,
+  hasMoreProducts,
+  productsLoading,
+  productsLoaded,
+  onLoadMoreProducts,
   onCreateManualProduct,
   onApproveProduct,
   onBatchGenerateImages,
@@ -5009,7 +5281,13 @@ function ProductsTab({
   selectedProduct?: Product;
   selectedProductIds: string[];
   selectedColorVariations: string[];
+  matchedProductCount: number;
+  matchedWithTitleCount: number;
   totalProductCount: number;
+  hasMoreProducts: boolean;
+  productsLoading: boolean;
+  productsLoaded: boolean;
+  onLoadMoreProducts: () => void;
   onCreateManualProduct: (name: string, sourceUrl?: string) => Promise<Product | undefined>;
   onApproveProduct: () => void;
   onBatchGenerateImages: (ids?: string[]) => void;
@@ -5059,17 +5337,14 @@ function ProductsTab({
   const [manualProductSourceUrl, setManualProductSourceUrl] = useState("");
   const [detailSection, setDetailSection] = useState<ProductDetailSection>("listing");
   const modelFileInputRef = useRef<HTMLInputElement>(null);
-  const PRODUCT_CARD_BATCH = 20;
-  const [renderedCount, setRenderedCount] = useState(PRODUCT_CARD_BATCH);
   const productListSentinelRef = useRef<HTMLDivElement>(null);
-  const visibleCount = Math.min(renderedCount, products.length);
-  const paginatedProducts = products.slice(0, visibleCount);
-  const hasMoreProducts = visibleCount < products.length;
+  const visibleCount = products.length;
+  const paginatedProducts = products;
   const visibleProductIds = paginatedProducts.map((product) => product.id);
   const allSelected = visibleProductIds.length > 0 && visibleProductIds.every((id) => selectedProductIds.includes(id));
   const progressValue = batchProgress ? Math.round((batchProgress.done / Math.max(batchProgress.total, 1)) * 100) : 0;
   const progressLabel = batchProgress ? `${batchProgress.label}: ${batchProgress.done}/${batchProgress.total}` : "";
-  const visibleReadyCount = products.filter((product) => product.listing.title).length;
+  const visibleReadyCount = matchedWithTitleCount;
   const selectedCostEvents = selectedProduct ? productCostEvents(selectedProduct) : [];
   const selectedCostSummary = summarizeCostEvents(selectedCostEvents);
 
@@ -5078,25 +5353,22 @@ function ProductsTab({
     setDetailSection("listing");
   }, [selectedProduct?.id]);
 
+  // Next page from the server when the end of the list comes into view. The
+  // observer is recreated after each page, so a sentinel that is still visible
+  // (short pages, tall screens) keeps loading until the screen is filled.
   useEffect(() => {
-    setRenderedCount(PRODUCT_CARD_BATCH);
-  }, [filters.query, filters.status, filters.characteristic, totalProductCount]);
-
-  useEffect(() => {
-    if (!hasMoreProducts) return;
+    if (!hasMoreProducts || productsLoading) return;
     const sentinel = productListSentinelRef.current;
     if (!sentinel) return;
     const observer = new IntersectionObserver(
       (entries) => {
-        if (entries.some((entry) => entry.isIntersecting)) {
-          setRenderedCount((count) => Math.min(products.length, count + PRODUCT_CARD_BATCH));
-        }
+        if (entries.some((entry) => entry.isIntersecting)) onLoadMoreProducts();
       },
-      { rootMargin: "200px" },
+      { rootMargin: "400px" },
     );
     observer.observe(sentinel);
     return () => observer.disconnect();
-  }, [hasMoreProducts, products.length, visibleCount]);
+  }, [hasMoreProducts, productsLoading, products.length]);
 
   const listingDirty = Boolean(
     detailsOpen
@@ -5263,7 +5535,7 @@ function ProductsTab({
             </button>
           </div>
           <span className="selection-count">
-            {selectedProductIds.length} selecionado(s) - {visibleCount}/{products.length} carregados - {products.length}/{totalProductCount} visíveis
+            {selectedProductIds.length} selecionado(s) - {visibleCount}/{matchedProductCount} carregados - {matchedProductCount}/{totalProductCount} visíveis
           </span>
         </div>
         {batchProgress && (
@@ -5345,11 +5617,15 @@ function ProductsTab({
               </article>
             );
           })}
-          {!products.length && <p className="empty table-empty">Nenhum produto encontrado com os filtros atuais.</p>}
+          {!products.length && (
+            <p className="empty table-empty">
+              {productsLoaded ? "Nenhum produto encontrado com os filtros atuais." : "Carregando produtos..."}
+            </p>
+          )}
         </div>
         {hasMoreProducts && (
           <div className="product-list-load-more" ref={productListSentinelRef}>
-            Role para carregar mais produtos ({visibleCount} de {products.length})
+            {productsLoading ? "Carregando mais produtos..." : `Role para carregar mais produtos (${visibleCount} de ${matchedProductCount})`}
           </div>
         )}
       </div>
@@ -5360,9 +5636,9 @@ function ProductsTab({
           <h2>Resumo</h2>
         </div>
         <div className="summary-list">
-          <SummaryItem label="Total" value={products.length.toString()} />
+          <SummaryItem label="Total" value={matchedProductCount.toString()} />
           <SummaryItem label="Com anúncio" value={visibleReadyCount.toString()} />
-          <SummaryItem label="Pendentes" value={(products.length - visibleReadyCount).toString()} />
+          <SummaryItem label="Pendentes" value={Math.max(0, matchedProductCount - visibleReadyCount).toString()} />
         </div>
       </div>
 
