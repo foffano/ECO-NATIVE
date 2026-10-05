@@ -4,10 +4,11 @@ from datetime import datetime
 from pathlib import Path
 
 from backend.app.core.paths import EXPORTS_DIR
-from backend.app.db.models import Asset, Marketplace, Product, ProductStatus
+from backend.app.db.models import Asset, Marketplace, Product, ProductStatus, StudioState
 from backend.app.db.store import store
 from backend.app.services.cloudflare_r2 import r2_configured, upload_file_to_r2
 from backend.app.services.image_generation import r2_key_prefix
+from backend.app.services.shopee_template import fill_template, parse_dimensions
 from backend.app.services.sku import ensure_color_skus, ensure_product_sku
 from backend.app.services.store_profiles import get_store_profile
 
@@ -209,36 +210,80 @@ def build_product_rows(product: Product, integration_no: int) -> list[dict[str, 
     return rows
 
 
-def export_marketplace_csv(
-    project_id: str,
-    marketplace: Marketplace,
-    product_ids: list[str],
-) -> dict[str, str | int] | None:
+def _ready_products(project_id: str, product_ids: list[str]) -> tuple[list[Product], StudioState]:
     state = store.load()
     if product_ids:
         selected_ids = set(product_ids)
         products = [p for p in state.products if p.id in selected_ids]
     else:
         products = [p for p in state.products if p.project_id == project_id]
+    return [p for p in products if p.listing.title and p.listing.description], state
 
-    ready = [p for p in products if p.listing.title and p.listing.description]
+
+def _rows_with_products(products: list[Product], state: StudioState) -> list[tuple[dict[str, str], Product]]:
+    """Export rows (one per colour variation) paired with their product."""
+    pairs = []
+    for integration_no, product in enumerate(products, start=1):
+        project = next((item for item in state.projects if item.id == product.project_id), None)
+        store_profile = get_store_profile(project.store_profile_id if project else None)
+        ensure_product_sku(product, state.products, project, store_profile)
+        pairs.extend((row, product) for row in build_product_rows(product, integration_no))
+    return pairs
+
+
+def _mark_exported(products: list[Product]) -> None:
+    # Also saves the SKUs and image URLs filled in while building the rows.
+    for product in products:
+        product.status = ProductStatus.exported
+        store.upsert_product(product)
+
+
+def export_marketplace_csv(
+    project_id: str,
+    marketplace: Marketplace,
+    product_ids: list[str],
+) -> dict[str, str | int] | None:
+    ready, state = _ready_products(project_id, product_ids)
     if not ready:
         return None
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     output = Path(EXPORTS_DIR) / f"{marketplace.value}_export_{timestamp}.csv"
 
+    rows = [row for row, _ in _rows_with_products(ready, state)]
     with output.open("w", newline="", encoding="utf-8-sig") as handle:
         writer = csv.DictWriter(handle, fieldnames=SHOPEE_HEADERS, delimiter=";")
         writer.writeheader()
-        for integration_no, product in enumerate(ready, start=1):
-            project = next((item for item in state.projects if item.id == product.project_id), None)
-            store_profile = get_store_profile(project.store_profile_id if project else None)
-            ensure_product_sku(product, state.products, project, store_profile)
-            for row in build_product_rows(product, integration_no):
-                writer.writerow(row)
-
-            product.status = ProductStatus.exported
-            store.upsert_product(product)
+        writer.writerows(rows)
+    _mark_exported(ready)
 
     return {"path": str(output), "count": len(ready), "marketplace": marketplace.value}
+
+
+def export_shopee_template(template: Path, project_id: str, product_ids: list[str]) -> dict[str, str | int] | None:
+    """Fill the store's Shopee mass-upload template with the ready products.
+
+    Unlike the CSV, the category is left blank (Shopee expects its numeric
+    category id, which the listing does not have) and the package measures
+    come from the listing instead of a fixed 10 cm.
+    """
+    ready, state = _ready_products(project_id, product_ids)
+    if not ready:
+        return None
+    rows = []
+    for row, product in _rows_with_products(ready, state):
+        row["Categoria"] = ""
+        dimensions = parse_dimensions(product.listing.parcel_size)
+        if dimensions:
+            row["Comprimento"], row["Largura"], row["Altura"] = (str(value) for value in dimensions)
+        rows.append(row)
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    output = Path(EXPORTS_DIR) / f"shopee_envio_em_massa_{timestamp}.xlsx"
+    try:
+        fill_template(template, rows, output)
+    except BaseException:
+        output.unlink(missing_ok=True)
+        raise
+    _mark_exported(ready)
+    return {"path": str(output), "count": len(ready), "rows": len(rows), "marketplace": Marketplace.shopee.value}

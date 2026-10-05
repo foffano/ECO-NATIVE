@@ -10,6 +10,7 @@ import {
   ChevronDown,
   Download,
   Eye,
+  FileSpreadsheet,
   FolderOpen,
   FolderPlus,
   Gauge,
@@ -1656,6 +1657,21 @@ function ListingProductionHint({
   );
 }
 
+type ShopeeTemplateStatus = { configured: boolean; uploaded_at?: string };
+
+// Opens the browser's file picker. Call it straight from a click handler:
+// browsers block pickers that are not tied to a user gesture.
+function pickFile(accept: string): Promise<File | null> {
+  return new Promise((resolve) => {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = accept;
+    input.addEventListener("change", () => resolve(input.files?.[0] ?? null), { once: true });
+    input.addEventListener("cancel", () => resolve(null), { once: true });
+    input.click();
+  });
+}
+
 function filenameFromDisposition(disposition: string | null, fallback: string): string {
   const utf8Match = disposition?.match(/filename\*=UTF-8''([^;]+)/i);
   if (utf8Match?.[1]) return decodeURIComponent(utf8Match[1]);
@@ -1796,6 +1812,7 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
   // The costs table edits every product of the store, so it loads the whole
   // catalog itself, and only while that tab is open.
   const [costProducts, setCostProducts] = useState<Product[] | null>(null);
+  const [shopeeTemplate, setShopeeTemplate] = useState<ShopeeTemplateStatus | null>(null);
   const [jobs, setJobs] = useState<Job[]>([]);
   const [storeProfiles, setStoreProfiles] = useState<StoreProfile[]>([]);
   const [settings, setSettings] = useState<SettingsPayload | null>(null);
@@ -3298,11 +3315,17 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
     }
   }
 
-  function exportCsv(productIds = selectedProductIds) {
-    if (!activeProject && !listedProducts.length) return Promise.resolve();
+  useEffect(() => {
+    if (!activeStoreProfile?.id) return;
+    api<ShopeeTemplateStatus>("/api/exports/shopee-template")
+      .then(setShopeeTemplate)
+      .catch(() => setShopeeTemplate(null));
+  }, [activeStoreProfile?.id]);
+
+  function readyExportIds(productIds: string[]): string[] | null {
     if (!productIds.length) {
       setNotice("Selecione pelo menos um produto pronto para exportar.");
-      return Promise.resolve();
+      return null;
     }
     const readySelectedIds = productIds.filter((id) => {
       const product = findProduct(id);
@@ -3310,37 +3333,86 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
     });
     if (!readySelectedIds.length) {
       setNotice("Selecione produtos com anúncio gerado antes de exportar.");
-      return Promise.resolve();
+      return null;
     }
-    return runAction("Exportando CSV", async () => {
-      const response = await fetch(`${API_BASE}/api/exports`, {
-        method: "POST",
-        credentials: "same-origin",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          project_id: activeProject?.id ?? findProduct(readySelectedIds[0])?.project_id,
-          marketplace: activeStoreProfile?.marketplace ?? activeProject?.marketplace ?? "shopee",
-          product_ids: readySelectedIds,
-        }),
-      });
-      if (!response.ok) throw new Error(await readApiError(response));
-      const blob = await response.blob();
-      const filename = filenameFromDisposition(response.headers.get("content-disposition"), `exportacao-${todayDateString()}.csv`);
-      const url = URL.createObjectURL(blob);
-      const link = document.createElement("a");
-      link.href = url;
-      link.download = filename;
-      document.body.appendChild(link);
-      link.click();
-      link.remove();
-      URL.revokeObjectURL(url);
-      const result = {
-        filename,
-        count: Number(response.headers.get("X-Eco-Export-Count")) || readySelectedIds.length,
-        marketplace: response.headers.get("X-Eco-Export-Marketplace") || activeStoreProfile?.marketplace || "shopee",
-      };
-      setLastExport(result);
-      return result;
+    return readySelectedIds;
+  }
+
+  // Posts the export, downloads the returned file and refreshes the exported
+  // products, whose status changes to "exportado".
+  async function downloadExport(path: string, productIds: string[], fallbackName: string) {
+    const response = await fetch(`${API_BASE}${path}`, {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        project_id: activeProject?.id ?? findProduct(productIds[0])?.project_id,
+        marketplace: activeStoreProfile?.marketplace ?? activeProject?.marketplace ?? "shopee",
+        product_ids: productIds,
+      }),
+    });
+    if (!response.ok) throw new Error(await readApiError(response));
+    const blob = await response.blob();
+    const filename = filenameFromDisposition(response.headers.get("content-disposition"), fallbackName);
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+    const result = {
+      filename,
+      count: Number(response.headers.get("X-Eco-Export-Count")) || productIds.length,
+      marketplace: response.headers.get("X-Eco-Export-Marketplace") || activeStoreProfile?.marketplace || "shopee",
+    };
+    setLastExport(result);
+    void Promise.all(productIds.map(refreshProduct));
+    return result;
+  }
+
+  function exportCsv(productIds = selectedProductIds) {
+    if (!activeProject && !listedProducts.length) return Promise.resolve();
+    const readySelectedIds = readyExportIds(productIds);
+    if (!readySelectedIds) return Promise.resolve();
+    return runAction(
+      "Exportando CSV",
+      () => downloadExport("/api/exports", readySelectedIds, `exportacao-${todayDateString()}.csv`),
+      { refresh: false, blockUi: true, notifySuccess: true },
+    );
+  }
+
+  async function uploadShopeeTemplate(file: File) {
+    const status = await apiUpload<ShopeeTemplateStatus>("/api/exports/shopee-template", file);
+    setShopeeTemplate(status);
+    return status;
+  }
+
+  function replaceShopeeTemplate() {
+    const picked = pickFile(".xlsx");
+    return runAction("Salvando template da Shopee", async () => {
+      const file = await picked;
+      if (!file) throw new Error("__cancelled__");
+      return uploadShopeeTemplate(file);
+    }, { refresh: false, blockUi: true, notifySuccess: true });
+  }
+
+  // Fills the store's own Shopee mass-upload template. Without one yet, the
+  // file picker opens right away and the export continues after the upload.
+  function exportShopeeSheet(productIds = selectedProductIds) {
+    if (!activeProject && !listedProducts.length) return Promise.resolve();
+    const readySelectedIds = readyExportIds(productIds);
+    if (!readySelectedIds) return Promise.resolve();
+    const picked = shopeeTemplate?.configured ? null : pickFile(".xlsx");
+    if (picked) setNotice("Escolha o template de envio em massa baixado da Shopee (.xlsx).");
+    return runAction("Gerando planilha da Shopee", async () => {
+      if (picked) {
+        const file = await picked;
+        if (!file) throw new Error("__cancelled__");
+        await uploadShopeeTemplate(file);
+      }
+      return downloadExport("/api/exports/shopee-xlsx", readySelectedIds, `shopee-envio-em-massa-${todayDateString()}.xlsx`);
     }, { refresh: false, blockUi: true, notifySuccess: true });
   }
 
@@ -3459,6 +3531,9 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
             onGenerateListing={generateListing}
             onRegenerateImage={regenerateImage}
             onExportSelected={exportCsv}
+            onExportShopeeSheet={exportShopeeSheet}
+            onReplaceShopeeTemplate={replaceShopeeTemplate}
+            shopeeTemplate={shopeeTemplate}
             onDownloadProductFiles={downloadProductFiles}
             onDeleteModelAsset={deleteModelAsset}
             onListingDraftChange={setListingDraft}
@@ -5243,6 +5318,9 @@ function ProductsTab({
   onGenerateImages,
   onGenerateListing,
   onExportSelected,
+  onExportShopeeSheet,
+  onReplaceShopeeTemplate,
+  shopeeTemplate,
   onListingDraftChange,
   onOpenDetails,
   onDownloadProductFiles,
@@ -5302,6 +5380,9 @@ function ProductsTab({
   onGenerateImages: (id?: string) => void;
   onGenerateListing: (id?: string) => void;
   onExportSelected: (ids?: string[]) => void;
+  onExportShopeeSheet: (ids?: string[]) => void;
+  onReplaceShopeeTemplate: () => void;
+  shopeeTemplate: ShopeeTemplateStatus | null;
   onListingDraftChange: (listing: Listing) => void;
   onOpenDetails: (id: string) => void;
   onDownloadProductFiles: (id?: string) => void;
@@ -5529,6 +5610,24 @@ function ProductsTab({
             </button>
             <button className="primary ghost" onClick={() => onExportSelected(selectedProductIds)} disabled={busy || !selectedProductIds.length}>
               <Download size={16} /> Exportar CSV
+            </button>
+            <button
+              className="primary ghost"
+              onClick={() => onExportShopeeSheet(selectedProductIds)}
+              disabled={busy || !selectedProductIds.length}
+              title={shopeeTemplate?.configured ? "Preenche o template de envio em massa da sua loja" : "Na primeira vez, escolha o template de envio em massa baixado da Shopee"}
+            >
+              <FileSpreadsheet size={16} /> Planilha Shopee
+            </button>
+            <button
+              className="primary ghost"
+              onClick={onReplaceShopeeTemplate}
+              disabled={busy}
+              title={shopeeTemplate?.uploaded_at
+                ? `Template atual enviado em ${new Date(shopeeTemplate.uploaded_at).toLocaleString("pt-BR")}. Clique para trocar.`
+                : "Enviar o template de envio em massa baixado da Shopee"}
+            >
+              <Upload size={16} /> {shopeeTemplate?.configured ? "Trocar template" : "Enviar template"}
             </button>
             <button className="danger-button" onClick={() => onBatchDeleteProducts()} disabled={busy || !selectedProductIds.length}>
               <Trash2 size={16} /> Apagar selecionados
