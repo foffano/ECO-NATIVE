@@ -197,5 +197,20 @@ app.include_router(mercadolivre_callback_router, prefix="/api/auth/mercado-livre
 # In production the same local process serves the compiled React application.
 # Cloudflare Tunnel therefore exposes one origin while all files and work stay here.
 FRONTEND_DIR = Path(__file__).resolve().parents[2] / "dist" / "frontend"
+
+
+class FrontendFiles(StaticFiles):
+    """Vite names bundles by content hash, so they can be cached for good; the
+    HTML that points at them must be revalidated, or browsers keep running the
+    previous release after an update."""
+
+    async def get_response(self, path, scope):
+        response = await super().get_response(path, scope)
+        if response.status_code in (200, 304):
+            hashed = path.startswith("assets/")
+            response.headers["Cache-Control"] = "public, max-age=31536000, immutable" if hashed else "no-cache"
+        return response
+
+
 if FRONTEND_DIR.exists():
-    app.mount("/", StaticFiles(directory=FRONTEND_DIR, html=True), name="frontend")
+    app.mount("/", FrontendFiles(directory=FRONTEND_DIR, html=True), name="frontend")

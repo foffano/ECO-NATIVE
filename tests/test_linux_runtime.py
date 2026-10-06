@@ -72,3 +72,19 @@ def test_corrupt_auth_does_not_reopen_admin_setup():
     AUTH_PATH.write_text("{broken")
     with pytest.raises(RuntimeError, match="cadastro inicial permanece bloqueado"):
         setup_required()
+
+
+def test_frontend_html_is_revalidated_and_bundles_are_immutable(tmp_path):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from backend.app.main import FrontendFiles
+
+    (tmp_path / "assets").mkdir()
+    (tmp_path / "index.html").write_text("<html></html>")
+    (tmp_path / "assets" / "index-abc123.js").write_text("console.log(1)")
+    app = FastAPI()
+    app.mount("/", FrontendFiles(directory=tmp_path, html=True))
+    client = TestClient(app)
+    assert client.get("/").headers["cache-control"] == "no-cache"
+    assert client.get("/index.html").headers["cache-control"] == "no-cache"
+    assert "immutable" in client.get("/assets/index-abc123.js").headers["cache-control"]
