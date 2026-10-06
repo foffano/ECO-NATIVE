@@ -12,9 +12,11 @@ export default defineConfig({
   server: {
     host: "127.0.0.1",
     port: 5173,
+    // The shorthand form would rewrite Host to the backend's, and the backend
+    // refuses writes whose Origin differs from Host; keep the browser's Host.
     proxy: {
-      "/api": "http://127.0.0.1:18765",
-      "/health": "http://127.0.0.1:18765"
+      "/api": { target: "http://127.0.0.1:18765", changeOrigin: false },
+      "/health": { target: "http://127.0.0.1:18765", changeOrigin: false }
     }
   },
   build: {
