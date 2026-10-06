@@ -4986,88 +4986,6 @@ function ActionMenu({
   );
 }
 
-function ProductTile({
-  product,
-  busy,
-  selected,
-  active,
-  onToggleSelected,
-  onOpen,
-  onToggleListed,
-  onGenerateListing,
-  onGenerateImages,
-  onDelete,
-}: {
-  product: Product;
-  busy: boolean;
-  selected: boolean;
-  active: boolean;
-  onToggleSelected: () => void;
-  onOpen: () => void;
-  onToggleListed: () => void;
-  onGenerateListing: () => void;
-  onGenerateImages: () => void;
-  onDelete: () => void;
-}) {
-  const listed = productListed(product);
-  const imageUrl = productThumbnailUrl(product, 384);
-  const subtitle = productCardSubtitle(product);
-  const badges = productPipelineBadges(product);
-  const stage = badges.find((badge) => badge.key === "stage");
-  const steps = badges.filter((badge) => badge.key !== "stage");
-  const className = ["product-tile", listed ? "published" : "", selected ? "selected" : "", active ? "active" : ""]
-    .filter(Boolean)
-    .join(" ");
-
-  return (
-    <article className={className}>
-      <div className="product-tile-media">
-        <button className="product-tile-image" onClick={onOpen} aria-label={`Abrir ${product.name}`}>
-          {imageUrl ? <img src={imageUrl} alt="" loading="lazy" decoding="async" /> : <ShoppingBag size={28} />}
-        </button>
-        <label className="product-tile-check" aria-label={`Selecionar ${product.name}`}>
-          <input type="checkbox" checked={selected} onChange={onToggleSelected} disabled={busy} />
-        </label>
-        <div className="product-tile-menu">
-          <ActionMenu
-            label={`Ações de ${product.name}`}
-            disabled={busy}
-            items={[
-              { key: "listing", label: "Gerar anúncio", icon: <BrainCircuit size={15} />, onClick: onGenerateListing },
-              { key: "images", label: "Gerar imagens", icon: <ImagePlus size={15} />, onClick: onGenerateImages },
-              { key: "delete", label: "Apagar produto", icon: <Trash2 size={15} />, danger: true, onClick: onDelete },
-            ]}
-          />
-        </div>
-        {stage && stage.detail !== "Aguardando" && <span className={`product-tile-stage ${stage.state}`}>{stage.detail}</span>}
-      </div>
-      <button className="product-tile-body" onClick={onOpen}>
-        <strong title={product.name}>{product.name}</strong>
-        <span className={subtitle ? "product-tile-subtitle" : "product-tile-subtitle muted"}>
-          {subtitle || "Sem anúncio gerado ainda"}
-        </span>
-      </button>
-      <div className="product-tile-steps">
-        {steps.map((badge) => (
-          <span className={`product-tile-step ${badge.state}`} key={badge.key} title={`${badge.label}: ${badge.detail}`}>
-            <span className="product-tile-step-dot" aria-hidden="true" />
-            {badge.label}
-          </span>
-        ))}
-      </div>
-      <button
-        className={listed ? "publish-toggle on" : "publish-toggle"}
-        onClick={onToggleListed}
-        disabled={busy}
-        aria-pressed={listed}
-        title={listed ? "Clique para marcar como não publicado" : "Clique quando o produto estiver publicado"}
-      >
-        {listed ? <><Check size={15} /> Publicado</> : "Marcar como publicado"}
-      </button>
-    </article>
-  );
-}
-
 type ProductViewMode = "grid" | "board";
 const PRODUCT_VIEW_MODE_KEY = "eco_native_products_view";
 
@@ -5102,15 +5020,150 @@ type BoardColumnState = {
   loading: boolean;
 };
 
-type ProductTileActions = {
-  onOpen: () => void;
-  onToggleSelected: () => void;
-  onGenerateListing: () => void;
-  onGenerateImages: () => void;
-  onDelete: () => void;
+// Card callbacks take the product, so one stable object serves every card
+// and memoized cards skip re-rendering when the page around them changes.
+type ProductCardHandlers = {
+  open: (productId: string) => void;
+  toggleSelected: (productId: string) => void;
+  toggleListed: (product: Product) => void;
+  generateListing: (productId: string) => void;
+  generateImages: (productId: string) => void;
+  remove: (productId: string) => void;
+};
+
+// Returns an object whose functions never change but always call the latest
+// version of `handlers`.
+function useStableHandlers<T extends Record<string, (...args: never[]) => unknown>>(handlers: T): T {
+  const ref = useRef(handlers);
+  ref.current = handlers;
+  return useMemo(() => {
+    const stable = {} as Record<string, (...args: unknown[]) => unknown>;
+    for (const key of Object.keys(handlers)) {
+      stable[key] = (...args: unknown[]) => (ref.current[key] as (...args: unknown[]) => unknown)(...args);
+    }
+    return stable as unknown as T;
+  }, []);
+}
+
+// Calls onLoadMore when it scrolls into view (inside `root` when given).
+// The observer is recreated whenever `rerunKey` changes, so a sentinel that
+// is still visible after a page arrives keeps loading until the space is filled.
+function LoadMoreSentinel({
+  enabled,
+  onLoadMore,
+  rerunKey,
+  root,
+  className,
+  children,
+}: {
+  enabled: boolean;
+  onLoadMore: () => void;
+  rerunKey: number;
+  root?: React.RefObject<HTMLElement | null>;
+  className: string;
+  children: React.ReactNode;
+}) {
+  const sentinelRef = useRef<HTMLDivElement>(null);
+  const callbackRef = useRef(onLoadMore);
+  callbackRef.current = onLoadMore;
+
+  useEffect(() => {
+    const sentinel = sentinelRef.current;
+    if (!enabled || !sentinel) return;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) callbackRef.current();
+      },
+      { root: root?.current ?? null, rootMargin: "400px" },
+    );
+    observer.observe(sentinel);
+    return () => observer.disconnect();
+  }, [enabled, rerunKey]);
+
+  return <div className={className} ref={sentinelRef}>{children}</div>;
+}
+
+const ProductTile = React.memo(function ProductTile({
+  product,
+  busy,
+  selected,
+  active,
+  handlers,
+}: {
+  product: Product;
+  busy: boolean;
+  selected: boolean;
+  active: boolean;
+  handlers: ProductCardHandlers;
+}) {
+  const listed = productListed(product);
+  const imageUrl = productThumbnailUrl(product, 384);
+  const subtitle = productCardSubtitle(product);
+  const badges = productPipelineBadges(product);
+  const stage = badges.find((badge) => badge.key === "stage");
+  const steps = badges.filter((badge) => badge.key !== "stage");
+  const open = () => handlers.open(product.id);
+  const className = ["product-tile", listed ? "published" : "", selected ? "selected" : "", active ? "active" : ""]
+    .filter(Boolean)
+    .join(" ");
+
+  return (
+    <article className={className}>
+      <div className="product-tile-media">
+        <button className="product-tile-image" onClick={open} aria-label={`Abrir ${product.name}`}>
+          {imageUrl ? <img src={imageUrl} alt="" loading="lazy" decoding="async" /> : <ShoppingBag size={28} />}
+        </button>
+        <label className="product-tile-check" aria-label={`Selecionar ${product.name}`}>
+          <input type="checkbox" checked={selected} onChange={() => handlers.toggleSelected(product.id)} disabled={busy} />
+        </label>
+        <div className="product-tile-menu">
+          <ActionMenu
+            label={`Ações de ${product.name}`}
+            disabled={busy}
+            items={[
+              { key: "listing", label: "Gerar anúncio", icon: <BrainCircuit size={15} />, onClick: () => handlers.generateListing(product.id) },
+              { key: "images", label: "Gerar imagens", icon: <ImagePlus size={15} />, onClick: () => handlers.generateImages(product.id) },
+              { key: "delete", label: "Apagar produto", icon: <Trash2 size={15} />, danger: true, onClick: () => handlers.remove(product.id) },
+            ]}
+          />
+        </div>
+        {stage && stage.detail !== "Aguardando" && <span className={`product-tile-stage ${stage.state}`}>{stage.detail}</span>}
+      </div>
+      <button className="product-tile-body" onClick={open}>
+        <strong title={product.name}>{product.name}</strong>
+        <span className={subtitle ? "product-tile-subtitle" : "product-tile-subtitle muted"}>
+          {subtitle || "Sem anúncio gerado ainda"}
+        </span>
+      </button>
+      <div className="product-tile-steps">
+        {steps.map((badge) => (
+          <span className={`product-tile-step ${badge.state}`} key={badge.key} title={`${badge.label}: ${badge.detail}`}>
+            <span className="product-tile-step-dot" aria-hidden="true" />
+            {badge.label}
+          </span>
+        ))}
+      </div>
+      <button
+        className={listed ? "publish-toggle on" : "publish-toggle"}
+        onClick={() => handlers.toggleListed(product)}
+        disabled={busy}
+        aria-pressed={listed}
+        title={listed ? "Clique para marcar como não publicado" : "Clique quando o produto estiver publicado"}
+      >
+        {listed ? <><Check size={15} /> Publicado</> : "Marcar como publicado"}
+      </button>
+    </article>
+  );
+});
+
+type BoardHandlers = {
+  dragStart: (productId: string) => void;
+  dragEnd: () => void;
+  move: (product: Product, target: BoardColumnKey) => void;
 };
 
 function ProductBoard({
+  active,
   filters,
   revision,
   freshProducts,
@@ -5118,8 +5171,9 @@ function ProductBoard({
   selectedProductIds,
   activeProductId,
   onMoveProduct,
-  productActions,
+  handlers,
 }: {
+  active: boolean;
   filters: ProductFilters;
   revision: number;
   freshProducts: Record<string, Product>;
@@ -5127,7 +5181,7 @@ function ProductBoard({
   selectedProductIds: string[];
   activeProductId?: string;
   onMoveProduct: (product: Product, column: BoardColumnKey) => Promise<unknown>;
-  productActions: (product: Product) => ProductTileActions;
+  handlers: ProductCardHandlers;
 }) {
   const [columns, setColumns] = useState<Partial<Record<BoardColumnKey, BoardColumnState>>>({});
   // Drops show at once; the server's answer then replaces them.
@@ -5137,13 +5191,17 @@ function ProductBoard({
   const columnsRef = useRef(columns);
   columnsRef.current = columns;
   const requestRef = useRef(0);
+  const loadedRevisionRef = useRef<number | null>(null);
 
   function columnPath(column: (typeof BOARD_COLUMNS)[number], limit: number, cursor?: string | null) {
     return productPagePath({ ...filters, status: column.status, publication: column.publication }, limit, cursor);
   }
 
-  // Reloads every column, keeping as many items as each already shows.
+  // Reloads every column, keeping as many items as each already shows. While
+  // the board is hidden, changes wait until it is shown again.
   useEffect(() => {
+    if (!active || loadedRevisionRef.current === revision) return;
+    loadedRevisionRef.current = revision;
     const request = ++requestRef.current;
     const loaded = columnsRef.current;
     setColumns((current) => {
@@ -5163,17 +5221,22 @@ function ProductBoard({
       })
       .catch(() => {
         if (request !== requestRef.current) return;
+        loadedRevisionRef.current = null;
         setColumns((current) => Object.fromEntries(
           Object.entries(current).map(([key, state]) => [key, { ...state, loading: false }]),
         ));
       });
-  }, [revision]);
+  }, [revision, active]);
 
   async function loadMore(column: (typeof BOARD_COLUMNS)[number]) {
     const state = columnsRef.current[column.key];
     if (!state?.nextCursor || state.loading) return;
     const request = requestRef.current;
-    setColumns((current) => ({ ...current, [column.key]: { ...state, loading: true } }));
+    const loadingState = { ...state, loading: true };
+    // The ref is updated now so a second observer callback cannot fire the
+    // same page before React re-renders.
+    columnsRef.current = { ...columnsRef.current, [column.key]: loadingState };
+    setColumns((current) => ({ ...current, [column.key]: loadingState }));
     try {
       const page = await api<ProductPage>(columnPath(column, PRODUCT_PAGE_SIZE, state.nextCursor));
       if (request !== requestRef.current) return;
@@ -5234,6 +5297,15 @@ function ProductBoard({
     });
   }
 
+  const boardHandlers = useStableHandlers<BoardHandlers>({
+    dragStart: (productId) => setDraggingId(productId),
+    dragEnd: () => {
+      setDraggingId(null);
+      setDropTarget(null);
+    },
+    move: moveProduct,
+  });
+
   function handleDrop(event: React.DragEvent, target: BoardColumnKey) {
     event.preventDefault();
     setDropTarget(null);
@@ -5248,15 +5320,14 @@ function ProductBoard({
       {BOARD_COLUMNS.map((column) => {
         const state = columns[column.key];
         const items = placed.byColumn[column.key];
-        const total = Math.max(items.length, (state?.total ?? 0) + placed.delta[column.key]);
         return (
-          <section
+          <BoardColumn
             key={column.key}
-            className={[
-              "board-column",
-              column.key === "listed" ? "published" : "",
-              dropTarget === column.key ? "drop-target" : "",
-            ].filter(Boolean).join(" ")}
+            column={column}
+            state={state}
+            items={items}
+            total={Math.max(items.length, (state?.total ?? 0) + placed.delta[column.key])}
+            dropTarget={dropTarget === column.key}
             onDragOver={(event) => {
               if (!draggingId) return;
               event.preventDefault();
@@ -5267,57 +5338,95 @@ function ProductBoard({
               if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDropTarget(null);
             }}
             onDrop={(event) => handleDrop(event, column.key)}
-            aria-label={column.label}
+            onLoadMore={() => void loadMore(column)}
           >
-            <header className="board-column-head">
-              {column.key === "listed" && <Check size={15} />}
-              <h3>{column.label}</h3>
-              <span className="board-column-count">{state ? total : "…"}</span>
-            </header>
-            <div className="board-column-list">
-              {items.map((product) => (
-                <BoardCard
-                  key={product.id}
-                  product={product}
-                  column={column.key}
-                  busy={busy}
-                  pending={Boolean(pendingMoves[product.id])}
-                  selected={selectedProductIds.includes(product.id)}
-                  active={product.id === activeProductId}
-                  dragging={draggingId === product.id}
-                  onDragStart={(event) => {
-                    event.dataTransfer.setData("text/plain", product.id);
-                    event.dataTransfer.effectAllowed = "move";
-                    setDraggingId(product.id);
-                  }}
-                  onDragEnd={() => {
-                    setDraggingId(null);
-                    setDropTarget(null);
-                  }}
-                  onMove={(target) => moveProduct(product, target)}
-                  {...productActions(product)}
-                />
-              ))}
-              {state && !state.loading && !items.length && (
-                <p className="board-column-empty">
-                  {column.key === "listed" ? "Arraste para cá o que você já publicou" : "Nenhum produto"}
-                </p>
-              )}
-              {state?.nextCursor && (
-                <button className="board-load-more" onClick={() => void loadMore(column)} disabled={state.loading}>
-                  {state.loading ? "Carregando..." : `Carregar mais (${items.length} de ${total})`}
-                </button>
-              )}
-              {!state && <p className="board-column-empty">Carregando...</p>}
-            </div>
-          </section>
+            {items.map((product) => (
+              <BoardCard
+                key={product.id}
+                product={product}
+                column={column.key}
+                busy={busy}
+                pending={Boolean(pendingMoves[product.id])}
+                selected={selectedProductIds.includes(product.id)}
+                active={product.id === activeProductId}
+                dragging={draggingId === product.id}
+                handlers={handlers}
+                boardHandlers={boardHandlers}
+              />
+            ))}
+          </BoardColumn>
         );
       })}
     </div>
   );
 }
 
-function BoardCard({
+function BoardColumn({
+  column,
+  state,
+  items,
+  total,
+  dropTarget,
+  onDragOver,
+  onDragLeave,
+  onDrop,
+  onLoadMore,
+  children,
+}: {
+  column: (typeof BOARD_COLUMNS)[number];
+  state?: BoardColumnState;
+  items: Product[];
+  total: number;
+  dropTarget: boolean;
+  onDragOver: (event: React.DragEvent) => void;
+  onDragLeave: (event: React.DragEvent) => void;
+  onDrop: (event: React.DragEvent) => void;
+  onLoadMore: () => void;
+  children: React.ReactNode;
+}) {
+  const listRef = useRef<HTMLDivElement>(null);
+  return (
+    <section
+      className={[
+        "board-column",
+        column.key === "listed" ? "published" : "",
+        dropTarget ? "drop-target" : "",
+      ].filter(Boolean).join(" ")}
+      onDragOver={onDragOver}
+      onDragLeave={onDragLeave}
+      onDrop={onDrop}
+      aria-label={column.label}
+    >
+      <header className="board-column-head">
+        {column.key === "listed" && <Check size={15} />}
+        <h3>{column.label}</h3>
+        <span className="board-column-count">{state ? total : "…"}</span>
+      </header>
+      <div className="board-column-list" ref={listRef}>
+        {children}
+        {state && !state.loading && !items.length && (
+          <p className="board-column-empty">
+            {column.key === "listed" ? "Arraste para cá o que você já publicou" : "Nenhum produto"}
+          </p>
+        )}
+        {state?.nextCursor && (
+          <LoadMoreSentinel
+            className="board-load-more"
+            enabled={!state.loading}
+            onLoadMore={onLoadMore}
+            rerunKey={state.items.length}
+            root={listRef}
+          >
+            {state.loading ? "Carregando..." : `Role para ver mais (${items.length} de ${total})`}
+          </LoadMoreSentinel>
+        )}
+        {!state && <p className="board-column-empty">Carregando...</p>}
+      </div>
+    </section>
+  );
+}
+
+const BoardCard = React.memo(function BoardCard({
   product,
   column,
   busy,
@@ -5325,15 +5434,9 @@ function BoardCard({
   selected,
   active,
   dragging,
-  onDragStart,
-  onDragEnd,
-  onMove,
-  onOpen,
-  onToggleSelected,
-  onGenerateListing,
-  onGenerateImages,
-  onDelete,
-}: ProductTileActions & {
+  handlers,
+  boardHandlers,
+}: {
   product: Product;
   column: BoardColumnKey;
   busy: boolean;
@@ -5341,12 +5444,12 @@ function BoardCard({
   selected: boolean;
   active: boolean;
   dragging: boolean;
-  onDragStart: (event: React.DragEvent) => void;
-  onDragEnd: () => void;
-  onMove: (target: BoardColumnKey) => void;
+  handlers: ProductCardHandlers;
+  boardHandlers: BoardHandlers;
 }) {
   const imageUrl = productThumbnailUrl(product);
   const steps = productPipelineBadges(product).filter((badge) => badge.key !== "stage");
+  const open = () => handlers.open(product.id);
   const className = [
     "board-card",
     selected ? "selected" : "",
@@ -5356,16 +5459,25 @@ function BoardCard({
   ].filter(Boolean).join(" ");
 
   return (
-    <article className={className} draggable={!busy} onDragStart={onDragStart} onDragEnd={onDragEnd}>
+    <article
+      className={className}
+      draggable={!busy}
+      onDragStart={(event) => {
+        event.dataTransfer.setData("text/plain", product.id);
+        event.dataTransfer.effectAllowed = "move";
+        boardHandlers.dragStart(product.id);
+      }}
+      onDragEnd={boardHandlers.dragEnd}
+    >
       <div className="board-card-thumb">
-        <button onClick={onOpen} aria-label={`Abrir ${product.name}`} tabIndex={-1}>
+        <button onClick={open} aria-label={`Abrir ${product.name}`} tabIndex={-1}>
           {imageUrl ? <img src={imageUrl} alt="" loading="lazy" decoding="async" draggable={false} /> : <ShoppingBag size={20} />}
         </button>
         <label className="product-tile-check" aria-label={`Selecionar ${product.name}`}>
-          <input type="checkbox" checked={selected} onChange={onToggleSelected} disabled={busy} />
+          <input type="checkbox" checked={selected} onChange={() => handlers.toggleSelected(product.id)} disabled={busy} />
         </label>
       </div>
-      <button className="board-card-body" onClick={onOpen}>
+      <button className="board-card-body" onClick={open}>
         <strong title={product.name}>{product.name}</strong>
         <span className="board-card-sku">{productSku(product) || "Sem SKU"}</span>
         <span className="product-tile-steps">
@@ -5384,19 +5496,19 @@ function BoardCard({
           items={[
             ...BOARD_COLUMNS.filter((target) => target.key !== column).map((target) => ({
               key: `move-${target.key}`,
-              label: target.key === "listed" ? "Mover para Publicado" : `Mover para ${target.label}`,
+              label: `Mover para ${target.label}`,
               icon: target.key === "listed" ? <Check size={15} /> : <ArrowRight size={15} />,
-              onClick: () => onMove(target.key),
+              onClick: () => boardHandlers.move(product, target.key),
             })),
-            { key: "listing", label: "Gerar anúncio", icon: <BrainCircuit size={15} />, onClick: onGenerateListing },
-            { key: "images", label: "Gerar imagens", icon: <ImagePlus size={15} />, onClick: onGenerateImages },
-            { key: "delete", label: "Apagar produto", icon: <Trash2 size={15} />, danger: true, onClick: onDelete },
+            { key: "listing", label: "Gerar anúncio", icon: <BrainCircuit size={15} />, onClick: () => handlers.generateListing(product.id) },
+            { key: "images", label: "Gerar imagens", icon: <ImagePlus size={15} />, onClick: () => handlers.generateImages(product.id) },
+            { key: "delete", label: "Apagar produto", icon: <Trash2 size={15} />, danger: true, onClick: () => handlers.remove(product.id) },
           ]}
         />
       </div>
     </article>
   );
-}
+});
 
 function CostsProductCell({ product }: { product: Product }) {
   const sku = productSku(product) || "—";
@@ -5954,6 +6066,8 @@ function ProductsTab({
   const [fullscreenAsset, setFullscreenAsset] = useState<Asset | null>(null);
   const [mercadoLivreOpen, setMercadoLivreOpen] = useState(false);
   const [viewMode, setViewMode] = useState<ProductViewMode>(readProductViewMode);
+  // Both views stay mounted once shown, so switching only flips visibility.
+  const [boardMounted, setBoardMounted] = useState(viewMode === "board");
   const [imageExtraPrompts, setImageExtraPrompts] = useState<Record<string, string>>({});
   const [costDetailsOpen, setCostDetailsOpen] = useState(false);
   const [colorDialogOpen, setColorDialogOpen] = useState(false);
@@ -5962,7 +6076,6 @@ function ProductsTab({
   const [manualProductSourceUrl, setManualProductSourceUrl] = useState("");
   const [detailSection, setDetailSection] = useState<ProductDetailSection>("listing");
   const modelFileInputRef = useRef<HTMLInputElement>(null);
-  const productListSentinelRef = useRef<HTMLDivElement>(null);
   const visibleCount = products.length;
   const visibleProductIds = products.map((product) => product.id);
   const allSelected = visibleProductIds.length > 0 && visibleProductIds.every((id) => selectedProductIds.includes(id));
@@ -5982,23 +6095,6 @@ function ProductsTab({
     setCostDetailsOpen(false);
     setDetailSection("listing");
   }, [selectedProduct?.id]);
-
-  // Next page from the server when the end of the list comes into view. The
-  // observer is recreated after each page, so a sentinel that is still visible
-  // (short pages, tall screens) keeps loading until the screen is filled.
-  useEffect(() => {
-    if (!hasMoreProducts || productsLoading) return;
-    const sentinel = productListSentinelRef.current;
-    if (!sentinel) return;
-    const observer = new IntersectionObserver(
-      (entries) => {
-        if (entries.some((entry) => entry.isIntersecting)) onLoadMoreProducts();
-      },
-      { rootMargin: "400px" },
-    );
-    observer.observe(sentinel);
-    return () => observer.disconnect();
-  }, [hasMoreProducts, productsLoading, products.length]);
 
   const listingDirty = Boolean(
     detailsOpen
@@ -6046,6 +6142,7 @@ function ProductsTab({
 
   function changeViewMode(mode: ProductViewMode) {
     setViewMode(mode);
+    if (mode === "board") setBoardMounted(true);
     try {
       window.localStorage.setItem(PRODUCT_VIEW_MODE_KEY, mode);
     } catch {
@@ -6057,21 +6154,20 @@ function ProductsTab({
     }
   }
 
-  function productTileActions(product: Product) {
-    return {
-      onOpen: () => onOpenDetails(product.id),
-      onToggleSelected: () => toggleProductSelection(product.id),
-      onGenerateListing: () => {
-        onSelectProduct(product.id);
-        onGenerateListing(product.id);
-      },
-      onGenerateImages: () => {
-        onSelectProduct(product.id);
-        onGenerateImages(product.id);
-      },
-      onDelete: () => onDeleteProduct(product.id),
-    };
-  }
+  const cardHandlers = useStableHandlers<ProductCardHandlers>({
+    open: onOpenDetails,
+    toggleSelected: toggleProductSelection,
+    toggleListed: (product) => onUpdateProductListed(product.id, !productListed(product)),
+    generateListing: (productId) => {
+      onSelectProduct(productId);
+      onGenerateListing(productId);
+    },
+    generateImages: (productId) => {
+      onSelectProduct(productId);
+      onGenerateImages(productId);
+    },
+    remove: onDeleteProduct,
+  });
 
   function toggleColorVariation(colorId: string) {
     if (selectedColorVariations.includes(colorId)) {
@@ -6246,46 +6342,54 @@ function ProductsTab({
           </div>
         )}
 
-        {boardView ? (
-          <ProductBoard
-            filters={boardFilters}
-            revision={catalogRevision}
-            freshProducts={freshProducts}
-            busy={busy}
-            selectedProductIds={selectedProductIds}
-            activeProductId={detailsOpen ? selectedProduct?.id : undefined}
-            onMoveProduct={onMoveProduct}
-            productActions={productTileActions}
-          />
-        ) : (<>
-        <div className="product-grid">
-          {products.map((product) => (
-            <ProductTile
-              key={product.id}
-              product={product}
+        {boardMounted && (
+          <div hidden={!boardView}>
+            <ProductBoard
+              active={boardView}
+              filters={boardFilters}
+              revision={catalogRevision}
+              freshProducts={freshProducts}
               busy={busy}
-              selected={selectedProductIds.includes(product.id)}
-              active={product.id === selectedProduct?.id && detailsOpen}
-              onToggleListed={() => onUpdateProductListed(product.id, !productListed(product))}
-              {...productTileActions(product)}
+              selectedProductIds={selectedProductIds}
+              activeProductId={detailsOpen ? selectedProduct?.id : undefined}
+              onMoveProduct={onMoveProduct}
+              handlers={cardHandlers}
             />
-          ))}
-          {!products.length && (
-            <p className="empty table-empty">
-              {!productsLoaded
-                ? "Carregando produtos..."
-                : filters.publication === "listed" && !hasNarrowingFilters
-                  ? "Nenhum produto publicado ainda. Marque um produto como publicado no card ou em lote."
-                  : "Nenhum produto encontrado com os filtros atuais."}
-            </p>
-          )}
-        </div>
-        {hasMoreProducts && (
-          <div className="product-list-load-more" ref={productListSentinelRef}>
-            {productsLoading ? "Carregando mais produtos..." : `Role para carregar mais (${visibleCount} de ${matchedProductCount})`}
           </div>
         )}
-        </>)}
+        <div hidden={boardView}>
+          <div className="product-grid">
+            {products.map((product) => (
+              <ProductTile
+                key={product.id}
+                product={product}
+                busy={busy}
+                selected={selectedProductIds.includes(product.id)}
+                active={product.id === selectedProduct?.id && detailsOpen}
+                handlers={cardHandlers}
+              />
+            ))}
+            {!products.length && (
+              <p className="empty table-empty">
+                {!productsLoaded
+                  ? "Carregando produtos..."
+                  : filters.publication === "listed" && !hasNarrowingFilters
+                    ? "Nenhum produto publicado ainda. Marque um produto como publicado no card ou em lote."
+                    : "Nenhum produto encontrado com os filtros atuais."}
+              </p>
+            )}
+          </div>
+          {hasMoreProducts && (
+            <LoadMoreSentinel
+              className="product-list-load-more"
+              enabled={!boardView && !productsLoading}
+              onLoadMore={onLoadMoreProducts}
+              rerunKey={products.length}
+            >
+              {productsLoading ? "Carregando mais produtos..." : `Role para carregar mais (${visibleCount} de ${matchedProductCount})`}
+            </LoadMoreSentinel>
+          )}
+        </div>
 
         {selectedProductIds.length > 0 && (
           <div className="selection-bar" role="toolbar" aria-label="Ações para os selecionados">
