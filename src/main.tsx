@@ -3,6 +3,7 @@ import { createPortal } from "react-dom";
 import { createRoot } from "react-dom/client";
 import {
   ArrowLeft,
+  ArrowRight,
   BadgeCheck,
   BarChart3,
   BrainCircuit,
@@ -12,8 +13,10 @@ import {
   FileSpreadsheet,
   FolderOpen,
   FolderPlus,
+  Columns3,
   Gauge,
   House,
+  LayoutGrid,
   MoreHorizontal,
   Link2,
   LogIn,
@@ -220,6 +223,7 @@ type Product = {
   listing: Listing;
   assets: Asset[];
   metadata: Record<string, unknown>;
+  created_at?: string;
   updated_at?: string;
 };
 
@@ -1821,6 +1825,9 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
   // holds lighter summaries, so details win when both have the product.
   const [productDetails, setProductDetails] = useState<Record<string, Product>>({});
   const [catalogStats, setCatalogStats] = useState<CatalogStats | null>(null);
+  // Bumped whenever the list reloads or loses a product, so the board view,
+  // which pages each column itself, reloads with it.
+  const [catalogRevision, setCatalogRevision] = useState(0);
   // The costs table edits every product of the store, so it loads the whole
   // catalog itself, and only while that tab is open.
   const [costProducts, setCostProducts] = useState<Product[] | null>(null);
@@ -1961,6 +1968,7 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
     const request = ++productListRequestRef.current;
     const loadedCount = productListRef.current.items.length;
     const limit = keepLoaded ? Math.min(MAX_PRODUCT_RELOAD, Math.max(PRODUCT_PAGE_SIZE, loadedCount)) : PRODUCT_PAGE_SIZE;
+    setCatalogRevision((revision) => revision + 1);
     setProductList((current) => ({ ...current, loading: true }));
     try {
       const page = await api<ProductPage>(productPagePath(listFiltersRef.current, limit));
@@ -2187,11 +2195,9 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
       }
       return { ...current, ...counts, items: current.items.map((product) => (product.id === updated.id ? updated : product)) };
     });
-    setProductDetails((current) =>
-      current[updated.id] || updated.id === selectedProductIdRef.current || insert
-        ? { ...current, [updated.id]: updated }
-        : current,
-    );
+    // Every change is kept here, so views holding their own copies (the
+    // board columns) show the latest version.
+    setProductDetails((current) => ({ ...current, [updated.id]: updated }));
     setCostProducts((current) =>
       current?.some((product) => product.id === updated.id)
         ? current.map((product) => (product.id === updated.id ? updated : product))
@@ -2240,6 +2246,7 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
       return next;
     });
     setCostProducts((current) => current?.filter((product) => product.id !== productId) ?? current);
+    setCatalogRevision((revision) => revision + 1);
     scheduleStatsRefresh();
     setSelectedProductIds((current) => current.filter((id) => id !== productId));
     if (selectedProductId === productId) {
@@ -3116,6 +3123,24 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
     });
   }
 
+  // A board column is a status, or "listed" for the user's publication mark.
+  // Leaving the published column clears the mark.
+  function moveProductToColumn(product: Product, column: BoardColumnKey) {
+    const productId = product.id;
+    const wasListed = productListed(product);
+    const body = column === "listed"
+      ? { metadata: { listed: true, listed_at: new Date().toISOString() } }
+      : { status: column, ...(wasListed ? { metadata: { listed: false, listed_at: null } } : {}) };
+    return runFluidAction("Movendo produto", async () => {
+      const updated = await api<Product>(`/api/products/${productId}`, {
+        method: "PATCH",
+        body: JSON.stringify(body),
+      });
+      patchProduct(updated);
+      return updated;
+    });
+  }
+
   async function deleteProduct(productId = selectedProduct?.id) {
     if (!productId) return Promise.resolve();
     const product = findProduct(productId);
@@ -3544,6 +3569,10 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
             listingDraft={listingDraft}
             productNameDraft={productNameDraft}
             filters={productFilters}
+            boardFilters={listFilters}
+            catalogRevision={catalogRevision}
+            freshProducts={productDetails}
+            onMoveProduct={moveProductToColumn}
             products={listedProducts}
             matchedProductCount={productList.total}
             listedCount={productList.listedTotal}
@@ -5039,6 +5068,336 @@ function ProductTile({
   );
 }
 
+type ProductViewMode = "grid" | "board";
+const PRODUCT_VIEW_MODE_KEY = "eco_native_products_view";
+
+function readProductViewMode(): ProductViewMode {
+  try {
+    return window.localStorage.getItem(PRODUCT_VIEW_MODE_KEY) === "board" ? "board" : "grid";
+  } catch {
+    return "grid";
+  }
+}
+
+type BoardColumnKey = ProductStatus | "listed";
+
+// Unpublished products sit in their status column; published ones, whatever
+// their status, in the last column.
+const BOARD_COLUMNS: { key: BoardColumnKey; label: string; status: ProductFilters["status"]; publication: ProductPublication }[] = [
+  { key: "collected", label: "Coletado", status: "collected", publication: "not_listed" },
+  { key: "in_edit", label: "Em edição", status: "in_edit", publication: "not_listed" },
+  { key: "ready", label: "Pronto", status: "ready", publication: "not_listed" },
+  { key: "exported", label: "Exportado", status: "exported", publication: "not_listed" },
+  { key: "listed", label: "Publicado", status: "all", publication: "listed" },
+];
+
+function productBoardColumn(product: Product): BoardColumnKey {
+  return productListed(product) ? "listed" : product.status;
+}
+
+type BoardColumnState = {
+  items: Product[];
+  nextCursor: string | null;
+  total: number;
+  loading: boolean;
+};
+
+type ProductTileActions = {
+  onOpen: () => void;
+  onToggleSelected: () => void;
+  onGenerateListing: () => void;
+  onGenerateImages: () => void;
+  onDelete: () => void;
+};
+
+function ProductBoard({
+  filters,
+  revision,
+  freshProducts,
+  busy,
+  selectedProductIds,
+  activeProductId,
+  onMoveProduct,
+  productActions,
+}: {
+  filters: ProductFilters;
+  revision: number;
+  freshProducts: Record<string, Product>;
+  busy: boolean;
+  selectedProductIds: string[];
+  activeProductId?: string;
+  onMoveProduct: (product: Product, column: BoardColumnKey) => Promise<unknown>;
+  productActions: (product: Product) => ProductTileActions;
+}) {
+  const [columns, setColumns] = useState<Partial<Record<BoardColumnKey, BoardColumnState>>>({});
+  // Drops show at once; the server's answer then replaces them.
+  const [pendingMoves, setPendingMoves] = useState<Record<string, BoardColumnKey>>({});
+  const [draggingId, setDraggingId] = useState<string | null>(null);
+  const [dropTarget, setDropTarget] = useState<BoardColumnKey | null>(null);
+  const columnsRef = useRef(columns);
+  columnsRef.current = columns;
+  const requestRef = useRef(0);
+
+  function columnPath(column: (typeof BOARD_COLUMNS)[number], limit: number, cursor?: string | null) {
+    return productPagePath({ ...filters, status: column.status, publication: column.publication }, limit, cursor);
+  }
+
+  // Reloads every column, keeping as many items as each already shows.
+  useEffect(() => {
+    const request = ++requestRef.current;
+    const loaded = columnsRef.current;
+    setColumns((current) => {
+      const next = { ...current };
+      for (const column of BOARD_COLUMNS) next[column.key] = { ...(current[column.key] ?? { items: [], nextCursor: null, total: 0 }), loading: true };
+      return next;
+    });
+    Promise.all(BOARD_COLUMNS.map(async (column) => {
+      const limit = Math.min(MAX_PRODUCT_RELOAD, Math.max(PRODUCT_PAGE_SIZE, loaded[column.key]?.items.length ?? 0));
+      const page = await api<ProductPage>(columnPath(column, limit));
+      return [column.key, { items: page.items, nextCursor: page.next_cursor, total: page.total, loading: false }] as const;
+    }))
+      .then((pages) => {
+        if (request !== requestRef.current) return;
+        setColumns(Object.fromEntries(pages));
+        setPendingMoves({});
+      })
+      .catch(() => {
+        if (request !== requestRef.current) return;
+        setColumns((current) => Object.fromEntries(
+          Object.entries(current).map(([key, state]) => [key, { ...state, loading: false }]),
+        ));
+      });
+  }, [revision]);
+
+  async function loadMore(column: (typeof BOARD_COLUMNS)[number]) {
+    const state = columnsRef.current[column.key];
+    if (!state?.nextCursor || state.loading) return;
+    const request = requestRef.current;
+    setColumns((current) => ({ ...current, [column.key]: { ...state, loading: true } }));
+    try {
+      const page = await api<ProductPage>(columnPath(column, PRODUCT_PAGE_SIZE, state.nextCursor));
+      if (request !== requestRef.current) return;
+      setColumns((current) => {
+        const previous = current[column.key] ?? state;
+        const known = new Set(previous.items.map((product) => product.id));
+        return {
+          ...current,
+          [column.key]: {
+            items: [...previous.items, ...page.items.filter((product) => !known.has(product.id))],
+            nextCursor: page.next_cursor,
+            total: page.total,
+            loading: false,
+          },
+        };
+      });
+    } catch {
+      setColumns((current) => ({ ...current, [column.key]: { ...state, loading: false } }));
+    }
+  }
+
+  // Products are placed by their latest version, so a change made anywhere
+  // (a drop, the details panel, a finished job) moves the card; the column
+  // counts shift by the cards that moved in or out.
+  const placed = useMemo(() => {
+    const byColumn = Object.fromEntries(BOARD_COLUMNS.map((column) => [column.key, [] as Product[]])) as Record<BoardColumnKey, Product[]>;
+    const delta = Object.fromEntries(BOARD_COLUMNS.map((column) => [column.key, 0])) as Record<BoardColumnKey, number>;
+    const seen = new Set<string>();
+    for (const column of BOARD_COLUMNS) {
+      for (const item of columns[column.key]?.items ?? []) {
+        if (seen.has(item.id)) continue;
+        seen.add(item.id);
+        const product = freshProducts[item.id] ?? item;
+        const target = pendingMoves[item.id] ?? productBoardColumn(product);
+        byColumn[target].push(product);
+        if (target !== column.key) {
+          delta[target] += 1;
+          delta[column.key] -= 1;
+        }
+      }
+    }
+    for (const list of Object.values(byColumn)) {
+      list.sort((a, b) => (b.created_at ?? "").localeCompare(a.created_at ?? "") || b.id.localeCompare(a.id));
+    }
+    return { byColumn, delta };
+  }, [columns, freshProducts, pendingMoves]);
+
+  function moveProduct(product: Product, target: BoardColumnKey) {
+    const current = pendingMoves[product.id] ?? productBoardColumn(product);
+    if (current === target) return;
+    setPendingMoves((moves) => ({ ...moves, [product.id]: target }));
+    void onMoveProduct(product, target).finally(() => {
+      setPendingMoves((moves) => {
+        const next = { ...moves };
+        delete next[product.id];
+        return next;
+      });
+    });
+  }
+
+  function handleDrop(event: React.DragEvent, target: BoardColumnKey) {
+    event.preventDefault();
+    setDropTarget(null);
+    const productId = event.dataTransfer.getData("text/plain");
+    setDraggingId(null);
+    const product = Object.values(placed.byColumn).flat().find((item) => item.id === productId);
+    if (product) moveProduct(product, target);
+  }
+
+  return (
+    <div className="product-board">
+      {BOARD_COLUMNS.map((column) => {
+        const state = columns[column.key];
+        const items = placed.byColumn[column.key];
+        const total = Math.max(items.length, (state?.total ?? 0) + placed.delta[column.key]);
+        return (
+          <section
+            key={column.key}
+            className={[
+              "board-column",
+              column.key === "listed" ? "published" : "",
+              dropTarget === column.key ? "drop-target" : "",
+            ].filter(Boolean).join(" ")}
+            onDragOver={(event) => {
+              if (!draggingId) return;
+              event.preventDefault();
+              event.dataTransfer.dropEffect = "move";
+              if (dropTarget !== column.key) setDropTarget(column.key);
+            }}
+            onDragLeave={(event) => {
+              if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDropTarget(null);
+            }}
+            onDrop={(event) => handleDrop(event, column.key)}
+            aria-label={column.label}
+          >
+            <header className="board-column-head">
+              {column.key === "listed" && <Check size={15} />}
+              <h3>{column.label}</h3>
+              <span className="board-column-count">{state ? total : "…"}</span>
+            </header>
+            <div className="board-column-list">
+              {items.map((product) => (
+                <BoardCard
+                  key={product.id}
+                  product={product}
+                  column={column.key}
+                  busy={busy}
+                  pending={Boolean(pendingMoves[product.id])}
+                  selected={selectedProductIds.includes(product.id)}
+                  active={product.id === activeProductId}
+                  dragging={draggingId === product.id}
+                  onDragStart={(event) => {
+                    event.dataTransfer.setData("text/plain", product.id);
+                    event.dataTransfer.effectAllowed = "move";
+                    setDraggingId(product.id);
+                  }}
+                  onDragEnd={() => {
+                    setDraggingId(null);
+                    setDropTarget(null);
+                  }}
+                  onMove={(target) => moveProduct(product, target)}
+                  {...productActions(product)}
+                />
+              ))}
+              {state && !state.loading && !items.length && (
+                <p className="board-column-empty">
+                  {column.key === "listed" ? "Arraste para cá o que você já publicou" : "Nenhum produto"}
+                </p>
+              )}
+              {state?.nextCursor && (
+                <button className="board-load-more" onClick={() => void loadMore(column)} disabled={state.loading}>
+                  {state.loading ? "Carregando..." : `Carregar mais (${items.length} de ${total})`}
+                </button>
+              )}
+              {!state && <p className="board-column-empty">Carregando...</p>}
+            </div>
+          </section>
+        );
+      })}
+    </div>
+  );
+}
+
+function BoardCard({
+  product,
+  column,
+  busy,
+  pending,
+  selected,
+  active,
+  dragging,
+  onDragStart,
+  onDragEnd,
+  onMove,
+  onOpen,
+  onToggleSelected,
+  onGenerateListing,
+  onGenerateImages,
+  onDelete,
+}: ProductTileActions & {
+  product: Product;
+  column: BoardColumnKey;
+  busy: boolean;
+  pending: boolean;
+  selected: boolean;
+  active: boolean;
+  dragging: boolean;
+  onDragStart: (event: React.DragEvent) => void;
+  onDragEnd: () => void;
+  onMove: (target: BoardColumnKey) => void;
+}) {
+  const imageUrl = productThumbnailUrl(product);
+  const steps = productPipelineBadges(product).filter((badge) => badge.key !== "stage");
+  const className = [
+    "board-card",
+    selected ? "selected" : "",
+    active ? "active" : "",
+    dragging ? "dragging" : "",
+    pending ? "pending" : "",
+  ].filter(Boolean).join(" ");
+
+  return (
+    <article className={className} draggable={!busy} onDragStart={onDragStart} onDragEnd={onDragEnd}>
+      <div className="board-card-thumb">
+        <button onClick={onOpen} aria-label={`Abrir ${product.name}`} tabIndex={-1}>
+          {imageUrl ? <img src={imageUrl} alt="" loading="lazy" decoding="async" draggable={false} /> : <ShoppingBag size={20} />}
+        </button>
+        <label className="product-tile-check" aria-label={`Selecionar ${product.name}`}>
+          <input type="checkbox" checked={selected} onChange={onToggleSelected} disabled={busy} />
+        </label>
+      </div>
+      <button className="board-card-body" onClick={onOpen}>
+        <strong title={product.name}>{product.name}</strong>
+        <span className="board-card-sku">{productSku(product) || "Sem SKU"}</span>
+        <span className="product-tile-steps">
+          {steps.map((badge) => (
+            <span className={`product-tile-step ${badge.state}`} key={badge.key} title={`${badge.label}: ${badge.detail}`}>
+              <span className="product-tile-step-dot" aria-hidden="true" />
+              {badge.label}
+            </span>
+          ))}
+        </span>
+      </button>
+      <div className="product-tile-menu board-card-menu">
+        <ActionMenu
+          label={`Ações de ${product.name}`}
+          disabled={busy}
+          items={[
+            ...BOARD_COLUMNS.filter((target) => target.key !== column).map((target) => ({
+              key: `move-${target.key}`,
+              label: target.key === "listed" ? "Mover para Publicado" : `Mover para ${target.label}`,
+              icon: target.key === "listed" ? <Check size={15} /> : <ArrowRight size={15} />,
+              onClick: () => onMove(target.key),
+            })),
+            { key: "listing", label: "Gerar anúncio", icon: <BrainCircuit size={15} />, onClick: onGenerateListing },
+            { key: "images", label: "Gerar imagens", icon: <ImagePlus size={15} />, onClick: onGenerateImages },
+            { key: "delete", label: "Apagar produto", icon: <Trash2 size={15} />, danger: true, onClick: onDelete },
+          ]}
+        />
+      </div>
+    </article>
+  );
+}
+
 function CostsProductCell({ product }: { product: Product }) {
   const sku = productSku(product) || "—";
   const {
@@ -5465,6 +5824,10 @@ function ProductsTab({
   busy,
   detailsOpen,
   filters,
+  boardFilters,
+  catalogRevision,
+  freshProducts,
+  onMoveProduct,
   imageOptions,
   jobs,
   listingDraft,
@@ -5527,6 +5890,10 @@ function ProductsTab({
   busy: boolean;
   detailsOpen: boolean;
   filters: ProductFilters;
+  boardFilters: ProductFilters;
+  catalogRevision: number;
+  freshProducts: Record<string, Product>;
+  onMoveProduct: (product: Product, column: BoardColumnKey) => Promise<unknown>;
   imageOptions: ImageOptions;
   jobs: Job[];
   listingDraft: Listing | null;
@@ -5586,6 +5953,7 @@ function ProductsTab({
 }) {
   const [fullscreenAsset, setFullscreenAsset] = useState<Asset | null>(null);
   const [mercadoLivreOpen, setMercadoLivreOpen] = useState(false);
+  const [viewMode, setViewMode] = useState<ProductViewMode>(readProductViewMode);
   const [imageExtraPrompts, setImageExtraPrompts] = useState<Record<string, string>>({});
   const [costDetailsOpen, setCostDetailsOpen] = useState(false);
   const [colorDialogOpen, setColorDialogOpen] = useState(false);
@@ -5600,7 +5968,11 @@ function ProductsTab({
   const allSelected = visibleProductIds.length > 0 && visibleProductIds.every((id) => selectedProductIds.includes(id));
   const progressValue = batchProgress ? Math.round((batchProgress.done / Math.max(batchProgress.total, 1)) * 100) : 0;
   const progressLabel = batchProgress ? `${batchProgress.label}: ${batchProgress.done}/${batchProgress.total}` : "";
-  const activeQuickFilter = PRODUCT_QUICK_FILTERS.find((filter) =>
+  const boardView = viewMode === "board";
+  // On the board, columns already split by status and publication, so only
+  // the characteristic filters still apply.
+  const quickFilters = boardView ? PRODUCT_QUICK_FILTERS.filter((filter) => filter.status === "all") : PRODUCT_QUICK_FILTERS;
+  const activeQuickFilter = quickFilters.find((filter) =>
     filter.status === filters.status && filter.characteristic === filters.characteristic);
   const hasNarrowingFilters = filters.status !== "all" || filters.characteristic !== "all" || Boolean(filters.query.trim());
   const selectedCostEvents = selectedProduct ? productCostEvents(selectedProduct) : [];
@@ -5670,6 +6042,35 @@ function ProductsTab({
 
   function updateFilters(update: Partial<ProductFilters>) {
     onFiltersChange({ ...filters, ...update });
+  }
+
+  function changeViewMode(mode: ProductViewMode) {
+    setViewMode(mode);
+    try {
+      window.localStorage.setItem(PRODUCT_VIEW_MODE_KEY, mode);
+    } catch {
+      /* The choice just won't be remembered. */
+    }
+    // Columns are statuses and publication, so those filters step aside.
+    if (mode === "board" && (filters.status !== "all" || filters.publication !== "all")) {
+      updateFilters({ status: "all", publication: "all", characteristic: activeQuickFilter?.status === "all" ? filters.characteristic : "all" });
+    }
+  }
+
+  function productTileActions(product: Product) {
+    return {
+      onOpen: () => onOpenDetails(product.id),
+      onToggleSelected: () => toggleProductSelection(product.id),
+      onGenerateListing: () => {
+        onSelectProduct(product.id);
+        onGenerateListing(product.id);
+      },
+      onGenerateImages: () => {
+        onSelectProduct(product.id);
+        onGenerateImages(product.id);
+      },
+      onDelete: () => onDeleteProduct(product.id),
+    };
   }
 
   function toggleColorVariation(colorId: string) {
@@ -5742,7 +6143,25 @@ function ProductsTab({
         </div>
 
         <div className="catalog-toolbar">
-          <div className="publication-tabs" role="tablist" aria-label="Publicação">
+          <div className="view-toggle" role="group" aria-label="Visualização">
+            <button
+              className={boardView ? "" : "active"}
+              aria-pressed={!boardView}
+              onClick={() => changeViewMode("grid")}
+              title="Grade"
+            >
+              <LayoutGrid size={16} /> Grade
+            </button>
+            <button
+              className={boardView ? "active" : ""}
+              aria-pressed={boardView}
+              onClick={() => changeViewMode("board")}
+              title="Quadro por etapa"
+            >
+              <Columns3 size={16} /> Quadro
+            </button>
+          </div>
+          {!boardView && <div className="publication-tabs" role="tablist" aria-label="Publicação">
             {PUBLICATION_TABS.map((tab) => {
               const count = tab.value === "listed"
                 ? listedCount
@@ -5762,7 +6181,7 @@ function ProductsTab({
                 </button>
               );
             })}
-          </div>
+          </div>}
           <label className="catalog-search">
             <Search size={16} />
             <input
@@ -5781,7 +6200,7 @@ function ProductsTab({
 
         <div className="catalog-subbar">
           <div className="catalog-chips">
-            {PRODUCT_QUICK_FILTERS.map((filter) => {
+            {quickFilters.map((filter) => {
               const active = activeQuickFilter?.key === filter.key;
               return (
                 <button
@@ -5805,7 +6224,7 @@ function ProductsTab({
               </button>
             )}
           </div>
-          <label className="checkbox-row catalog-select-all">
+          {!boardView && <label className="checkbox-row catalog-select-all">
             <input
               type="checkbox"
               checked={allSelected}
@@ -5813,7 +6232,7 @@ function ProductsTab({
               disabled={!products.length || busy}
             />
             Selecionar {visibleCount < matchedProductCount ? `os ${visibleCount} carregados` : "todos"}
-          </label>
+          </label>}
         </div>
 
         {batchProgress && (
@@ -5827,6 +6246,18 @@ function ProductsTab({
           </div>
         )}
 
+        {boardView ? (
+          <ProductBoard
+            filters={boardFilters}
+            revision={catalogRevision}
+            freshProducts={freshProducts}
+            busy={busy}
+            selectedProductIds={selectedProductIds}
+            activeProductId={detailsOpen ? selectedProduct?.id : undefined}
+            onMoveProduct={onMoveProduct}
+            productActions={productTileActions}
+          />
+        ) : (<>
         <div className="product-grid">
           {products.map((product) => (
             <ProductTile
@@ -5835,18 +6266,8 @@ function ProductsTab({
               busy={busy}
               selected={selectedProductIds.includes(product.id)}
               active={product.id === selectedProduct?.id && detailsOpen}
-              onToggleSelected={() => toggleProductSelection(product.id)}
-              onOpen={() => onOpenDetails(product.id)}
               onToggleListed={() => onUpdateProductListed(product.id, !productListed(product))}
-              onGenerateListing={() => {
-                onSelectProduct(product.id);
-                onGenerateListing(product.id);
-              }}
-              onGenerateImages={() => {
-                onSelectProduct(product.id);
-                onGenerateImages(product.id);
-              }}
-              onDelete={() => onDeleteProduct(product.id)}
+              {...productTileActions(product)}
             />
           ))}
           {!products.length && (
@@ -5864,6 +6285,7 @@ function ProductsTab({
             {productsLoading ? "Carregando mais produtos..." : `Role para carregar mais (${visibleCount} de ${matchedProductCount})`}
           </div>
         )}
+        </>)}
 
         {selectedProductIds.length > 0 && (
           <div className="selection-bar" role="toolbar" aria-label="Ações para os selecionados">
