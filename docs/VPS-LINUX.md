@@ -91,6 +91,19 @@ journalctl -u eco-native-update.service -n 100 --no-pager
 sudo /usr/bin/python3 /srv/infra/scripts/eco-native-update.py --tag v1.2.3
 ```
 
+### Espaço em disco
+
+A VPS tem pouco disco, e cada versão deixa uma imagem de ~1,9 GB e cache de build.
+Por isso o atualizador guarda só duas imagens `eco-native`: a versão no ar e a
+anterior (alvo do rollback). Depois de cada troca bem-sucedida ele apaga as demais,
+as imagens órfãs e o cache de build do Docker. Qualquer versão apagada pode ser
+reconstruída a partir da release (`--tag`).
+
+O atualizador exige 6 GB livres em `/var/tmp` antes de começar. Se faltar espaço,
+ele faz a mesma limpeza primeiro; só falha se ainda assim não houver espaço. Essa
+falha aparece em `systemctl status eco-native-update.service` como `failed`, e a
+VPS continua na versão anterior. Para ver o uso: `df -h /` e `docker system df`.
+
 Somente releases publicadas e sem sufixo são instaladas; pushes e prereleases não
 alteram produção. Atualizações do próprio Compose ou do atualizador devem ser
 aplicadas manualmente antes da release que dependa delas.

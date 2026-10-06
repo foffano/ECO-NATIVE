@@ -76,6 +76,28 @@ def update_environment(old, tag):
     return '\n'.join(lines + ['IMAGE=eco-native', f'IMAGE_TAG={tag}', ''])
 
 
+def image_tag(env):
+    match = re.search(r'^IMAGE_TAG=(.+)$', env, re.M)
+    return match.group(1).strip() if match else None
+
+
+def prune_images(keep):
+    """Remove eco-native release images other than `keep`, plus dangling
+    images and build cache. Every release can be rebuilt from GitHub, so
+    only the running one and the rollback target are worth the disk."""
+    keep = {tag for tag in keep if tag}
+    try:
+        tags = run('docker', 'images', 'eco-native', '--format', '{{.Tag}}', capture=True).split()
+        for tag in tags:
+            if tag not in keep and re.fullmatch(r'v\d+\.\d+\.\d+', tag):
+                subprocess.run(['docker', 'rmi', f'eco-native:{tag}'], check=False, stdout=subprocess.DEVNULL)
+                print(f'Removed old image eco-native:{tag}.', flush=True)
+        subprocess.run(['docker', 'image', 'prune', '-f'], check=False, stdout=subprocess.DEVNULL)
+        subprocess.run(['docker', 'builder', 'prune', '-f'], check=False, stdout=subprocess.DEVNULL)
+    except Exception as error:  # Cleanup must never fail an update.
+        print(f'Image cleanup skipped: {error}', flush=True)
+
+
 def install(manifest):
     tag = manifest['tag']
     marker = APP / 'data/.maintenance'
@@ -114,6 +136,7 @@ def install(manifest):
         with (APP / 'deploys.log').open('a') as log:
             log.write(f'{stamp} {tag} ok-release-updater\n')
         print(f'Deployed {tag} ({manifest["revision"]}).', flush=True)
+        prune_images({tag, image_tag(old)})
         return True
     except BaseException:
         if stopped:
@@ -163,6 +186,9 @@ def main():
                 raise ValueError('Unexpected artifact URL')
         with request(prefix + 'release-manifest.json') as response:
             manifest = validate_manifest(json.load(response), tag)
+        if shutil.disk_usage('/var/tmp').free < 6 * 1024**3:
+            previous = APP / '.env.prev'
+            prune_images({current, image_tag(previous.read_text()) if previous.exists() else None})
         if shutil.disk_usage('/var/tmp').free < 6 * 1024**3:
             raise RuntimeError('Insufficient free disk space for safe update')
         with tempfile.TemporaryDirectory(prefix='eco-native-release-', dir='/var/tmp') as directory:

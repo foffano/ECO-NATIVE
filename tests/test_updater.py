@@ -33,3 +33,21 @@ def test_versions_are_numeric_and_environment_keeps_other_settings():
         updater.version("latest")
     updated = updater.update_environment("IMAGE=old\nIMAGE_TAG=v1.0.0\nEXTRA=yes\n", "v1.2.3")
     assert updated == "EXTRA=yes\nIMAGE=eco-native\nIMAGE_TAG=v1.2.3\n"
+
+
+def test_prune_keeps_only_the_running_and_previous_images(monkeypatch):
+    calls = []
+    monkeypatch.setattr(updater, "run", lambda *args, capture=False: "v1.0.0\nv1.1.0\nv1.2.0\nlatest\n")
+    monkeypatch.setattr(updater.subprocess, "run", lambda args, **kwargs: calls.append(args))
+    assert updater.image_tag("IMAGE=eco-native\nIMAGE_TAG=v1.1.0\n") == "v1.1.0"
+    updater.prune_images({"v1.2.0", updater.image_tag("IMAGE_TAG=v1.1.0\n"), None})
+    assert ["docker", "rmi", "eco-native:v1.0.0"] in calls
+    assert not any("eco-native:v1.1.0" in call or "eco-native:v1.2.0" in call or "eco-native:latest" in call for call in calls)
+    assert ["docker", "builder", "prune", "-f"] in calls
+
+
+def test_prune_never_fails_an_update(monkeypatch):
+    def broken(*args, capture=False):
+        raise OSError("docker down")
+    monkeypatch.setattr(updater, "run", broken)
+    updater.prune_images({"v1.2.0"})
