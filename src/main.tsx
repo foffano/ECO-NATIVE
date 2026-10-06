@@ -9,12 +9,12 @@ import {
   Check,
   ChevronDown,
   Download,
-  Eye,
   FileSpreadsheet,
   FolderOpen,
   FolderPlus,
   Gauge,
   House,
+  MoreHorizontal,
   Link2,
   LogIn,
   LogOut,
@@ -35,6 +35,7 @@ import {
   Printer,
   Plus,
   Palette,
+  X,
 } from "lucide-react";
 import "./styles.css";
 import {
@@ -423,7 +424,12 @@ type ProductFilters = {
     | "without_model"
     | "listed"
     | "not_listed";
+  publication: ProductPublication;
 };
+
+// Whether a product is published is the user's call: a manual mark kept in
+// metadata.listed, whatever was exported or sent to a marketplace.
+type ProductPublication = "all" | "listed" | "not_listed";
 
 type ProductPage = {
   items: Product[];
@@ -431,6 +437,8 @@ type ProductPage = {
   total: number;
   with_title: number;
   store_total: number;
+  listed_total: number;
+  not_listed_total: number;
 };
 
 // One loaded window of the catalog: pages are appended as the list scrolls.
@@ -440,6 +448,9 @@ type ProductListState = {
   total: number;
   withTitle: number;
   storeTotal: number;
+  // Counts for the publication tabs, under the other filters.
+  listedTotal: number;
+  notListedTotal: number;
   loading: boolean;
   loaded: boolean;
 };
@@ -463,6 +474,8 @@ const EMPTY_PRODUCT_LIST: ProductListState = {
   total: 0,
   withTitle: 0,
   storeTotal: 0,
+  listedTotal: 0,
+  notListedTotal: 0,
   loading: false,
   loaded: false,
 };
@@ -473,6 +486,7 @@ function productPagePath(filters: ProductFilters, limit: number, cursor?: string
   if (query) params.set("q", query);
   if (filters.status !== "all") params.set("status", filters.status);
   if (filters.characteristic !== "all") params.set("characteristic", filters.characteristic);
+  if (filters.publication !== "all") params.set("publication", filters.publication);
   if (cursor) params.set("cursor", cursor);
   return `/api/products/page?${params.toString()}`;
 }
@@ -780,10 +794,7 @@ function productPipelineBadges(product: Product): PipelineBadge[] {
 
   let publicationDetail = "Aguardando";
   let publicationState: PipelineBadge["state"] = "pending";
-  if (productListed(product)) {
-    publicationDetail = "À venda";
-    publicationState = "done";
-  } else if (product.status === "exported") {
+  if (product.status === "exported") {
     publicationDetail = "Exportado";
     publicationState = "done";
   } else if (product.status === "ready") {
@@ -820,8 +831,8 @@ function productPipelineBadges(product: Product): PipelineBadge[] {
       detail: fileWarning,
     }] : []),
     {
-      key: "publish",
-      label: "Publicação",
+      key: "stage",
+      label: "Etapa",
       state: publicationState,
       detail: publicationDetail,
     },
@@ -1741,6 +1752,7 @@ function filterProducts(products: Product[], filters: ProductFilters): Product[]
     const hasModel = product.assets.some(isModelAsset);
     const listed = productListed(product);
     if (filters.status !== "all" && product.status !== filters.status) return false;
+    if (filters.publication !== "all" && listed !== (filters.publication === "listed")) return false;
     if (query) {
       const searchable = [
         product.name,
@@ -1752,7 +1764,7 @@ function filterProducts(products: Product[], filters: ProductFilters): Product[]
         product.listing.keywords.join(" "),
         productSku(product),
         Object.values(productColorSkus(product)).join(" "),
-        productListed(product) ? "a venda à venda vendido publicado" : "nao esta a venda não está à venda",
+        productListed(product) ? "a venda à venda vendido publicado" : "nao publicado não publicado nao esta a venda não está à venda",
       ].join(" ").toLowerCase();
       if (!searchable.includes(query)) return false;
     }
@@ -1848,7 +1860,7 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
   const [collectRunning, setCollectRunning] = useState(false);
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [selectedProductIds, setSelectedProductIds] = useState<string[]>([]);
-  const [productFilters, setProductFilters] = useState<ProductFilters>({ query: "", status: "all", characteristic: "all" });
+  const [productFilters, setProductFilters] = useState<ProductFilters>({ query: "", status: "all", characteristic: "all", publication: "all" });
   const [imageOptions, setImageOptions] = useState<ImageOptions>({ studio_prompts: [], colors: [] });
   const [selectedColorVariations, setSelectedColorVariations] = useState<string[]>([]);
   const [batchProgress, setBatchProgress] = useState<BatchProgress>(null);
@@ -1899,8 +1911,13 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
     return () => window.clearTimeout(timeout);
   }, [productFilters.query]);
   const listFilters = useMemo<ProductFilters>(
-    () => ({ query: debouncedProductQuery, status: productFilters.status, characteristic: productFilters.characteristic }),
-    [debouncedProductQuery, productFilters.status, productFilters.characteristic],
+    () => ({
+      query: debouncedProductQuery,
+      status: productFilters.status,
+      characteristic: productFilters.characteristic,
+      publication: productFilters.publication,
+    }),
+    [debouncedProductQuery, productFilters.status, productFilters.characteristic, productFilters.publication],
   );
 
   // Refs let long-lived callbacks (job polling, batch actions) see the latest
@@ -1954,6 +1971,8 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
         total: page.total,
         withTitle: page.with_title,
         storeTotal: page.store_total,
+        listedTotal: page.listed_total,
+        notListedTotal: page.not_listed_total,
         loading: false,
         loaded: true,
       });
@@ -1981,6 +2000,8 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
           total: page.total,
           withTitle: page.with_title,
           storeTotal: page.store_total,
+          listedTotal: page.listed_total,
+          notListedTotal: page.not_listed_total,
           loading: false,
         };
       });
@@ -2136,21 +2157,35 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
     const stillMatches = filterProducts([updated], listFiltersRef.current).length > 0;
     if (!stillMatches && !insert) setSelectedProductIds((current) => current.filter((id) => id !== updated.id));
     setProductList((current) => {
-      const exists = current.items.some((product) => product.id === updated.id);
-      if (!exists) {
+      const previous = current.items.find((product) => product.id === updated.id);
+      if (!previous) {
         if (!insert) return current;
+        const listed = productListed(updated);
         return {
           ...current,
           items: [updated, ...current.items],
           total: current.total + 1,
           storeTotal: current.storeTotal + 1,
           withTitle: current.withTitle + (updated.listing.title ? 1 : 0),
+          listedTotal: current.listedTotal + (listed ? 1 : 0),
+          notListedTotal: current.notListedTotal + (listed ? 0 : 1),
         };
       }
+      // Publishing moves a product between the tabs, so their counts follow.
+      const shift = Number(productListed(updated)) - Number(productListed(previous));
+      const counts = {
+        listedTotal: Math.max(0, current.listedTotal + shift),
+        notListedTotal: Math.max(0, current.notListedTotal - shift),
+      };
       if (!stillMatches) {
-        return { ...current, items: current.items.filter((product) => product.id !== updated.id), total: Math.max(0, current.total - 1) };
+        return {
+          ...current,
+          ...counts,
+          items: current.items.filter((product) => product.id !== updated.id),
+          total: Math.max(0, current.total - 1),
+        };
       }
-      return { ...current, items: current.items.map((product) => (product.id === updated.id ? updated : product)) };
+      return { ...current, ...counts, items: current.items.map((product) => (product.id === updated.id ? updated : product)) };
     });
     setProductDetails((current) =>
       current[updated.id] || updated.id === selectedProductIdRef.current || insert
@@ -2186,12 +2221,16 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
 
   function removeProductFromState(productId: string) {
     setProductList((current) => {
-      if (!current.items.some((product) => product.id === productId)) return current;
+      const removed = current.items.find((product) => product.id === productId);
+      if (!removed) return current;
+      const listed = productListed(removed);
       return {
         ...current,
         items: current.items.filter((product) => product.id !== productId),
         total: Math.max(0, current.total - 1),
         storeTotal: Math.max(0, current.storeTotal - 1),
+        listedTotal: Math.max(0, current.listedTotal - (listed ? 1 : 0)),
+        notListedTotal: Math.max(0, current.notListedTotal - (listed ? 0 : 1)),
       };
     });
     setProductDetails((current) => {
@@ -3062,7 +3101,7 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
   }
 
   function updateProductListed(productId: string, listed: boolean) {
-    return runFluidAction(listed ? "Marcando produto à venda" : "Removendo marcação de venda", async () => {
+    return runFluidAction(listed ? "Marcando como publicado" : "Marcando como não publicado", async () => {
       const updated = await api<Product>(`/api/products/${productId}`, {
         method: "PATCH",
         body: JSON.stringify({
@@ -3283,33 +3322,31 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
     }
   }
 
-  async function markListedBatch(productIds = selectedProductIds) {
+  async function setListedBatch(productIds: string[], listed: boolean) {
     if (!productIds.length) {
-      setNotice("Selecione pelo menos um produto para marcar à venda.");
+      setNotice("Selecione pelo menos um produto.");
       return;
     }
-    const pendingIds = productIds.filter((id) => {
-      const product = findProduct(id);
-      return !productListed(product);
-    });
+    const pendingIds = productIds.filter((id) => productListed(findProduct(id)) !== listed);
     if (!pendingIds.length) {
-      setNotice("Produtos selecionados já estão à venda.");
+      setNotice(listed ? "Os selecionados já estão publicados." : "Os selecionados já estão como não publicados.");
       return;
     }
+    const label = listed ? "publicado(s)" : "não publicado(s)";
     try {
       setBusy(true);
-      setNotice(`Marcando ${pendingIds.length} produto(s) à venda...`);
-      const listedAt = new Date().toISOString();
+      setNotice(`Marcando ${pendingIds.length} produto(s) como ${label}...`);
+      const listedAt = listed ? new Date().toISOString() : null;
       for (const productId of pendingIds) {
         const updated = await api<Product>(`/api/products/${productId}`, {
           method: "PATCH",
-          body: JSON.stringify({ metadata: { listed: true, listed_at: listedAt } }),
+          body: JSON.stringify({ metadata: { listed, listed_at: listedAt } }),
         });
         patchProduct(updated);
       }
-      setNotice(`${pendingIds.length} produto(s) marcado(s) à venda.`);
+      setNotice(`${pendingIds.length} produto(s) marcado(s) como ${label}.`);
     } catch (error) {
-      setNotice(error instanceof Error ? error.message : "Erro ao marcar produtos à venda");
+      setNotice(error instanceof Error ? error.message : "Erro ao atualizar a publicação");
     } finally {
       setBusy(false);
     }
@@ -3509,8 +3546,8 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
             filters={productFilters}
             products={listedProducts}
             matchedProductCount={productList.total}
-            matchedWithTitleCount={productList.withTitle}
-            totalProductCount={productList.storeTotal}
+            listedCount={productList.listedTotal}
+            notListedCount={productList.notListedTotal}
             hasMoreProducts={Boolean(productList.nextCursor)}
             productsLoading={productList.loading}
             productsLoaded={productList.loaded}
@@ -3523,7 +3560,7 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
             onBatchGenerateImages={generateImagesBatch}
             onBatchGenerateListings={generateListingsBatch}
             onBatchDeleteProducts={deleteProductsBatch}
-            onBatchMarkListed={markListedBatch}
+            onBatchSetListed={setListedBatch}
             onDeleteProduct={deleteProduct}
             onFiltersChange={setProductFilters}
             onGenerateColorVariations={generateColorVariations}
@@ -4820,46 +4857,185 @@ function ProductThumbPreviewPortal({
   );
 }
 
-function ProductCardThumb({
-  product,
-  onOpen,
+const PUBLICATION_TABS: { value: ProductPublication; label: string }[] = [
+  { value: "all", label: "Todos" },
+  { value: "not_listed", label: "Não publicados" },
+  { value: "listed", label: "Publicados" },
+];
+
+// One-tap filters for what still needs work; each is a status or a
+// characteristic, and only one applies at a time.
+const PRODUCT_QUICK_FILTERS: {
+  key: string;
+  label: string;
+  status: ProductFilters["status"];
+  characteristic: ProductFilters["characteristic"];
+}[] = [
+  { key: "without_listing", label: "Sem anúncio", status: "all", characteristic: "without_listing" },
+  { key: "without_image", label: "Sem fotos", status: "all", characteristic: "without_image" },
+  { key: "without_model", label: "Sem 3D", status: "all", characteristic: "without_model" },
+  { key: "ready", label: "Prontos", status: "ready", characteristic: "all" },
+  { key: "exported", label: "Exportados", status: "exported", characteristic: "all" },
+];
+
+type ActionMenuItem = {
+  key: string;
+  label: string;
+  icon?: React.ReactNode;
+  title?: string;
+  danger?: boolean;
+  onClick: () => void;
+};
+
+function ActionMenu({
+  label,
+  trigger,
+  items,
+  disabled,
+  placement = "down",
 }: {
-  product: Product;
-  onOpen: () => void;
+  label: string;
+  trigger?: React.ReactNode;
+  items: ActionMenuItem[];
+  disabled?: boolean;
+  placement?: "down" | "up";
 }) {
-  const {
-    anchorRef,
-    thumbnailUrl,
-    previewUrl,
-    handleMouseEnter,
-    handleMouseLeave,
-    layout,
-    previewOpen,
-    previewPos,
-  } = useProductThumbPreview(product, "products");
+  const [open, setOpen] = useState(false);
+  const menuRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    function handleDocumentClick(event: MouseEvent) {
+      if (!menuRef.current?.contains(event.target as Node)) setOpen(false);
+    }
+    function handleEscape(event: KeyboardEvent) {
+      if (event.key === "Escape") setOpen(false);
+    }
+    document.addEventListener("mousedown", handleDocumentClick);
+    document.addEventListener("keydown", handleEscape);
+    return () => {
+      document.removeEventListener("mousedown", handleDocumentClick);
+      document.removeEventListener("keydown", handleEscape);
+    };
+  }, [open]);
 
   return (
-    <>
+    <div className={`action-menu ${placement}`} ref={menuRef}>
       <button
-        ref={anchorRef as React.RefObject<HTMLButtonElement>}
-        className="product-card-thumb"
-        onClick={onOpen}
-        aria-label={`Abrir ${product.name}`}
-        onMouseEnter={handleMouseEnter}
-        onMouseLeave={handleMouseLeave}
+        type="button"
+        className={trigger ? "action-menu-trigger" : "action-menu-trigger icon-only"}
+        onClick={() => setOpen((value) => !value)}
+        aria-label={label}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        title={trigger ? undefined : label}
+        disabled={disabled}
       >
-        {thumbnailUrl ? <img src={thumbnailUrl} alt="" loading="lazy" decoding="async" /> : <ShoppingBag size={22} />}
+        {trigger ?? <MoreHorizontal size={18} />}
       </button>
-      {previewUrl && (
-        <ProductThumbPreviewPortal
-          imageUrl={previewUrl}
-          layout={layout}
-          open={previewOpen}
-          position={previewPos}
-          productName={product.name}
-        />
+      {open && (
+        <div className="action-menu-list" role="menu">
+          {items.map((item) => (
+            <button
+              key={item.key}
+              type="button"
+              role="menuitem"
+              className={item.danger ? "danger" : ""}
+              title={item.title}
+              onClick={() => {
+                setOpen(false);
+                item.onClick();
+              }}
+            >
+              {item.icon}
+              {item.label}
+            </button>
+          ))}
+        </div>
       )}
-    </>
+    </div>
+  );
+}
+
+function ProductTile({
+  product,
+  busy,
+  selected,
+  active,
+  onToggleSelected,
+  onOpen,
+  onToggleListed,
+  onGenerateListing,
+  onGenerateImages,
+  onDelete,
+}: {
+  product: Product;
+  busy: boolean;
+  selected: boolean;
+  active: boolean;
+  onToggleSelected: () => void;
+  onOpen: () => void;
+  onToggleListed: () => void;
+  onGenerateListing: () => void;
+  onGenerateImages: () => void;
+  onDelete: () => void;
+}) {
+  const listed = productListed(product);
+  const imageUrl = productThumbnailUrl(product, 384);
+  const subtitle = productCardSubtitle(product);
+  const badges = productPipelineBadges(product);
+  const stage = badges.find((badge) => badge.key === "stage");
+  const steps = badges.filter((badge) => badge.key !== "stage");
+  const className = ["product-tile", listed ? "published" : "", selected ? "selected" : "", active ? "active" : ""]
+    .filter(Boolean)
+    .join(" ");
+
+  return (
+    <article className={className}>
+      <div className="product-tile-media">
+        <button className="product-tile-image" onClick={onOpen} aria-label={`Abrir ${product.name}`}>
+          {imageUrl ? <img src={imageUrl} alt="" loading="lazy" decoding="async" /> : <ShoppingBag size={28} />}
+        </button>
+        <label className="product-tile-check" aria-label={`Selecionar ${product.name}`}>
+          <input type="checkbox" checked={selected} onChange={onToggleSelected} disabled={busy} />
+        </label>
+        <div className="product-tile-menu">
+          <ActionMenu
+            label={`Ações de ${product.name}`}
+            disabled={busy}
+            items={[
+              { key: "listing", label: "Gerar anúncio", icon: <BrainCircuit size={15} />, onClick: onGenerateListing },
+              { key: "images", label: "Gerar imagens", icon: <ImagePlus size={15} />, onClick: onGenerateImages },
+              { key: "delete", label: "Apagar produto", icon: <Trash2 size={15} />, danger: true, onClick: onDelete },
+            ]}
+          />
+        </div>
+        {stage && stage.detail !== "Aguardando" && <span className={`product-tile-stage ${stage.state}`}>{stage.detail}</span>}
+      </div>
+      <button className="product-tile-body" onClick={onOpen}>
+        <strong title={product.name}>{product.name}</strong>
+        <span className={subtitle ? "product-tile-subtitle" : "product-tile-subtitle muted"}>
+          {subtitle || "Sem anúncio gerado ainda"}
+        </span>
+      </button>
+      <div className="product-tile-steps">
+        {steps.map((badge) => (
+          <span className={`product-tile-step ${badge.state}`} key={badge.key} title={`${badge.label}: ${badge.detail}`}>
+            <span className="product-tile-step-dot" aria-hidden="true" />
+            {badge.label}
+          </span>
+        ))}
+      </div>
+      <button
+        className={listed ? "publish-toggle on" : "publish-toggle"}
+        onClick={onToggleListed}
+        disabled={busy}
+        aria-pressed={listed}
+        title={listed ? "Clique para marcar como não publicado" : "Clique quando o produto estiver publicado"}
+      >
+        {listed ? <><Check size={15} /> Publicado</> : "Marcar como publicado"}
+      </button>
+    </article>
   );
 }
 
@@ -4949,7 +5125,7 @@ function CostsTab({
   savedOtherCostsRowsRef.current = savedOtherCostsRows;
 
   const filteredProducts = useMemo(
-    () => filterProducts(products, { query: searchQuery, status: "all", characteristic: "all" }),
+    () => filterProducts(products, { query: searchQuery, status: "all", characteristic: "all", publication: "all" }),
     [products, searchQuery],
   );
 
@@ -5298,8 +5474,8 @@ function ProductsTab({
   selectedProductIds,
   selectedColorVariations,
   matchedProductCount,
-  matchedWithTitleCount,
-  totalProductCount,
+  listedCount,
+  notListedCount,
   hasMoreProducts,
   productsLoading,
   productsLoaded,
@@ -5309,7 +5485,7 @@ function ProductsTab({
   onBatchGenerateImages,
   onBatchGenerateListings,
   onBatchDeleteProducts,
-  onBatchMarkListed,
+  onBatchSetListed,
   onCloseDetails,
   onDeleteModelAsset,
   onDeleteProduct,
@@ -5360,8 +5536,8 @@ function ProductsTab({
   selectedProductIds: string[];
   selectedColorVariations: string[];
   matchedProductCount: number;
-  matchedWithTitleCount: number;
-  totalProductCount: number;
+  listedCount: number;
+  notListedCount: number;
   hasMoreProducts: boolean;
   productsLoading: boolean;
   productsLoaded: boolean;
@@ -5371,7 +5547,7 @@ function ProductsTab({
   onBatchGenerateImages: (ids?: string[]) => void;
   onBatchGenerateListings: (ids?: string[]) => void;
   onBatchDeleteProducts: (ids?: string[]) => void;
-  onBatchMarkListed: (ids?: string[]) => void;
+  onBatchSetListed: (ids: string[], listed: boolean) => void;
   onCloseDetails: () => void;
   onDeleteModelAsset: (productId: string, assetId: string) => void;
   onDeleteProduct: (id?: string) => void;
@@ -5420,12 +5596,13 @@ function ProductsTab({
   const modelFileInputRef = useRef<HTMLInputElement>(null);
   const productListSentinelRef = useRef<HTMLDivElement>(null);
   const visibleCount = products.length;
-  const paginatedProducts = products;
-  const visibleProductIds = paginatedProducts.map((product) => product.id);
+  const visibleProductIds = products.map((product) => product.id);
   const allSelected = visibleProductIds.length > 0 && visibleProductIds.every((id) => selectedProductIds.includes(id));
   const progressValue = batchProgress ? Math.round((batchProgress.done / Math.max(batchProgress.total, 1)) * 100) : 0;
   const progressLabel = batchProgress ? `${batchProgress.label}: ${batchProgress.done}/${batchProgress.total}` : "";
-  const visibleReadyCount = matchedWithTitleCount;
+  const activeQuickFilter = PRODUCT_QUICK_FILTERS.find((filter) =>
+    filter.status === filters.status && filter.characteristic === filters.characteristic);
+  const hasNarrowingFilters = filters.status !== "all" || filters.characteristic !== "all" || Boolean(filters.query.trim());
   const selectedCostEvents = selectedProduct ? productCostEvents(selectedProduct) : [];
   const selectedCostSummary = summarizeCostEvents(selectedCostEvents);
 
@@ -5536,7 +5713,7 @@ function ProductsTab({
       <div className="panel products-table-panel">
         <div className="panel-title">
           <ShoppingBag size={18} />
-          <h2>Produtos capturados</h2>
+          <h2>Produtos</h2>
           <div className="panel-title-actions">
             <ProjectPicker activeProject={activeProject} projects={projects} onChange={onSelectProject} />
             <button
@@ -5546,97 +5723,99 @@ function ProductsTab({
             >
               <Plus size={16} /> Novo produto
             </button>
+            <ActionMenu
+              label="Mais opções"
+              disabled={busy}
+              items={[
+                {
+                  key: "shopee-template",
+                  label: shopeeTemplate?.configured ? "Trocar template da Shopee" : "Enviar template da Shopee",
+                  icon: <Upload size={15} />,
+                  title: shopeeTemplate?.uploaded_at
+                    ? `Template atual enviado em ${new Date(shopeeTemplate.uploaded_at).toLocaleString("pt-BR")}.`
+                    : "Template de envio em massa baixado da Shopee",
+                  onClick: onReplaceShopeeTemplate,
+                },
+              ]}
+            />
           </div>
         </div>
-        <div className="product-filters">
-          <label>
-            Buscar
+
+        <div className="catalog-toolbar">
+          <div className="publication-tabs" role="tablist" aria-label="Publicação">
+            {PUBLICATION_TABS.map((tab) => {
+              const count = tab.value === "listed"
+                ? listedCount
+                : tab.value === "not_listed"
+                  ? notListedCount
+                  : listedCount + notListedCount;
+              return (
+                <button
+                  key={tab.value}
+                  className={filters.publication === tab.value ? "active" : ""}
+                  role="tab"
+                  aria-selected={filters.publication === tab.value}
+                  onClick={() => updateFilters({ publication: tab.value })}
+                >
+                  {tab.label}
+                  <span className="publication-tab-count">{productsLoaded ? count : "…"}</span>
+                </button>
+              );
+            })}
+          </div>
+          <label className="catalog-search">
+            <Search size={16} />
             <input
               value={filters.query}
               onChange={(event) => updateFilters({ query: event.target.value })}
-              placeholder="Nome, link, tag, categoria..."
+              placeholder="Buscar por nome, SKU, tag, categoria..."
+              aria-label="Buscar produtos"
             />
+            {filters.query && (
+              <button className="catalog-search-clear" onClick={() => updateFilters({ query: "" })} aria-label="Limpar busca">
+                <X size={14} />
+              </button>
+            )}
           </label>
-          <label>
-            Status
-            <select value={filters.status} onChange={(event) => updateFilters({ status: event.target.value as ProductFilters["status"] })}>
-              <option value="all">Todos</option>
-              <option value="collected">Coletado</option>
-              <option value="in_edit">Em edição</option>
-              <option value="ready">Pronto</option>
-              <option value="exported">Exportado</option>
-            </select>
-          </label>
-          <label>
-            Característica
-            <select
-              value={filters.characteristic}
-              onChange={(event) => updateFilters({ characteristic: event.target.value as ProductFilters["characteristic"] })}
-            >
-              <option value="all">Todas</option>
-              <option value="with_listing">Com anúncio</option>
-              <option value="without_listing">Sem anúncio</option>
-              <option value="with_image">Com imagem</option>
-              <option value="without_image">Sem imagem</option>
-              <option value="with_model">Com 3MF</option>
-              <option value="without_model">Sem 3MF</option>
-              <option value="listed">À venda</option>
-              <option value="not_listed">Não está à venda</option>
-            </select>
-          </label>
-          <button className="quiet-button filter-reset" onClick={() => onFiltersChange({ query: "", status: "all", characteristic: "all" })}>
-            Limpar filtros
-          </button>
         </div>
-        <div className="batch-toolbar">
-          <label className="checkbox-row">
+
+        <div className="catalog-subbar">
+          <div className="catalog-chips">
+            {PRODUCT_QUICK_FILTERS.map((filter) => {
+              const active = activeQuickFilter?.key === filter.key;
+              return (
+                <button
+                  key={filter.key}
+                  className={active ? "catalog-chip active" : "catalog-chip"}
+                  aria-pressed={active}
+                  onClick={() => updateFilters(active
+                    ? { status: "all", characteristic: "all" }
+                    : { status: filter.status, characteristic: filter.characteristic })}
+                >
+                  {filter.label}
+                </button>
+              );
+            })}
+            {hasNarrowingFilters && (
+              <button
+                className="catalog-chip-reset"
+                onClick={() => updateFilters({ query: "", status: "all", characteristic: "all" })}
+              >
+                Limpar filtros
+              </button>
+            )}
+          </div>
+          <label className="checkbox-row catalog-select-all">
             <input
               type="checkbox"
               checked={allSelected}
               onChange={toggleAllProducts}
               disabled={!products.length || busy}
             />
-            Selecionar página
+            Selecionar {visibleCount < matchedProductCount ? `os ${visibleCount} carregados` : "todos"}
           </label>
-          <div className="batch-actions">
-            <button className="primary" onClick={() => onBatchGenerateListings()} disabled={busy || !selectedProductIds.length}>
-              <BrainCircuit size={16} /> Gerar anúncios
-            </button>
-            <button className="primary dark" onClick={() => onBatchGenerateImages()} disabled={busy || !selectedProductIds.length}>
-              <ImagePlus size={16} /> Gerar imagens base
-            </button>
-            <button className="primary ghost" onClick={() => onBatchMarkListed(selectedProductIds)} disabled={busy || !selectedProductIds.length}>
-              <ShoppingBag size={16} /> Colocar à venda
-            </button>
-            <button className="primary ghost" onClick={() => onExportSelected(selectedProductIds)} disabled={busy || !selectedProductIds.length}>
-              <Download size={16} /> Exportar CSV
-            </button>
-            <button
-              className="primary ghost"
-              onClick={() => onExportShopeeSheet(selectedProductIds)}
-              disabled={busy || !selectedProductIds.length}
-              title={shopeeTemplate?.configured ? "Preenche o template de envio em massa da sua loja" : "Na primeira vez, escolha o template de envio em massa baixado da Shopee"}
-            >
-              <FileSpreadsheet size={16} /> Planilha Shopee
-            </button>
-            <button
-              className="primary ghost"
-              onClick={onReplaceShopeeTemplate}
-              disabled={busy}
-              title={shopeeTemplate?.uploaded_at
-                ? `Template atual enviado em ${new Date(shopeeTemplate.uploaded_at).toLocaleString("pt-BR")}. Clique para trocar.`
-                : "Enviar o template de envio em massa baixado da Shopee"}
-            >
-              <Upload size={16} /> {shopeeTemplate?.configured ? "Trocar template" : "Enviar template"}
-            </button>
-            <button className="danger-button" onClick={() => onBatchDeleteProducts()} disabled={busy || !selectedProductIds.length}>
-              <Trash2 size={16} /> Apagar selecionados
-            </button>
-          </div>
-          <span className="selection-count">
-            {selectedProductIds.length} selecionado(s) - {visibleCount}/{matchedProductCount} carregados - {matchedProductCount}/{totalProductCount} visíveis
-          </span>
         </div>
+
         {batchProgress && (
           <div className="analysis-progress">
             <div>
@@ -5647,98 +5826,90 @@ function ProductsTab({
             <progress max={100} value={progressValue} />
           </div>
         )}
-        <div className="product-card-list">
-          {paginatedProducts.map((product) => {
-            const subtitle = productCardSubtitle(product);
-            const pipeline = productPipelineBadges(product);
-            const isSelected = selectedProductIds.includes(product.id);
-            const isActive = product.id === selectedProduct?.id;
-            return (
-              <article
-                key={product.id}
-                className={isActive ? "product-card active" : isSelected ? "product-card selected" : "product-card"}
-              >
-                <label className="product-card-select" aria-label={`Selecionar ${product.name}`}>
-                  <input
-                    type="checkbox"
-                    checked={isSelected}
-                    onChange={() => toggleProductSelection(product.id)}
-                    disabled={busy}
-                  />
-                </label>
-                <ProductCardThumb product={product} onOpen={() => onOpenDetails(product.id)} />
-                <button className="product-card-main" onClick={() => onOpenDetails(product.id)}>
-                  <strong>{product.name}</strong>
-                  {subtitle ? <span className="product-card-subtitle">{subtitle}</span> : (
-                    <span className="product-card-subtitle muted">Sem anúncio gerado ainda</span>
-                  )}
-                  <div className="pipeline-badges">
-                    {pipeline.map((badge) => (
-                      <span className={`pipeline-badge ${badge.state}`} key={badge.key} title={`${badge.label}: ${badge.detail}`}>
-                        <span className="pipeline-badge-label">{badge.label}</span>
-                        <span className="pipeline-badge-detail">{badge.detail}</span>
-                      </span>
-                    ))}
-                  </div>
-                </button>
-                <div className="product-card-cost">
-                  <span>Custo IA</span>
-                  <strong>{formatUsd(productCostTotal(product))}</strong>
-                </div>
-                <div className="row-actions product-card-actions">
-                  <IconAction
-                    label="Gerar anúncio"
-                    onClick={() => {
-                      onSelectProduct(product.id);
-                      onGenerateListing(product.id);
-                    }}
-                    disabled={busy}
-                  >
-                    <BrainCircuit size={16} />
-                  </IconAction>
-                  <IconAction
-                    label="Gerar imagens"
-                    onClick={() => {
-                      onSelectProduct(product.id);
-                      onGenerateImages(product.id);
-                    }}
-                    disabled={busy}
-                  >
-                    <ImagePlus size={16} />
-                  </IconAction>
-                  <IconAction label="Abrir detalhes" onClick={() => onOpenDetails(product.id)} disabled={busy}>
-                    <Eye size={16} />
-                  </IconAction>
-                  <IconAction label="Apagar produto" onClick={() => onDeleteProduct(product.id)} disabled={busy}>
-                    <Trash2 size={16} />
-                  </IconAction>
-                </div>
-              </article>
-            );
-          })}
+
+        <div className="product-grid">
+          {products.map((product) => (
+            <ProductTile
+              key={product.id}
+              product={product}
+              busy={busy}
+              selected={selectedProductIds.includes(product.id)}
+              active={product.id === selectedProduct?.id && detailsOpen}
+              onToggleSelected={() => toggleProductSelection(product.id)}
+              onOpen={() => onOpenDetails(product.id)}
+              onToggleListed={() => onUpdateProductListed(product.id, !productListed(product))}
+              onGenerateListing={() => {
+                onSelectProduct(product.id);
+                onGenerateListing(product.id);
+              }}
+              onGenerateImages={() => {
+                onSelectProduct(product.id);
+                onGenerateImages(product.id);
+              }}
+              onDelete={() => onDeleteProduct(product.id)}
+            />
+          ))}
           {!products.length && (
             <p className="empty table-empty">
-              {productsLoaded ? "Nenhum produto encontrado com os filtros atuais." : "Carregando produtos..."}
+              {!productsLoaded
+                ? "Carregando produtos..."
+                : filters.publication === "listed" && !hasNarrowingFilters
+                  ? "Nenhum produto publicado ainda. Marque um produto como publicado no card ou em lote."
+                  : "Nenhum produto encontrado com os filtros atuais."}
             </p>
           )}
         </div>
         {hasMoreProducts && (
           <div className="product-list-load-more" ref={productListSentinelRef}>
-            {productsLoading ? "Carregando mais produtos..." : `Role para carregar mais produtos (${visibleCount} de ${matchedProductCount})`}
+            {productsLoading ? "Carregando mais produtos..." : `Role para carregar mais (${visibleCount} de ${matchedProductCount})`}
           </div>
         )}
-      </div>
 
-      <div className="panel products-summary-panel">
-        <div className="panel-title">
-          <BadgeCheck size={18} />
-          <h2>Resumo</h2>
-        </div>
-        <div className="summary-list">
-          <SummaryItem label="Total" value={matchedProductCount.toString()} />
-          <SummaryItem label="Com anúncio" value={visibleReadyCount.toString()} />
-          <SummaryItem label="Pendentes" value={Math.max(0, matchedProductCount - visibleReadyCount).toString()} />
-        </div>
+        {selectedProductIds.length > 0 && (
+          <div className="selection-bar" role="toolbar" aria-label="Ações para os selecionados">
+            <div className="selection-bar-count">
+              <strong>{selectedProductIds.length}</strong> selecionado(s)
+              <button className="selection-bar-clear" onClick={() => onSelectedProductIdsChange([])} aria-label="Limpar seleção">
+                <X size={14} />
+              </button>
+            </div>
+            <div className="selection-bar-actions">
+              <button onClick={() => onBatchGenerateListings()} disabled={busy}>
+                <BrainCircuit size={15} /> Gerar anúncios
+              </button>
+              <button onClick={() => onBatchGenerateImages()} disabled={busy}>
+                <ImagePlus size={15} /> Gerar imagens
+              </button>
+              <button onClick={() => onBatchSetListed(selectedProductIds, true)} disabled={busy}>
+                <Check size={15} /> Marcar publicado
+              </button>
+              <button onClick={() => onBatchSetListed(selectedProductIds, false)} disabled={busy}>
+                Marcar não publicado
+              </button>
+              <ActionMenu
+                label="Exportar"
+                trigger={<><Download size={15} /> Exportar <ChevronDown size={14} /></>}
+                placement="up"
+                disabled={busy}
+                items={[
+                  { key: "csv", label: "CSV", icon: <Download size={15} />, onClick: () => onExportSelected(selectedProductIds) },
+                  {
+                    key: "shopee",
+                    label: "Planilha Shopee",
+                    icon: <FileSpreadsheet size={15} />,
+                    title: shopeeTemplate?.configured
+                      ? "Preenche o template de envio em massa da sua loja"
+                      : "Na primeira vez, escolha o template de envio em massa baixado da Shopee",
+                    onClick: () => onExportShopeeSheet(selectedProductIds),
+                  },
+                ]}
+              />
+              <button className="selection-bar-danger" onClick={() => onBatchDeleteProducts()} disabled={busy}>
+                <Trash2 size={15} /> Apagar
+              </button>
+            </div>
+          </div>
+        )}
       </div>
 
       {detailsOpen && (
@@ -6021,7 +6192,7 @@ function ProductsTab({
                     onChange={(event) => onUpdateProductListed(selectedProduct.id, event.target.checked)}
                     disabled={busy}
                   />
-                  <span>Produto já está à venda</span>
+                  <span>Produto publicado</span>
                 </label>
                 <div className="image-generation-options">
                   <div className="subsection-title">Custo de criação (IA)</div>
@@ -6671,24 +6842,6 @@ function GalleryGroup({
   return <div className="gallery-group">{content}</div>;
 }
 
-function IconAction({
-  children,
-  disabled,
-  label,
-  onClick,
-}: {
-  children: React.ReactNode;
-  disabled: boolean;
-  label: string;
-  onClick: () => void;
-}) {
-  return (
-    <button className="icon-action" disabled={disabled} onClick={onClick} title={label} aria-label={label}>
-      {children}
-    </button>
-  );
-}
-
 function ScheduleMetricBar({ label, value, tone = "default" }: { label: string; value: number; tone?: "default" | "warn" | "danger" }) {
   const pct = Math.min(100, Math.round(value * 1000) / 10);
   return (
@@ -7110,7 +7263,7 @@ function ScheduleTab({
   const productPlates = readPrintPlates(selectedProduct);
   const selectedPlate = productPlates.find((plate) => plate.id === selectedPlateId);
   const filteredScheduleProducts = useMemo(
-    () => filterProducts(products, { query: productSearchQuery, status: "all", characteristic: "all" }),
+    () => filterProducts(products, { query: productSearchQuery, status: "all", characteristic: "all", publication: "all" }),
     [products, productSearchQuery],
   );
   const selectedThumbnailUrl = productThumbnailUrl(selectedProduct);

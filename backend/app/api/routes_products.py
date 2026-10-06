@@ -31,7 +31,14 @@ from backend.app.services.product_paths import (
 from backend.app.services.prompt_library import IMAGE_PROMPTS
 from backend.app.services.product_cleanup import purge_product_data
 from backend.app.services.product_health import cached_product_file_warnings
-from backend.app.services.product_queries import CHARACTERISTICS, catalog_stats, page_products, product_matches
+from backend.app.services.product_queries import (
+    CHARACTERISTICS,
+    PUBLICATIONS,
+    catalog_stats,
+    is_listed,
+    page_products,
+    product_matches,
+)
 from backend.app.services.production_cost import (
     ProductionCost,
     build_production_cost_breakdown,
@@ -183,6 +190,7 @@ def list_products_page(
     q: str = "",
     status: str = "all",
     characteristic: str = "all",
+    publication: str = "all",
     project_id: str | None = None,
     limit: int = Query(40, ge=1, le=200),
     cursor: str | None = None,
@@ -192,6 +200,8 @@ def list_products_page(
         raise HTTPException(status_code=422, detail="Status inválido")
     if characteristic not in CHARACTERISTICS:
         raise HTTPException(status_code=422, detail="Característica inválida")
+    if publication not in PUBLICATIONS:
+        raise HTTPException(status_code=422, detail="Publicação inválida")
     products = _store_products(request)
     store_total = len(products)
     if project_id:
@@ -201,6 +211,12 @@ def list_products_page(
         for product in products
         if product_matches(product, query=q, status=status, characteristic=characteristic)
     ]
+    # The publication tabs show both counts for the other filters, so the
+    # split is counted before it is applied.
+    listed_total = sum(1 for product in matched if is_listed(product))
+    not_listed_total = len(matched) - listed_total
+    if publication != "all":
+        matched = [product for product in matched if is_listed(product) == (publication == "listed")]
     try:
         page, next_cursor = page_products(matched, limit=limit, cursor=cursor)
     except ValueError as error:
@@ -211,6 +227,8 @@ def list_products_page(
         "total": len(matched),
         "with_title": sum(1 for product in matched if product.listing.title),
         "store_total": store_total,
+        "listed_total": listed_total,
+        "not_listed_total": not_listed_total,
     }
 
 

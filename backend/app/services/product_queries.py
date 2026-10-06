@@ -24,6 +24,7 @@ CHARACTERISTICS = {
     "listed",
     "not_listed",
 }
+PUBLICATIONS = {"all", "listed", "not_listed"}
 PREVIOUS_VERSION_PREFIX = "previous_"
 _IMAGE_SUFFIX = re.compile(r"\.(png|jpe?g|webp)$", re.IGNORECASE)
 

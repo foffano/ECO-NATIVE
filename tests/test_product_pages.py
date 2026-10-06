@@ -75,6 +75,19 @@ def test_filters_run_on_the_server():
     assert client.get("/api/products/page", params={"cursor": "%%%"}).status_code == 422
 
 
+def test_publication_tabs_split_the_other_filters():
+    shop, _ = setup_catalog()
+    client = client_for(shop)
+    listed = client.get("/api/products/page", params={"publication": "listed"}).json()
+    assert [item["name"] for item in listed["items"]] == ["Produto 07"]
+    assert listed["total"] == 1
+    assert (listed["listed_total"], listed["not_listed_total"]) == (1, 24)
+    pending = client.get("/api/products/page", params={"publication": "not_listed", "characteristic": "with_image"}).json()
+    assert pending["total"] == 9
+    assert (pending["listed_total"], pending["not_listed_total"]) == (0, 9)
+    assert client.get("/api/products/page", params={"publication": "nada"}).status_code == 422
+
+
 def test_stats_and_detail():
     shop, project = setup_catalog(4)
     other = store.upsert_store_profile(StoreProfile(name="Outra"))
