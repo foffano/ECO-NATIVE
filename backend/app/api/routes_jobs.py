@@ -3,7 +3,7 @@ from typing import Annotated, Any, Literal
 from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
-from backend.app.db.models import Job
+from backend.app.db.models import Job, JobStatus
 from backend.app.db.store import store
 from backend.app.services.job_runner import run_collect_job, run_image_job, run_listing_job, run_regenerate_image_job
 from backend.app.services.makerworld_session import (
@@ -68,6 +68,17 @@ class RemoteBrowserInput(BaseModel):
     button: Literal["left", "right", "middle"] = "left"
     text: str | None = Field(default=None, max_length=2000)
     key: str | None = Field(default=None, max_length=80)
+
+
+def _product_job(state, job_type: str, product) -> Job:
+    """A job for one product. The same kind of job already waiting or running for
+    it is refused, so a double click never pays for the same generation twice."""
+    if any(
+        job.product_id == product.id and job.type == job_type and job.status in {JobStatus.queued, JobStatus.running}
+        for job in state.jobs
+    ):
+        raise HTTPException(409, f"Já existe uma tarefa igual na fila para \"{product.name}\". Acompanhe em Tarefas.")
+    return Job(type=job_type, project_id=product.project_id, product_id=product.id, metadata={"product_name": product.name})
 
 
 def _makerworld_status(request: Request) -> dict[str, Any]:
@@ -136,7 +147,8 @@ def collect_products(payload: CollectRequest, request: Request) -> Job:
         enforce_quota(state, store_id, "ai_cost_usd_monthly")
         project = require_project(state, payload.project_id, store_id)
         payload.store_profile_id = project.store_profile_id
-        job = Job(type="collect_products", project_id=payload.project_id)
+        label = payload.keyword.strip() or (f"{len(payload.urls)} link(s)" if payload.urls else "")
+        job = Job(type="collect_products", project_id=payload.project_id, metadata={"label": label} if label else {})
         return job_queue.submit(job, lambda: run_collect_job(job, payload))
 
 
@@ -149,7 +161,7 @@ def generate_listing(payload: ProductJobRequest, request: Request) -> Job:
         enforce_quota(state, store_id, "ai_cost_usd_monthly")
         product = require_product(state, payload.product_id, store_id)
 
-        job = Job(type="generate_listing", project_id=product.project_id, product_id=product.id)
+        job = _product_job(state, "generate_listing", product)
         return job_queue.submit(job, lambda: run_listing_job(job, product))
 
 
@@ -162,7 +174,7 @@ def generate_images(payload: ProductJobRequest, request: Request) -> Job:
         enforce_quota(state, store_id, "ai_cost_usd_monthly")
         product = require_product(state, payload.product_id, store_id)
 
-        job = Job(type="generate_images", project_id=product.project_id, product_id=product.id)
+        job = _product_job(state, "generate_images", product)
         return job_queue.submit(
             job,
             lambda: run_image_job(job, product, payload.color_variations, payload.generate_base_images, payload.regenerate),
@@ -178,7 +190,12 @@ def regenerate_image(payload: RegenerateImageRequest, request: Request) -> Job:
         enforce_quota(state, store_id, "ai_cost_usd_monthly")
         product = require_product(state, payload.product_id, store_id)
 
-        job = Job(type="regenerate_image", project_id=product.project_id, product_id=product.id)
+        job = Job(
+            type="regenerate_image",
+            project_id=product.project_id,
+            product_id=product.id,
+            metadata={"product_name": product.name, "prompt_key": payload.prompt_key},
+        )
         return job_queue.submit(job, lambda: run_regenerate_image_job(job, product, payload.prompt_key, payload.extra_prompt))
 
 

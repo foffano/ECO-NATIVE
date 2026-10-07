@@ -39,6 +39,9 @@ import {
   Plus,
   Palette,
   X,
+  ListChecks,
+  AlertCircle,
+  Clock,
 } from "lucide-react";
 import "./styles.css";
 import {
@@ -502,6 +505,28 @@ function mergeJobs(current: Job[], changed: Job[]): Job[] {
   const known = new Set(current.map((job) => job.id));
   // New jobs go first, like the server's newest-first order.
   return [...changed.filter((job) => !known.has(job.id)), ...merged];
+}
+
+const JOB_TYPE_LABELS: Record<string, string> = {
+  collect_products: "Coleta",
+  generate_listing: "Anúncio com IA",
+  generate_images: "Imagens com IA",
+  regenerate_image: "Recriar imagem",
+};
+
+function jobActive(job: Job): boolean {
+  return job.status === "queued" || job.status === "running";
+}
+
+function jobSubject(job: Job): string {
+  const name = job.metadata?.product_name ?? job.metadata?.label;
+  return typeof name === "string" ? name : "";
+}
+
+function jobTitle(job: Job): string {
+  const kind = JOB_TYPE_LABELS[job.type] ?? job.type;
+  const subject = jobSubject(job);
+  return subject ? `${kind} · ${subject}` : kind;
 }
 
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
@@ -2015,6 +2040,9 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
   const [imageOptions, setImageOptions] = useState<ImageOptions>({ studio_prompts: [], colors: [] });
   const [selectedColorVariations, setSelectedColorVariations] = useState<string[]>([]);
   const [batchProgress, setBatchProgress] = useState<BatchProgress>(null);
+  const [jobsPanelOpen, setJobsPanelOpen] = useState(false);
+  // Jobs seen waiting or running; the poller reports them when they end.
+  const activeJobIdsRef = useRef(new Set<string>());
   const [confirmDialog, setConfirmDialog] = useState<ConfirmDialog>(null);
   const [onboardingOpen, setOnboardingOpen] = useState(false);
   const [blockedSourceUrls, setBlockedSourceUrls] = useState<BlockedSourceUrl[]>([]);
@@ -2241,7 +2269,7 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
   useEffect(() => {
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout>;
-    let active = new Set<string>();
+    const active = activeJobIdsRef.current;
     let since = "";
     let polls = 0;
     async function poll() {
@@ -2256,11 +2284,19 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
           if (job.updated_at && job.updated_at > since) since = job.updated_at;
         }
         setJobs((current) => (full ? changed : mergeJobs(current, changed)));
-        const finished = changed.filter((job) => active.has(job.id) && ["completed", "failed"].includes(job.status));
-        if (full) active = new Set();
+        const finished = changed.filter((job) => active.has(job.id) && !jobActive(job));
         for (const job of changed) {
-          if (["queued", "running"].includes(job.status)) active.add(job.id);
+          if (jobActive(job)) active.add(job.id);
           else active.delete(job.id);
+        }
+        // Collections report through their own screen.
+        const reported = finished.filter((job) => job.type !== "collect_products");
+        if (reported.length === 1) {
+          const [job] = reported;
+          setNotice(job.status === "completed" ? `Pronto: ${jobTitle(job)}.` : `Falhou: ${jobTitle(job)}. ${job.message}`);
+        } else if (reported.length > 1) {
+          const failed = reported.filter((job) => job.status === "failed").length;
+          setNotice(`${reported.length} tarefas terminaram${failed ? `, ${failed} com falha` : ""}. Veja em Tarefas.`);
         }
         if (finished.length) {
           // Product jobs refresh just their product; collections add new
@@ -2779,6 +2815,7 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
         setMakerWorldLogin(await api<MakerWorldLoginStatus>("/api/jobs/makerworld-login/close", { method: "POST" }));
       }
       let attention = "";
+      setNotice(`${label}... Você pode usar o resto do app enquanto isso.`);
       setCollectRunning(true);
       setMakerWorldViewerOpen(true);
       try {
@@ -2793,7 +2830,7 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
         setCollectRunning(false);
         setMakerWorldViewerOpen(false);
       }
-    }, { refresh: "catalog", blockUi: true });
+    }, { refresh: "catalog", blockUi: false, notifySuccess: true });
   }
 
   function openMakerWorldLogin() {
@@ -3025,6 +3062,32 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
     }, { refresh: "all", blockUi: true, notifySuccess: true });
   }
 
+  const activeJobCount = storeJobs.filter(jobActive).length;
+  const closeJobsPanel = useCallback(() => setJobsPanelOpen(false), []);
+
+  async function openProductFromJob(productId: string) {
+    setJobsPanelOpen(false);
+    // Loads it even when the current list or filters do not include it.
+    await refreshProduct(productId);
+    setActiveTab("products");
+    setSelectedProductId(productId);
+    setDetailsOpen(true);
+  }
+
+  // Queues a job and returns at once: the poller refreshes the product and
+  // reports the result, so the rest of the app stays usable meanwhile.
+  async function enqueueJob(path: string, body: Record<string, unknown>): Promise<Job> {
+    const job = await api<Job>(path, { method: "POST", body: JSON.stringify(body) });
+    setJobs((current) => mergeJobs(current, [job]));
+    if (jobActive(job)) activeJobIdsRef.current.add(job.id);
+    return job;
+  }
+
+  function noticeQueued(job: Job) {
+    setNotice(`Na fila: ${jobTitle(job)}. Você pode continuar usando o app; acompanhe em Tarefas.`);
+    return job;
+  }
+
   function generateListing(productId = selectedProduct?.id) {
     if (!productId) return Promise.resolve();
     if (!settings?.integrations.openrouter) {
@@ -3040,12 +3103,9 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
         ) {
           throw new Error("__cancelled__");
         }
-        return submitJob("/api/jobs/listing", {
-        method: "POST",
-        body: JSON.stringify({ product_id: productId }),
-        });
+        return noticeQueued(await enqueueJob("/api/jobs/listing", { product_id: productId }));
       })(),
-    { refresh: "catalog", blockUi: true });
+    { refresh: false, blockUi: false, notifySuccess: false });
   }
 
   function generateImages(productId = selectedProduct?.id) {
@@ -3079,12 +3139,14 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
           }
           regenerate = true;
         }
-        return submitJob("/api/jobs/images", {
-        method: "POST",
-        body: JSON.stringify({ product_id: productId, color_variations: [], generate_base_images: true, regenerate }),
-        });
+        return noticeQueued(await enqueueJob("/api/jobs/images", {
+          product_id: productId,
+          color_variations: [],
+          generate_base_images: true,
+          regenerate,
+        }));
       })(),
-    { refresh: "catalog", blockUi: true });
+    { refresh: false, blockUi: false, notifySuccess: false });
   }
 
   function generateColorVariations(productId = selectedProduct?.id, colorVariations = selectedColorVariations) {
@@ -3107,17 +3169,14 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
         ) {
           throw new Error("__cancelled__");
         }
-        return submitJob("/api/jobs/images", {
-        method: "POST",
-        body: JSON.stringify({
+        return noticeQueued(await enqueueJob("/api/jobs/images", {
           product_id: productId,
           color_variations: colorVariations,
           generate_base_images: false,
           regenerate: alreadyGenerated.length > 0,
-        }),
-        });
+        }));
       })(),
-    { refresh: "catalog", blockUi: true });
+    { refresh: false, blockUi: false, notifySuccess: false });
   }
 
   function regenerateImage(productId: string, promptKey: string, extraPrompt: string) {
@@ -3129,12 +3188,13 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
       setNotice("Configure Cloudflare R2 em Ajustes para salvar a imagem recriada com URL permanente.");
       return Promise.resolve();
     }
-    return runAction("Recriando imagem", () =>
-      submitJob("/api/jobs/image-regenerate", {
-        method: "POST",
-        body: JSON.stringify({ product_id: productId, prompt_key: promptKey, extra_prompt: extraPrompt }),
-      }),
-    { refresh: "catalog", blockUi: true });
+    return runAction("Recriando imagem", async () =>
+      noticeQueued(await enqueueJob("/api/jobs/image-regenerate", {
+        product_id: productId,
+        prompt_key: promptKey,
+        extra_prompt: extraPrompt,
+      })),
+    { refresh: false, blockUi: false, notifySuccess: false });
   }
 
   // Autosave: throws on failure so the caller retries.
@@ -3387,49 +3447,29 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
         return;
       }
     }
+    // Only queues the jobs (a few quick requests); the Tasks panel follows them.
+    const total = productIds.length;
+    let queued = 0;
+    const errors: string[] = [];
     try {
-      setBusy(true);
-      const total = productIds.length;
-      let done = 0;
-      const errors: string[] = [];
-      setBatchProgress({ label, total, done: 0, current: "Processando em paralelo..." });
-      // Dispara todos os produtos de uma vez. O limitador global do backend
-      // (Kie/OpenRouter) controla o ritmo real das chamadas externas, então não
-      // precisamos serializar aqui. As gravações no store já são protegidas por
-      // lock + merge por id, então salvar em paralelo é seguro.
-      await Promise.all(
-        productIds.map(async (productId) => {
-          const product = findProduct(productId);
-          const current = product?.name ?? productId;
-          try {
-            const job = await action(productId);
-            if (job.status === "failed") {
-              const detail = job.logs?.length ? job.logs[job.logs.length - 1] : job.message;
-              errors.push(`${current}: ${detail || "falha"}`);
-            }
-          } catch (error) {
-            if (!(error instanceof Error && error.message === "__cancelled__")) {
-              errors.push(`${current}: ${error instanceof Error ? error.message : "erro inesperado"}`);
-            }
-          } finally {
-            done += 1;
-            setBatchProgress({ label, total, done, current });
-            setNotice(`${label}: ${done}/${total}`);
-            await refreshProduct(productId);
-          }
-        }),
-      );
+      for (const [index, productId] of productIds.entries()) {
+        const current = findProduct(productId)?.name ?? productId;
+        setBatchProgress({ label: `${label}: colocando na fila`, total, done: index, current });
+        try {
+          await action(productId);
+          queued += 1;
+        } catch (error) {
+          errors.push(`${current}: ${error instanceof Error ? error.message : "erro inesperado"}`);
+        }
+      }
       if (errors.length) {
         const extra = errors.length > 1 ? ` (+${errors.length - 1} outro(s))` : "";
-        setNotice(`${label} concluído com ${errors.length} erro(s). ${errors[0]}${extra}`);
+        setNotice(`${queued} de ${total} tarefa(s) na fila. Não entraram: ${errors[0]}${extra}`);
       } else {
-        setNotice(`${label} concluído para ${total} produto(s).`);
+        setNotice(`${label}: ${total} tarefa(s) na fila. Você pode continuar usando o app; acompanhe em Tarefas.`);
       }
-    } catch (error) {
-      setNotice(error instanceof Error ? error.message : "Erro inesperado no lote");
     } finally {
-      setBusy(false);
-      setTimeout(() => setBatchProgress(null), 1200);
+      setBatchProgress(null);
     }
   }
 
@@ -3441,11 +3481,7 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
     return runBatchProductAction(
       "Gerando anúncios em lote",
       productIds,
-      (productId) =>
-        submitJob("/api/jobs/listing", {
-          method: "POST",
-          body: JSON.stringify({ product_id: productId }),
-        }),
+      (productId) => enqueueJob("/api/jobs/listing", { product_id: productId }),
       "listing",
     );
   }
@@ -3463,10 +3499,7 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
       "Gerando imagens base em lote",
       productIds,
       (productId) =>
-        submitJob("/api/jobs/images", {
-          method: "POST",
-          body: JSON.stringify({ product_id: productId, color_variations: [], generate_base_images: true }),
-        }),
+        enqueueJob("/api/jobs/images", { product_id: productId, color_variations: [], generate_base_images: true }),
       "images",
     );
   }
@@ -3647,6 +3680,14 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
           </TabButton>
         </nav>
         <nav className="sidebar-footer" aria-label="Ajustes">
+          <button className={`tab-button jobs-button${jobsPanelOpen ? " active" : ""}`} onClick={() => setJobsPanelOpen(true)}>
+            <ListChecks size={18} /> Tarefas
+            {activeJobCount > 0 && (
+              <span className="jobs-badge" aria-label={`${activeJobCount} em andamento`}>
+                <Loader2 size={12} className="spin" /> {activeJobCount}
+              </span>
+            )}
+          </button>
           <TabButton active={activeTab === "settings"} icon={<Settings size={18} />} onClick={() => setActiveTab("settings")}>
             Ajustes
           </TabButton>
@@ -3679,7 +3720,7 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
           <CollectTab
             activeProject={activeProject}
             activeStoreProfile={activeStoreProfile}
-            busy={busy}
+            busy={busy || collectRunning}
             jobs={storeJobs}
             keyword={keyword}
             limit={collectLimit}
@@ -3870,6 +3911,18 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
       )}
       {confirmDialog && (
         <ConfirmModal dialog={confirmDialog} onClose={closeConfirmDialog} />
+      )}
+      {jobsPanelOpen && (
+        <JobsPanel
+          jobs={storeJobs}
+          collectViewerAvailable={collectRunning}
+          onClose={closeJobsPanel}
+          onOpenProduct={(productId) => void openProductFromJob(productId)}
+          onOpenCollectViewer={() => {
+            setJobsPanelOpen(false);
+            setMakerWorldViewerOpen(true);
+          }}
+        />
       )}
       {makerWorldViewerOpen && (
         <MakerWorldRemoteBrowser
@@ -4107,6 +4160,154 @@ function MakerWorldRemoteBrowser({
           {inputError || liveStatus?.message} · Novas janelas aparecem automaticamente. Use “Janela” para alternar entre elas.
         </footer>
       </section>
+    </div>
+  );
+}
+
+function formatElapsed(fromIso?: string, toIso?: string): string {
+  if (!fromIso) return "";
+  const start = Date.parse(fromIso);
+  const end = toIso ? Date.parse(toIso) : Date.now();
+  if (Number.isNaN(start) || Number.isNaN(end)) return "";
+  const seconds = Math.max(0, Math.round((end - start) / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes} min`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ${minutes % 60}min`;
+  return `${Math.floor(hours / 24)} dia(s)`;
+}
+
+const JOB_STATUS_LABELS: Record<Job["status"], string> = {
+  queued: "Na fila",
+  running: "Rodando",
+  completed: "Concluída",
+  failed: "Falhou",
+};
+
+type JobsFilter = "all" | "active" | "failed";
+
+function JobsPanel({
+  jobs,
+  collectViewerAvailable,
+  onClose,
+  onOpenProduct,
+  onOpenCollectViewer,
+}: {
+  jobs: Job[];
+  collectViewerAvailable: boolean;
+  onClose: () => void;
+  onOpenProduct: (productId: string) => void;
+  onOpenCollectViewer: () => void;
+}) {
+  const [filter, setFilter] = useState<JobsFilter>("all");
+  const [, setTick] = useState(0);
+  // Keeps the elapsed times moving between polls.
+  useEffect(() => {
+    const timer = window.setInterval(() => setTick((tick) => tick + 1), 1000);
+    return () => window.clearInterval(timer);
+  }, []);
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  const active = jobs.filter(jobActive);
+  const failed = jobs.filter((job) => job.status === "failed");
+  // Running first, then waiting in submission order, then the rest newest first.
+  const ordered = [
+    ...active.filter((job) => job.status === "running"),
+    ...active.filter((job) => job.status === "queued").reverse(),
+    ...jobs.filter((job) => !jobActive(job)),
+  ];
+  const visible = ordered
+    .filter((job) => filter === "all" || (filter === "active" ? jobActive(job) : job.status === "failed"))
+    .slice(0, 80);
+
+  return (
+    <div className="jobs-backdrop" role="presentation" onClick={onClose}>
+      <aside className="jobs-panel" role="dialog" aria-modal="true" aria-labelledby="jobs-title" onClick={(event) => event.stopPropagation()}>
+        <header className="jobs-panel-header">
+          <div>
+            <p className="eyebrow">Fila de trabalho</p>
+            <h2 id="jobs-title">Tarefas</h2>
+          </div>
+          <button className="icon-button" aria-label="Fechar tarefas" onClick={onClose}>
+            <X size={18} />
+          </button>
+        </header>
+        <p className="jobs-panel-note">
+          As tarefas continuam no servidor mesmo se você fechar esta página. Coletas, imagens e textos rodam em paralelo.
+        </p>
+        <div className="jobs-filter" role="tablist" aria-label="Filtrar tarefas">
+          {([
+            ["all", `Todas (${jobs.length})`],
+            ["active", `Em andamento (${active.length})`],
+            ["failed", `Falhas (${failed.length})`],
+          ] as Array<[JobsFilter, string]>).map(([key, label]) => (
+            <button key={key} role="tab" aria-selected={filter === key} className={filter === key ? "active" : ""} onClick={() => setFilter(key)}>
+              {label}
+            </button>
+          ))}
+        </div>
+        <ul className="jobs-list">
+          {visible.length === 0 && (
+            <li className="jobs-empty">
+              {filter === "active" ? "Nada rodando agora." : filter === "failed" ? "Nenhuma falha." : "Nenhuma tarefa ainda."}
+            </li>
+          )}
+          {visible.map((job) => {
+            const running = job.status === "running";
+            const lastLog = job.logs?.length ? job.logs[job.logs.length - 1] : "";
+            const elapsed = jobActive(job)
+              ? formatElapsed(job.created_at)
+              : formatElapsed(job.created_at, job.updated_at);
+            return (
+              <li key={job.id} className={`jobs-item ${job.status}`}>
+                <span className="jobs-item-icon" aria-hidden="true">
+                  {job.status === "running" && <Loader2 size={16} className="spin" />}
+                  {job.status === "queued" && <Clock size={16} />}
+                  {job.status === "completed" && <Check size={16} />}
+                  {job.status === "failed" && <AlertCircle size={16} />}
+                </span>
+                <div className="jobs-item-body">
+                  <div className="jobs-item-title">
+                    <strong>{JOB_TYPE_LABELS[job.type] ?? job.type}</strong>
+                    <span className={`jobs-status ${job.status}`}>
+                      {JOB_STATUS_LABELS[job.status]}{running && job.progress ? ` · ${job.progress}%` : ""}
+                    </span>
+                  </div>
+                  {jobSubject(job) && <span className="jobs-item-subject">{jobSubject(job)}</span>}
+                  <span className="jobs-item-message" title={job.status === "failed" ? lastLog : undefined}>
+                    {displayText(job.message)}
+                  </span>
+                  {running && (
+                    <div className="jobs-progress" aria-hidden="true">
+                      <span style={{ width: `${Math.max(4, Math.min(100, job.progress || 0))}%` }} />
+                    </div>
+                  )}
+                  <div className="jobs-item-footer">
+                    <small>{jobActive(job) ? `há ${elapsed}` : `levou ${elapsed}`}</small>
+                    {job.product_id && (
+                      <button className="link-button" onClick={() => onOpenProduct(job.product_id!)}>
+                        Abrir produto
+                      </button>
+                    )}
+                    {job.type === "collect_products" && running && collectViewerAvailable && (
+                      <button className="link-button" onClick={onOpenCollectViewer}>
+                        Ver navegador
+                      </button>
+                    )}
+                  </div>
+                </div>
+              </li>
+            );
+          })}
+        </ul>
+      </aside>
     </div>
   );
 }
@@ -6246,6 +6447,12 @@ function ProductsTab({
     setDetailSection("listing");
   }, [selectedProduct?.id]);
 
+  const selectedProductJobs = selectedProduct
+    ? jobs.filter((job) => job.product_id === selectedProduct.id && jobActive(job))
+    : [];
+  const listingJob = selectedProductJobs.find((job) => job.type === "generate_listing");
+  const imagesJob = selectedProductJobs.find((job) => job.type === "generate_images");
+
   const listingDraftReady = Boolean(selectedProduct && listingDraft && listingDraftOwner === selectedProduct.id);
   const listingDirty = Boolean(
     listingDraftReady
@@ -6627,11 +6834,15 @@ function ProductsTab({
               </div>
               <div className="compact-actions">
                 <AutosaveIndicator status={listingAutosaveStatus} />
-                <button onClick={() => onGenerateListing()} disabled={busy}>
-                  <BrainCircuit size={16} /> Gerar anúncio
+                <button onClick={() => onGenerateListing()} disabled={busy || Boolean(listingJob)}>
+                  {listingJob
+                    ? <><Loader2 size={16} className="spin" /> {listingJob.status === "queued" ? "Anúncio na fila" : "Gerando anúncio"}</>
+                    : <><BrainCircuit size={16} /> Gerar anúncio</>}
                 </button>
-                <button onClick={() => onGenerateImages()} disabled={busy}>
-                  <ImagePlus size={16} /> Imagens base
+                <button onClick={() => onGenerateImages()} disabled={busy || Boolean(imagesJob)}>
+                  {imagesJob
+                    ? <><Loader2 size={16} className="spin" /> {imagesJob.status === "queued" ? "Imagens na fila" : "Gerando imagens"}</>
+                    : <><ImagePlus size={16} /> Imagens base</>}
                 </button>
                 <button onClick={onApproveProduct} disabled={busy || !listingDraft?.title || !listingDraft?.description}>
                   <BadgeCheck size={16} /> Aprovar

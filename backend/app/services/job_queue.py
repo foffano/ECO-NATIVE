@@ -120,4 +120,6 @@ class JobQueue:
         # can duplicate downloads or paid AI requests after an abrupt shutdown.
 
 
-job_queue = JobQueue(max(1, int(os.getenv("ECO_NATIVE_JOB_QUEUE_SIZE", "32"))))
+# Per lane. A batch of products queues one job each; the image API rate limiter,
+# not this bound, sets the actual pace.
+job_queue = JobQueue(max(1, int(os.getenv("ECO_NATIVE_JOB_QUEUE_SIZE", "200"))))

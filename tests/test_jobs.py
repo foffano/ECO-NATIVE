@@ -169,3 +169,32 @@ def test_merge_keeps_cost_events_from_concurrent_jobs():
     merged = merge_product(base, mine, theirs)
     assert sorted(event["provider"] for event in merged.metadata["cost_events"]) == ["Kie", "OpenRouter"]
     assert merged.metadata["cost_total_usd"] == 0.75
+
+
+def test_same_generation_for_a_product_is_not_queued_twice():
+    from backend.app.db.models import Product
+    from backend.app.main import app
+    from backend.app.services.auth import AuthenticatedStore, create_initial_users, create_session
+
+    shop = store.upsert_store_profile(StoreProfile(name="A"))
+    project = store.upsert_project(Project(name="P", store_profile_id=shop.id))
+    product = store.upsert_product(Product(project_id=project.id, name="Vaso"))
+    create_initial_users(("admin", "password123"), [("shop-a", "password123", shop.id)])
+    entered, release = threading.Event(), threading.Event()
+
+    def slow(job, *_):
+        entered.set()
+        release.wait(3)
+        job.status = JobStatus.completed
+        return store.upsert_job(job)
+
+    with patch("backend.app.api.routes_jobs.run_listing_job", side_effect=slow), TestClient(app) as client:
+        client.cookies.set("eco_native_session", create_session(AuthenticatedStore(shop.id, "shop-a")))
+        try:
+            first = client.post("/api/jobs/listing", json={"product_id": product.id})
+            assert first.status_code == 202
+            assert first.json()["metadata"]["product_name"] == "Vaso"
+            assert entered.wait(2)
+            assert client.post("/api/jobs/listing", json={"product_id": product.id}).status_code == 409
+        finally:
+            release.set()
