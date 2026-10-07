@@ -56,7 +56,24 @@ def _extend_unique_assets(product: Product, assets: list[Asset]) -> list[Asset]:
     return added
 
 
-def _persist_image_asset(product: Product, asset: Asset) -> None:
+class _JobProduct:
+    """A job's working copy of a product.
+
+    `save` writes back only what the job changed since its previous save, so
+    edits the user saves while the job runs (listing text, name, ...) are not
+    overwritten by this stale copy, and a product deleted meanwhile stays deleted.
+    """
+
+    def __init__(self, product: Product):
+        self.product = product
+        self._base = product.model_copy(deep=True)
+
+    def save(self) -> None:
+        store.merge_product_changes(self._base, self.product)
+        self._base = self.product.model_copy(deep=True)
+
+
+def _persist_image_asset(tracked: _JobProduct, asset: Asset) -> None:
     """Salva incrementalmente um asset recém-gerado no produto/store.
 
     Chamado pelas funções de geração em lote após CADA imagem. Dedup por
@@ -65,11 +82,12 @@ def _persist_image_asset(product: Product, asset: Asset) -> None:
     Assets duplicados. Persistir a cada item garante que, se a próxima imagem
     falhar (ex.: limite de uso do Codex), as anteriores já estejam no anúncio.
     """
-    _extend_unique_assets(product, [asset])
-    store.upsert_product(product)
+    _extend_unique_assets(tracked.product, [asset])
+    tracked.save()
 
 
-def _finalize_product_image_metadata(product: Product, store_profile) -> None:
+def _finalize_product_image_metadata(tracked: _JobProduct, store_profile) -> None:
+    product = tracked.product
     product.status = ProductStatus.in_edit
     product.metadata["image_prompt"] = store_profile.image_prompt
     product.metadata["image_prompts"] = store_profile.image_prompts
@@ -80,7 +98,7 @@ def _finalize_product_image_metadata(product: Product, store_profile) -> None:
     product.metadata["color_variation_count"] = len(
         [asset for asset in product.assets if asset.kind.startswith("color_")]
     )
-    store.upsert_product(product)
+    tracked.save()
 
 
 def run_collect_job(job: Job, payload) -> Job:
@@ -279,12 +297,13 @@ def run_listing_job(job: Job, product: Product) -> Job:
     project = next((item for item in state.projects if item.id == product.project_id), None)
     store_profile = get_store_profile(project.store_profile_id if project else None)
     product = next((item for item in state.products if item.id == product.id), product)
+    tracked = _JobProduct(product)
     job.logs.append(f"Usando perfil de loja: {store_profile.name}")
     store.upsert_job(job)
 
     try:
         ensure_product_cover(product)
-        store.upsert_product(product)
+        tracked.save()
         result = generate_listing_with_openrouter(product, store_profile.listing_prompt)
         product.listing = result.listing
         event = add_openrouter_cost(product, "Geração de anúncio", result.usage)
@@ -311,7 +330,7 @@ def run_listing_job(job: Job, product: Product) -> Job:
     product.status = ProductStatus.in_edit
     product.metadata["listing_prompt"] = store_profile.listing_prompt
     product.metadata["store_profile_id"] = store_profile.id
-    store.upsert_product(product)
+    tracked.save()
     return _finish_job(job, "Anúncio gerado e salvo para revisão")
 
 
@@ -332,6 +351,7 @@ def run_image_job(
     project = next((item for item in state.projects if item.id == product.project_id), None)
     store_profile = get_store_profile(project.store_profile_id if project else None)
     product = next((item for item in state.products if item.id == product.id), product)
+    tracked = _JobProduct(product)
 
     # Totais esperados, usados para informar progresso parcial em caso de falha
     # no meio do lote. studio espelha o fallback de generate_studio_images
@@ -349,12 +369,12 @@ def run_image_job(
 
     def _on_studio_asset(asset: Asset) -> None:
         nonlocal studio_done
-        _persist_image_asset(product, asset)
+        _persist_image_asset(tracked, asset)
         studio_done += 1
 
     def _on_color_asset(asset: Asset) -> None:
         nonlocal color_done
-        _persist_image_asset(product, asset)
+        _persist_image_asset(tracked, asset)
         color_done += 1
 
     try:
@@ -412,7 +432,7 @@ def run_image_job(
         # parcial, e preservamos as imagens salvas no anúncio.
         job.logs.append(_job_error_log(exc))
         if studio_done or color_done:
-            _finalize_product_image_metadata(product, store_profile)
+            _finalize_product_image_metadata(tracked, store_profile)
         produced_parts: list[str] = []
         if generate_base_images:
             produced_parts.append(f"{studio_done} de {studio_total} imagem(ns) base")
@@ -433,7 +453,7 @@ def run_image_job(
         job.logs.append(partial_message)
         return store.upsert_job(job)
 
-    _finalize_product_image_metadata(product, store_profile)
+    _finalize_product_image_metadata(tracked, store_profile)
     if color_count:
         if generate_base_images:
             return _finish_job(job, f"Imagens principais e {color_count} variações de cor prontas")
@@ -449,6 +469,7 @@ def run_regenerate_image_job(job: Job, product: Product, prompt_key: str, extra_
 
     state = store.load()
     product = next((item for item in state.products if item.id == product.id), product)
+    tracked = _JobProduct(product)
     project = next((item for item in state.projects if item.id == product.project_id), None)
     store_profile = get_store_profile(project.store_profile_id if project else None)
     if prompt_key.startswith("color_"):
@@ -482,7 +503,7 @@ def run_regenerate_image_job(job: Job, product: Product, prompt_key: str, extra_
         product.status = ProductStatus.in_edit
         product.metadata["last_regenerated_image"] = prompt_key
         product.metadata["last_regenerated_image_extra_prompt"] = extra_prompt
-        store.upsert_product(product)
+        tracked.save()
         return _finish_job(job, f"Variação {color_name} recriada")
 
     prompt = store_profile.image_prompts.get(prompt_key) or IMAGE_PROMPTS.get(prompt_key)
@@ -513,5 +534,5 @@ def run_regenerate_image_job(job: Job, product: Product, prompt_key: str, extra_
     product.status = ProductStatus.in_edit
     product.metadata["last_regenerated_image"] = prompt_key
     product.metadata["last_regenerated_image_extra_prompt"] = extra_prompt
-    store.upsert_product(product)
+    tracked.save()
     return _finish_job(job, f"Imagem {prompt_key} recriada")

@@ -1,5 +1,6 @@
 import os
 from typing import Any
+from uuid import uuid4
 
 from backend.app.db.models import Product, now_iso
 from backend.app.services.image_models import DEFAULT_IMAGE_MODEL, IMAGE_MODELS
@@ -36,7 +37,8 @@ def add_cost_event(
     metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     event = {
-        "id": f"cost_{now_iso()}_{len(product.metadata.get('cost_events', [])) + 1}",
+        # Unique across jobs: concurrent jobs' events are merged by id.
+        "id": f"cost_{now_iso()}_{uuid4().hex[:8]}",
         "created_at": now_iso(),
         "provider": provider,
         "action": action,

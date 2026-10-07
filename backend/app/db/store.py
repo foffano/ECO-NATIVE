@@ -469,6 +469,24 @@ class StudioStore:
             self._upsert_unlocked(product)
         return product
 
+    def merge_product_changes(self, base: Product, mine: Product) -> Product | None:
+        """Write what a job changed from `base` to `mine` onto the stored product.
+
+        Edits saved while the job ran are kept. A product deleted meanwhile
+        stays deleted (returns None).
+        """
+        from backend.app.db.product_merge import merge_product
+
+        with _lock:
+            current = next((item for item in self._current_unlocked().products if item.id == mine.id), None)
+            if current is None:
+                return None
+            merged = merge_product(base, mine, current.model_copy(deep=True))
+            merged.updated_at = now_iso()
+            merged.metadata.pop("file_warnings", None)
+            self._upsert_unlocked(merged)
+            return merged
+
     def upsert_job(self, job: Job) -> Job:
         job.updated_at = now_iso()
         with _lock:

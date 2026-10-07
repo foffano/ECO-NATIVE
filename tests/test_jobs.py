@@ -87,3 +87,85 @@ def test_maintenance_blocks_new_work_and_reports_idle_state():
         assert health.json()["active_jobs"] == 0
         response = client.post("/api/jobs/collect", json={"project_id": "missing"})
         assert response.status_code == 503
+
+
+def test_lanes_run_listing_while_images_are_generating():
+    project = store.upsert_project(Project(name="lanes"))
+    worker = JobQueue(capacity=4)
+    entered, release, listed = threading.Event(), threading.Event(), threading.Event()
+    worker.start()
+    try:
+        def slow_images():
+            entered.set()
+            release.wait(3)
+        worker.submit(Job(type="generate_images", project_id=project.id), slow_images)
+        assert entered.wait(2)
+        worker.submit(Job(type="generate_listing", project_id=project.id), listed.set)
+        assert listed.wait(2), "listing waited behind image generation"
+    finally:
+        release.set()
+        worker.stop()
+
+
+def test_image_job_keeps_edits_saved_while_it_runs():
+    from backend.app.db.models import Asset, Listing, Product
+    from backend.app.services import job_runner
+
+    project = store.upsert_project(Project(name="merge"))
+    product = store.upsert_product(Product(project_id=project.id, name="Vaso"))
+
+    def fake_generate(working, *, on_asset, **_):
+        # The user edits the listing while the job is generating.
+        current = next(item for item in store.load().products if item.id == working.id)
+        current.listing = Listing(title="Editado durante a geração")
+        current.name = "Vaso editado"
+        store.upsert_product(current)
+        asset = Asset(product_id=working.id, kind="generated_studio_classic", path="a.png")
+        on_asset(asset)
+        return [asset]
+
+    job = Job(type="generate_images", project_id=project.id, product_id=product.id)
+    with patch.object(job_runner, "generate_studio_images", side_effect=fake_generate):
+        result = job_runner.run_image_job(job, product)
+
+    assert result.status == JobStatus.completed, result.logs
+    saved = next(item for item in store.load().products if item.id == product.id)
+    assert saved.listing.title == "Editado durante a geração"
+    assert saved.name == "Vaso editado"
+    assert [asset.kind for asset in saved.assets] == ["generated_studio_classic"]
+    assert saved.metadata["generated_image_count"] == 1
+
+
+def test_job_does_not_bring_back_a_deleted_product():
+    from backend.app.db.models import Asset, Product
+    from backend.app.services import job_runner
+
+    project = store.upsert_project(Project(name="deleted"))
+    product = store.upsert_product(Product(project_id=project.id, name="Some"))
+
+    def fake_generate(working, *, on_asset, **_):
+        store.mutate(lambda state: setattr(state, "products", []), allow_product_shrink=True)
+        asset = Asset(product_id=working.id, kind="generated_studio_classic", path="a.png")
+        on_asset(asset)
+        return [asset]
+
+    job = Job(type="generate_images", project_id=project.id, product_id=product.id)
+    with patch.object(job_runner, "generate_studio_images", side_effect=fake_generate):
+        job_runner.run_image_job(job, product)
+
+    assert not store.load().products
+
+
+def test_merge_keeps_cost_events_from_concurrent_jobs():
+    from backend.app.db.models import Product
+    from backend.app.db.product_merge import merge_product
+    from backend.app.services.cost_tracker import add_cost_event
+
+    base = Product(project_id="p", name="x")
+    mine = base.model_copy(deep=True)
+    theirs = base.model_copy(deep=True)
+    add_cost_event(mine, provider="Kie", action="img", model="m", cost_usd=0.5, source="s")
+    add_cost_event(theirs, provider="OpenRouter", action="txt", model="m", cost_usd=0.25, source="s")
+    merged = merge_product(base, mine, theirs)
+    assert sorted(event["provider"] for event in merged.metadata["cost_events"]) == ["Kie", "OpenRouter"]
+    assert merged.metadata["cost_total_usd"] == 0.75
