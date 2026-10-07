@@ -2115,16 +2115,12 @@ button:disabled {
   white-space: nowrap;
 }
 
-.autosave-indicator.saved {
-  color: var(--eco-green-dark);
-}
-
+.autosave-indicator.saved,
 .autosave-indicator.pending {
-  color: #9a6700;
-}
-
-.autosave-indicator.saving {
-  color: var(--eco-ink);
+  min-width: 72px;
+  justify-content: flex-end;
+  font-weight: 600;
+  color: var(--eco-muted);
 }
 
 .autosave-indicator.error {

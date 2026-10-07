@@ -1146,6 +1146,41 @@ function printPlatesEqual(left: PrintPlate[], right: PrintPlate[]): boolean {
 
 type AutosaveStatus = "saved" | "pending" | "saving" | "error";
 
+type ListingSnapshot = { productId: string; listing: Listing; name: string };
+
+type IntegrationDrafts = {
+  openrouter_api_key: string;
+  openrouter_model: string;
+  kie_api_key: string;
+  kie_image_model: string;
+  use_codex_image_gen: boolean;
+  codex_bin: string;
+  cloudflare_account_id: string;
+  cloudflare_r2_bucket_name: string;
+  cloudflare_r2_access_key: string;
+  cloudflare_r2_secret_key: string;
+  cloudflare_r2_public_url: string;
+};
+
+type ProductionDrafts = {
+  settings: {
+    electricity_kwh_price_brl: number;
+    printer_power_watts: number;
+    printer_purchase_price_brl: number;
+    printer_useful_life_hours: number;
+    maintenance_cost_per_hour_brl: number;
+    labor_cost_per_hour_brl: number;
+  };
+  filaments: FilamentSpool[];
+};
+
+// New filament rows get a temporary id until the server creates them.
+const DRAFT_FILAMENT_PREFIX = "draft-";
+
+function parseDecimal(value: string): number {
+  return Number(value.replace(",", ".")) || 0;
+}
+
 function listingsEqual(left: Listing, right: Listing): boolean {
   return left.title === right.title
     && left.description === right.description
@@ -1233,66 +1268,129 @@ function productionSettingsDraftEqual(
     && parse(laborCostPerHour) === Number(target.labor_cost_per_hour_brl);
 }
 
-function useAutosave({
+type AutosaveEntry<T> = { scope: string; key: string; snapshot: T };
+
+const AUTOSAVE_RETRY_DELAYS_MS = [2000, 5000, 10000, 20000, 30000];
+
+// Saves a draft once typing pauses. Each save receives the draft it is for, so
+// edits are never lost when the user switches to another item, closes the
+// editor or leaves the page: whatever is still pending is saved right away.
+// Saves run one at a time; a failed save is retried until it succeeds or a
+// newer draft of the same item replaces it.
+function useAutosave<T>({
   enabled = true,
+  scope,
   isDirty,
+  snapshot,
   save,
-  debounceMs = 800,
+  debounceMs = 1200,
 }: {
   enabled?: boolean;
+  scope: string;
   isDirty: boolean;
-  save: () => Promise<unknown>;
+  snapshot: T;
+  save: (snapshot: T) => Promise<unknown>;
   debounceMs?: number;
 }): AutosaveStatus {
   const [status, setStatus] = useState<AutosaveStatus>("saved");
-  const savingRef = useRef(false);
   const saveRef = useRef(save);
   saveRef.current = save;
+  const pendingRef = useRef<AutosaveEntry<T> | null>(null);
+  const queueRef = useRef<Promise<void>>(Promise.resolve());
+  const inFlightRef = useRef(0);
+  const mountedRef = useRef(true);
+  const key = enabled && isDirty ? JSON.stringify(snapshot) : "";
+
+  const persist = useCallback((entry: AutosaveEntry<T>) => {
+    const run = async () => {
+      for (let attempt = 0; ; attempt += 1) {
+        // A newer draft of the same item already contains these edits.
+        const newer = pendingRef.current;
+        if (attempt > 0 && newer && newer.scope === entry.scope) return;
+        inFlightRef.current += 1;
+        if (mountedRef.current) setStatus("saving");
+        try {
+          await saveRef.current(entry.snapshot);
+          inFlightRef.current -= 1;
+          if (mountedRef.current) setStatus(pendingRef.current ? "pending" : "saved");
+          return;
+        } catch {
+          inFlightRef.current -= 1;
+          // One blip retries quietly; repeated failures are shown.
+          if (mountedRef.current && attempt > 0) setStatus("error");
+          const delay = AUTOSAVE_RETRY_DELAYS_MS[Math.min(attempt, AUTOSAVE_RETRY_DELAYS_MS.length - 1)];
+          await new Promise((resolve) => window.setTimeout(resolve, delay));
+        }
+      }
+    };
+    queueRef.current = queueRef.current.then(run, run);
+    return queueRef.current;
+  }, []);
+
+  const flush = useCallback(() => {
+    const entry = pendingRef.current;
+    if (!entry) return;
+    pendingRef.current = null;
+    void persist(entry);
+  }, [persist]);
 
   useEffect(() => {
-    if (!enabled) {
-      setStatus("saved");
+    const previous = pendingRef.current;
+    // The user moved to something else: save what they left behind now.
+    if (previous && (!enabled || previous.scope !== scope)) flush();
+    if (!key) {
+      pendingRef.current = null;
+      if (inFlightRef.current === 0) setStatus((current) => (current === "error" ? current : "saved"));
       return undefined;
     }
-    if (!isDirty) {
-      setStatus((current) => (current === "saving" ? current : "saved"));
-      return undefined;
-    }
-    setStatus("pending");
-    const timer = window.setTimeout(async () => {
-      if (savingRef.current) return;
-      savingRef.current = true;
-      setStatus("saving");
-      try {
-        await saveRef.current();
-        setStatus("saved");
-      } catch {
-        setStatus("error");
-      } finally {
-        savingRef.current = false;
-      }
+    const entry: AutosaveEntry<T> = { scope, key, snapshot };
+    pendingRef.current = entry;
+    setStatus((current) => (current === "saving" ? current : "pending"));
+    const timer = window.setTimeout(() => {
+      if (pendingRef.current === entry) flush();
     }, debounceMs);
     return () => window.clearTimeout(timer);
-  }, [enabled, isDirty, debounceMs]);
+    // `snapshot` is represented by `key`.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [enabled, scope, key, debounceMs, flush]);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    const onHide = () => {
+      if (document.visibilityState === "hidden") flush();
+    };
+    const onBeforeUnload = (event: BeforeUnloadEvent) => {
+      if (!pendingRef.current && inFlightRef.current === 0) return;
+      flush();
+      // Asks the browser to confirm leaving while the save is still running.
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    document.addEventListener("visibilitychange", onHide);
+    window.addEventListener("beforeunload", onBeforeUnload);
+    return () => {
+      document.removeEventListener("visibilitychange", onHide);
+      window.removeEventListener("beforeunload", onBeforeUnload);
+      mountedRef.current = false;
+      flush();
+    };
+  }, [flush]);
 
   return status;
 }
 
 function AutosaveIndicator({ status }: { status: AutosaveStatus }) {
-  if (status === "saving") {
+  if (status === "error") {
+    return <span className="autosave-indicator error">Não foi possível salvar. Tentando de novo...</span>;
+  }
+  if (status === "saved") {
     return (
-      <span className="autosave-indicator saving">
-        <Loader2 size={14} className="spin" /> Salvando...
+      <span className="autosave-indicator saved">
+        <Check size={13} /> Salvo
       </span>
     );
   }
-  if (status === "pending") {
-    return <span className="autosave-indicator pending">Salvando em instantes...</span>;
-  }
-  if (status === "error") {
-    return <span className="autosave-indicator error">Erro ao salvar</span>;
-  }
-  return <span className="autosave-indicator saved">Salvo automaticamente</span>;
+  return <span className="autosave-indicator pending">Salvando...</span>;
 }
 
 function plateTotals(plates: PrintPlate[]) {
@@ -1454,6 +1552,49 @@ function parseBrazilianDateInput(value: string): string | null {
 function capitalizeBrazilianDateLabel(label: string): string {
   if (!label) return label;
   return label.charAt(0).toLocaleUpperCase("pt-BR") + label.slice(1);
+}
+
+// Keeps the text being typed ("12," or "a, ") while the parsed value goes up;
+// a different value from outside replaces the text.
+function useParsedText<T>(value: T, format: (value: T) => string, parse: (text: string) => T) {
+  const [text, setText] = useState(() => format(value));
+  useEffect(() => {
+    setText((current) => (format(parse(current)) === format(value) ? current : format(value)));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [format(value)]);
+  return [text, setText] as const;
+}
+
+function DecimalInput({ value, onChange }: { value: number; onChange: (value: number) => void }) {
+  const [text, setText] = useParsedText(value, (number) => (number ? String(number).replace(".", ",") : ""), parseDecimal);
+  return (
+    <input
+      inputMode="decimal"
+      value={text}
+      onChange={(event) => {
+        setText(event.target.value);
+        onChange(parseDecimal(event.target.value));
+      }}
+    />
+  );
+}
+
+function parseKeywords(text: string): string[] {
+  return text.split(",").map((keyword) => keyword.trim()).filter(Boolean);
+}
+
+function KeywordsInput({ value, onChange }: { value: string[]; onChange: (value: string[]) => void }) {
+  const [text, setText] = useParsedText(value, (keywords) => keywords.join(", "), parseKeywords);
+  return (
+    <input
+      value={text}
+      onChange={(event) => {
+        setText(event.target.value);
+        onChange(parseKeywords(event.target.value));
+      }}
+      placeholder="Separe por vírgula"
+    />
+  );
 }
 
 function BrazilianDateInput({
@@ -1861,6 +2002,9 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
   const [notice, setNotice] = useState("");
   const [listingDraft, setListingDraft] = useState<Listing | null>(null);
   const [productNameDraft, setProductNameDraft] = useState("");
+  // Which product the listing drafts belong to; for one render after a product
+  // switch they still hold the previous product's text.
+  const [listingDraftOwner, setListingDraftOwner] = useState("");
   const [lastExport, setLastExport] = useState<{ filename: string; count: number; marketplace: string } | null>(null);
   const [makerWorldLogin, setMakerWorldLogin] = useState<MakerWorldLoginStatus | null>(null);
   const [makerWorldViewerOpen, setMakerWorldViewerOpen] = useState(false);
@@ -2294,14 +2438,33 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
     return () => window.clearTimeout(timeout);
   }, [notice, busy]);
 
+  // The server copy the drafts were last synced with. A newer server copy of
+  // the same product (an autosave reply, a finished job) only replaces fields
+  // the user has not edited since, so typing during a save is never undone.
+  const listingBaseRef = useRef<{ productId: string; listing: string; name: string } | null>(null);
   useEffect(() => {
-    if (selectedProduct) {
-      setListingDraft(selectedProduct.listing);
-      setProductNameDraft(selectedProduct.name);
-    } else {
+    if (!selectedProduct) {
+      listingBaseRef.current = null;
       setListingDraft(null);
       setProductNameDraft("");
+      setListingDraftOwner("");
+      return;
     }
+    const base = listingBaseRef.current;
+    const serverListing = selectedProduct.listing;
+    if (base && base.productId === selectedProduct.id) {
+      setListingDraft((current) => (current && listingFingerprint(current) !== base.listing ? current : serverListing));
+      setProductNameDraft((current) => (current !== base.name ? current : selectedProduct.name));
+    } else {
+      setListingDraft(serverListing);
+      setProductNameDraft(selectedProduct.name);
+      setListingDraftOwner(selectedProduct.id);
+    }
+    listingBaseRef.current = {
+      productId: selectedProduct.id,
+      listing: listingFingerprint(serverListing),
+      name: selectedProduct.name,
+    };
   }, [selectedProduct?.id, selectedProduct?.name, listingFingerprint(selectedProduct?.listing)]);
 
   useEffect(() => {
@@ -2385,7 +2548,7 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
         }),
       });
       setFilaments((current) => current.map((item) => (item.id === updated.id ? updated : item)));
-      return;
+      return updated;
     }
     const created = await api<FilamentSpool>(`/api/store-profiles/${storeProfileId}/filaments`, {
       method: "POST",
@@ -2399,6 +2562,7 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
       }),
     });
     setFilaments((current) => [...current, created].sort((a, b) => a.name.localeCompare(b.name, "pt-BR")));
+    return created;
   }
 
   async function deleteFilament(filamentId: string) {
@@ -2654,35 +2818,25 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
     });
   }
 
-  function saveOpenRouterSettings() {
-    return runFluidAction("Salvando integrações IA", async () => {
-      const updated = await api<SettingsPayload>("/api/settings", {
-        method: "PATCH",
-        body: JSON.stringify({
-          openrouter_api_key: openRouterApiKeyDraft,
-          openrouter_model: openRouterModelDraft,
-          kie_api_key: kieApiKeyDraft,
-          kie_image_model: kieImageModelDraft,
-          use_codex_image_gen: useCodexImageGenDraft,
-          codex_bin: codexBinDraft,
-          cloudflare_account_id: r2AccountIdDraft,
-          cloudflare_r2_bucket_name: r2BucketDraft,
-          cloudflare_r2_access_key: r2AccessKeyDraft,
-          cloudflare_r2_secret_key: r2SecretKeyDraft,
-          cloudflare_r2_public_url: r2PublicUrlDraft,
-        }),
-      });
-      setSettings(updated);
-      setOpenRouterApiKeyDraft("");
-      setKieApiKeyDraft("");
-      setR2AccountIdDraft("");
-      setR2BucketDraft("");
-      setR2AccessKeyDraft("");
-      setR2SecretKeyDraft("");
-      setR2PublicUrlDraft("");
-      setNotice("Integrações salvas.");
-      return updated;
+  // Autosave: throws on failure so the caller retries. The secret drafts stay
+  // filled while the editor is open (it clears them on close), so a pause in
+  // the middle of typing a key never empties the field.
+  async function saveOpenRouterSettings(draft: IntegrationDrafts) {
+    const updated = await api<SettingsPayload>("/api/settings", {
+      method: "PATCH",
+      body: JSON.stringify(draft),
     });
+    setSettings(updated);
+  }
+
+  function clearIntegrationSecretDrafts() {
+    setOpenRouterApiKeyDraft("");
+    setKieApiKeyDraft("");
+    setR2AccountIdDraft("");
+    setR2BucketDraft("");
+    setR2AccessKeyDraft("");
+    setR2SecretKeyDraft("");
+    setR2PublicUrlDraft("");
   }
 
   function finishOnboarding(payload: OnboardingPayload) {
@@ -2754,18 +2908,16 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
     setDetailsOpen(false);
   }
 
-  function saveStoreProfile() {
-    if (!storeProfileDraft) return Promise.resolve();
-    return runFluidAction("Salvando perfil de loja", async () => {
-      const updated = await api<StoreProfile>(`/api/store-profiles/${storeProfileDraft.id}`, {
-        method: "PATCH",
-        body: JSON.stringify(storeProfileDraft),
-      });
-      patchStoreProfile(updated);
-      setActiveStoreProfileId(updated.id);
-      setNotice("Perfil de loja salvo.");
-      return updated;
+  // Autosave: throws on failure so the caller retries.
+  async function saveStoreProfile(draft: StoreProfile) {
+    const updated = await api<StoreProfile>(`/api/store-profiles/${draft.id}`, {
+      method: "PATCH",
+      body: JSON.stringify(draft),
     });
+    setStoreProfiles((current) => current.map((profile) => (profile.id === updated.id ? updated : profile)));
+    // Typing that happened during the save stays in the draft.
+    setStoreProfileDraft((current) =>
+      current && current.id === updated.id && JSON.stringify(current) === JSON.stringify(draft) ? updated : current);
   }
 
   function createStoreProfile(credentials: { name: string; username: string; password: string }) {
@@ -2812,16 +2964,13 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
     });
   }
 
-  function saveImageColorOptions(colors: ImageOptions["colors"]) {
-    return runFluidAction("Salvando cores", async () => {
-      const updated = await api<ImageOptions>("/api/image-options", {
-        method: "PUT",
-        body: JSON.stringify({ colors }),
-      });
-      setImageOptions(updated);
-      setNotice("Cores salvas.");
-      return updated;
+  // Autosave: throws on failure so the caller retries.
+  async function saveImageColorOptions(colors: ImageOptions["colors"]) {
+    const updated = await api<ImageOptions>("/api/image-options", {
+      method: "PUT",
+      body: JSON.stringify({ colors }),
     });
+    setImageOptions(updated);
   }
 
   function downloadAppBackup() {
@@ -2988,24 +3137,21 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
     { refresh: "catalog", blockUi: true });
   }
 
-  function saveListing() {
-    if (!selectedProduct || !listingDraft) return Promise.resolve();
+  // Autosave: throws on failure so the caller retries.
+  async function saveListing(draft: ListingSnapshot) {
+    const product = findProduct(draft.productId);
+    if (!product) return;
     const payload: { listing: Listing; status?: ProductStatus; name?: string } = {
-      listing: listingDraft,
-      status: listingDraft.title && listingDraft.description ? "in_edit" : selectedProduct.status,
+      listing: draft.listing,
+      status: draft.listing.title && draft.listing.description ? "in_edit" : product.status,
     };
-    if (productNameDraft.trim() && productNameDraft.trim() !== selectedProduct.name) {
-      payload.name = productNameDraft.trim();
-    }
-    return runFluidAction("Salvando anúncio", async () => {
-      const updated = await api<Product>(`/api/products/${selectedProduct.id}`, {
-        method: "PATCH",
-        body: JSON.stringify(payload),
-      });
-      patchProduct(updated);
-      setNotice("Anúncio salvo.");
-      return updated;
+    const name = draft.name.trim();
+    if (name && name !== product.name) payload.name = name;
+    const updated = await api<Product>(`/api/products/${draft.productId}`, {
+      method: "PATCH",
+      body: JSON.stringify(payload),
     });
+    patchProduct(updated);
   }
 
   function approveProduct() {
@@ -3567,6 +3713,7 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
             imageOptions={imageOptions}
             jobs={storeJobs}
             listingDraft={listingDraft}
+            listingDraftOwner={listingDraftOwner}
             productNameDraft={productNameDraft}
             filters={productFilters}
             boardFilters={listFilters}
@@ -3676,6 +3823,7 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
             onR2PublicUrlChange={setR2PublicUrlDraft}
             onR2SecretKeyChange={setR2SecretKeyDraft}
             onSaveOpenRouterSettings={saveOpenRouterSettings}
+            onClearIntegrationSecrets={clearIntegrationSecretDrafts}
             onStoreProfileDraftChange={setStoreProfileDraft}
             onCreateStoreProfile={createStoreProfile}
             onDownloadAppBackup={downloadAppBackup}
@@ -5943,6 +6091,7 @@ function ProductsTab({
   imageOptions,
   jobs,
   listingDraft,
+  listingDraftOwner,
   productNameDraft,
   products,
   selectedProduct,
@@ -6009,6 +6158,7 @@ function ProductsTab({
   imageOptions: ImageOptions;
   jobs: Job[];
   listingDraft: Listing | null;
+  listingDraftOwner: string;
   productNameDraft: string;
   products: Product[];
   selectedProduct?: Product;
@@ -6043,7 +6193,7 @@ function ProductsTab({
   onDownloadProductFiles: (id?: string) => void;
   onProductNameDraftChange: (value: string) => void;
   onRegenerateImage: (productId: string, promptKey: string, extraPrompt: string) => void;
-  onSaveListing: () => Promise<unknown> | void;
+  onSaveListing: (draft: ListingSnapshot) => Promise<unknown>;
   onUpdateProductListed: (productId: string, listed: boolean) => void;
   onUploadCoverImage: (productId: string, file: File) => void;
   onUploadModelFile: (productId: string, file: File) => void;
@@ -6096,8 +6246,9 @@ function ProductsTab({
     setDetailSection("listing");
   }, [selectedProduct?.id]);
 
+  const listingDraftReady = Boolean(selectedProduct && listingDraft && listingDraftOwner === selectedProduct.id);
   const listingDirty = Boolean(
-    detailsOpen
+    listingDraftReady
     && selectedProduct
     && listingDraft
     && (
@@ -6106,11 +6257,15 @@ function ProductsTab({
     ),
   );
 
-  const listingAutosaveStatus = useAutosave({
-    enabled: detailsOpen && detailSection === "listing" && Boolean(selectedProduct && listingDraft),
+  const listingAutosaveStatus = useAutosave<ListingSnapshot | null>({
+    enabled: listingDraftReady,
+    scope: listingDraftOwner,
     isDirty: listingDirty,
-    save: async () => {
-      await onSaveListing();
+    snapshot: selectedProduct && listingDraft
+      ? { productId: selectedProduct.id, listing: listingDraft, name: productNameDraft }
+      : null,
+    save: async (draft) => {
+      if (draft) await onSaveListing(draft);
     },
   });
 
@@ -6578,19 +6733,7 @@ function ProductsTab({
                   </label>
                   <label className="full-span">
                     Palavras-chave
-                    <input
-                      value={listingDraft.keywords.join(", ")}
-                      onChange={(event) =>
-                        updateDraft(
-                          "keywords",
-                          event.target.value
-                            .split(",")
-                            .map((keyword) => keyword.trim())
-                            .filter(Boolean),
-                        )
-                      }
-                      placeholder="Separe por vírgula"
-                    />
+                    <KeywordsInput value={listingDraft.keywords} onChange={(keywords) => updateDraft("keywords", keywords)} />
                   </label>
                 </div>
                 {(listingDraft.keywords.length > 0 || selectedProduct.tags.length > 0) && (
@@ -8277,6 +8420,7 @@ function SettingsTab({
   onR2PublicUrlChange,
   onR2SecretKeyChange,
   onSaveOpenRouterSettings,
+  onClearIntegrationSecrets,
   onSaveStoreProfile,
   onSaveImageColorOptions,
   onSelectedStoreProfileChange,
@@ -8319,9 +8463,10 @@ function SettingsTab({
   onR2BucketChange: (value: string) => void;
   onR2PublicUrlChange: (value: string) => void;
   onR2SecretKeyChange: (value: string) => void;
-  onSaveOpenRouterSettings: () => void;
-  onSaveStoreProfile: () => Promise<unknown> | void;
-  onSaveImageColorOptions: (colors: ImageOptions["colors"]) => Promise<unknown> | void;
+  onSaveOpenRouterSettings: (draft: IntegrationDrafts) => Promise<unknown>;
+  onClearIntegrationSecrets: () => void;
+  onSaveStoreProfile: (draft: StoreProfile) => Promise<unknown>;
+  onSaveImageColorOptions: (colors: ImageOptions["colors"]) => Promise<unknown>;
   onSelectedStoreProfileChange: (value: string) => void;
   onRestoreAppBackup: (file: File) => Promise<unknown> | void;
   onStoreProfileDraftChange: (value: StoreProfile) => void;
@@ -8337,7 +8482,7 @@ function SettingsTab({
     spool_price_brl: number;
     spool_weight_g: number;
     notes: string;
-  }) => Promise<unknown>;
+  }) => Promise<FilamentSpool | undefined>;
   onSaveProductionSettings: (payload: {
     electricity_kwh_price_brl: number;
     printer_power_watts: number;
@@ -8387,24 +8532,54 @@ function SettingsTab({
     applyUiThemePreference(next);
   }
 
+  // A newer server copy (usually an autosave reply) only replaces drafts the
+  // user has not edited since the previous copy, so typing is never undone.
+  const filamentBaseRef = useRef(filaments);
+  // Temporary row id -> id the server gave it, and back (rows keep their React key).
+  const createdFilamentIdsRef = useRef<Record<string, string>>({});
+  const filamentRowKeysRef = useRef<Record<string, string>>({});
   useEffect(() => {
-    setFilamentDrafts(filaments);
+    const base = filamentBaseRef.current;
+    filamentBaseRef.current = filaments;
+    setFilamentDrafts((current) => {
+      const resolved = current.map((item) => {
+        const createdId = createdFilamentIdsRef.current[item.id];
+        return createdId ? { ...item, id: createdId } : item;
+      });
+      return filamentDraftsEqual(resolved, base) ? filaments : resolved;
+    });
   }, [filaments]);
 
-
+  const productionBaseRef = useRef<ProductionSettings | null>(null);
   useEffect(() => {
     if (!productionSettings) return;
-    setElectricityPrice(String(productionSettings.electricity_kwh_price_brl));
-    setPrinterPower(String(productionSettings.printer_power_watts));
-    setPrinterPurchasePrice(String(productionSettings.printer_purchase_price_brl ?? 0));
-    setPrinterUsefulLifeHours(String(productionSettings.printer_useful_life_hours ?? 5000));
-    setMaintenanceCostPerHour(String(productionSettings.maintenance_cost_per_hour_brl ?? 0));
-    setLaborCostPerHour(String(productionSettings.labor_cost_per_hour_brl ?? 0));
+    const base = productionBaseRef.current;
+    productionBaseRef.current = productionSettings;
+    const sync = (
+      setter: React.Dispatch<React.SetStateAction<string>>,
+      key: keyof ProductionDrafts["settings"],
+      fallback: number,
+    ) => setter((current) =>
+      base && parseDecimal(current) !== Number(base[key] ?? fallback) ? current : String(productionSettings[key] ?? fallback));
+    sync(setElectricityPrice, "electricity_kwh_price_brl", 0);
+    sync(setPrinterPower, "printer_power_watts", 0);
+    sync(setPrinterPurchasePrice, "printer_purchase_price_brl", 0);
+    sync(setPrinterUsefulLifeHours, "printer_useful_life_hours", 5000);
+    sync(setMaintenanceCostPerHour, "maintenance_cost_per_hour_brl", 0);
+    sync(setLaborCostPerHour, "labor_cost_per_hour_brl", 0);
   }, [productionSettings]);
 
+  const colorBaseRef = useRef(imageOptions.colors);
   useEffect(() => {
-    setColorDrafts(imageOptions.colors);
+    const base = colorBaseRef.current;
+    colorBaseRef.current = imageOptions.colors;
+    setColorDrafts((current) => (imageColorsEqual(current, base) ? imageOptions.colors : current));
   }, [imageOptions.colors]);
+
+  useEffect(() => {
+    if (!integrationEditorOpen) onClearIntegrationSecrets();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [integrationEditorOpen]);
 
   async function createStoreLogin(event: React.FormEvent) {
     event.preventDefault();
@@ -8519,7 +8694,7 @@ function SettingsTab({
     setFilamentDrafts((current) => [
       ...current,
       {
-        id: "",
+        id: `${DRAFT_FILAMENT_PREFIX}${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`,
         store_profile_id: storeProfileDraft.id,
         name: "",
         material: "PLA",
@@ -8533,26 +8708,31 @@ function SettingsTab({
     ]);
   }
 
-  async function saveProductionSection() {
-    await onSaveProductionSettings({
-      electricity_kwh_price_brl: Number(electricityPrice.replace(",", ".")) || 0,
-      printer_power_watts: Number(printerPower.replace(",", ".")) || 0,
-      printer_purchase_price_brl: Number(printerPurchasePrice.replace(",", ".")) || 0,
-      printer_useful_life_hours: Math.max(1, Number(printerUsefulLifeHours.replace(",", ".")) || 5000),
-      maintenance_cost_per_hour_brl: Number(maintenanceCostPerHour.replace(",", ".")) || 0,
-      labor_cost_per_hour_brl: Number(laborCostPerHour.replace(",", ".")) || 0,
-    });
-    for (const draft of filamentDrafts) {
-      if (!draft.name.trim()) continue;
-      await onSaveFilament({
-        id: draft.id || undefined,
-        name: draft.name.trim(),
-        material: draft.material.trim() || "PLA",
-        color: draft.color || "",
-        spool_price_brl: Number(draft.spool_price_brl) || 0,
-        spool_weight_g: Number(draft.spool_weight_g) || 1000,
-        notes: draft.notes || "",
+  // Saves only what differs from the server copy.
+  async function saveProductionSection(draft: ProductionDrafts) {
+    const current = productionSettings ?? defaultProductionSettings("");
+    const settingsChanged = (Object.keys(draft.settings) as Array<keyof ProductionDrafts["settings"]>)
+      .some((key) => draft.settings[key] !== Number(current[key]));
+    if (settingsChanged || !productionSettings) await onSaveProductionSettings(draft.settings);
+    for (const item of draft.filaments) {
+      if (!item.name.trim()) continue;
+      const temporary = item.id.startsWith(DRAFT_FILAMENT_PREFIX);
+      const id = temporary ? createdFilamentIdsRef.current[item.id] : item.id;
+      const saved = filaments.find((spool) => spool.id === id);
+      if (saved && filamentDraftsEqual([{ ...item, id: saved.id }], [saved])) continue;
+      const result = await onSaveFilament({
+        id: id || undefined,
+        name: item.name.trim(),
+        material: item.material.trim() || "PLA",
+        color: item.color || "",
+        spool_price_brl: Number(item.spool_price_brl) || 0,
+        spool_weight_g: Number(item.spool_weight_g) || 1000,
+        notes: item.notes || "",
       });
+      if (temporary && !id && result) {
+        createdFilamentIdsRef.current[item.id] = result.id;
+        filamentRowKeysRef.current[result.id] = item.id;
+      }
     }
   }
 
@@ -8589,25 +8769,57 @@ function SettingsTab({
     || !filamentDraftsEqual(filamentDrafts, filaments)
   );
 
-  const profileAutosaveStatus = useAutosave({
+  const profileAutosaveStatus = useAutosave<StoreProfile | null>({
     enabled: profileEditorOpen,
+    scope: storeProfileDraft?.id ?? "",
     isDirty: profileDirty,
-    save: async () => { await onSaveStoreProfile(); },
+    snapshot: storeProfileDraft,
+    save: async (draft) => {
+      if (draft) await onSaveStoreProfile(draft);
+    },
   });
-  const integrationAutosaveStatus = useAutosave({
+  const integrationAutosaveStatus = useAutosave<IntegrationDrafts>({
     enabled: integrationEditorOpen,
+    scope: "integrations",
     isDirty: integrationDirty,
-    save: async () => { await onSaveOpenRouterSettings(); },
+    snapshot: {
+      openrouter_api_key: openRouterApiKeyDraft,
+      openrouter_model: openRouterModelDraft,
+      kie_api_key: kieApiKeyDraft,
+      kie_image_model: kieImageModelDraft,
+      use_codex_image_gen: useCodexImageGenDraft,
+      codex_bin: codexBinDraft,
+      cloudflare_account_id: r2AccountIdDraft,
+      cloudflare_r2_bucket_name: r2BucketDraft,
+      cloudflare_r2_access_key: r2AccessKeyDraft,
+      cloudflare_r2_secret_key: r2SecretKeyDraft,
+      cloudflare_r2_public_url: r2PublicUrlDraft,
+    },
+    save: onSaveOpenRouterSettings,
   });
-  const colorsAutosaveStatus = useAutosave({
+  const colorsAutosaveStatus = useAutosave<ImageOptions["colors"]>({
     enabled: settingsSection === "colors",
+    scope: "colors",
     isDirty: colorsDirty,
-    save: async () => { await onSaveImageColorOptions(colorDrafts); },
+    snapshot: colorDrafts,
+    save: onSaveImageColorOptions,
   });
-  const productionAutosaveStatus = useAutosave({
+  const productionAutosaveStatus = useAutosave<ProductionDrafts>({
     enabled: settingsSection === "production",
+    scope: "production",
     isDirty: productionDirty,
-    save: () => saveProductionSection(),
+    snapshot: {
+      settings: {
+        electricity_kwh_price_brl: parseDecimal(electricityPrice),
+        printer_power_watts: parseDecimal(printerPower),
+        printer_purchase_price_brl: parseDecimal(printerPurchasePrice),
+        printer_useful_life_hours: Math.max(1, parseDecimal(printerUsefulLifeHours) || 5000),
+        maintenance_cost_per_hour_brl: parseDecimal(maintenanceCostPerHour),
+        labor_cost_per_hour_brl: parseDecimal(laborCostPerHour),
+      },
+      filaments: filamentDrafts,
+    },
+    save: saveProductionSection,
   });
   return (
     <section className="settings-page settings-layout">
@@ -8857,15 +9069,15 @@ function SettingsTab({
             </thead>
             <tbody>
               {filamentDrafts.map((spool, index) => (
-                <tr key={spool.id || `new-${index}`}>
+                <tr key={filamentRowKeysRef.current[spool.id] ?? spool.id}>
                   <td><input value={spool.name} onChange={(event) => updateFilamentDraft(index, "name", event.target.value)} /></td>
                   <td><input value={spool.material} onChange={(event) => updateFilamentDraft(index, "material", event.target.value)} /></td>
                   <td><input value={spool.color || ""} onChange={(event) => updateFilamentDraft(index, "color", event.target.value)} /></td>
-                  <td><input value={spool.spool_price_brl || ""} onChange={(event) => updateFilamentDraft(index, "spool_price_brl", event.target.value)} /></td>
-                  <td><input value={spool.spool_weight_g || ""} onChange={(event) => updateFilamentDraft(index, "spool_weight_g", event.target.value)} /></td>
+                  <td><DecimalInput value={spool.spool_price_brl} onChange={(value) => updateFilamentDraft(index, "spool_price_brl", String(value))} /></td>
+                  <td><DecimalInput value={spool.spool_weight_g} onChange={(value) => updateFilamentDraft(index, "spool_weight_g", String(value))} /></td>
                   <td className="costs-readonly">{formatBrl(filamentCostPerGram(spool))}</td>
                   <td className="costs-actions-cell">
-                    {spool.id ? (
+                    {spool.id && !spool.id.startsWith(DRAFT_FILAMENT_PREFIX) ? (
                       <button className="danger-button compact-danger" onClick={() => onDeleteFilament(spool.id)} disabled={!spool.id}>
                         <Trash2 size={14} />
                       </button>
