@@ -399,7 +399,10 @@ type ProductFilters = {
     | "with_model"
     | "without_model"
     | "listed"
-    | "not_listed";
+    | "not_listed"
+    | "draft_listing"
+    | "without_ai_images"
+    | "file_issues";
   publication: ProductPublication;
 };
 
@@ -433,11 +436,18 @@ type ProductListState = {
 
 type CatalogStats = {
   total: number;
-  ready: number;
-  with_image: number;
-  with_model: number;
-  exported: number;
+  // Board columns: published products count only under "listed".
+  stages: Record<ProductStatus | "listed", number>;
+  // Unpublished products still missing something, except file_issues.
+  attention: {
+    without_listing: number;
+    draft_listing: number;
+    without_ai_images: number;
+    without_model: number;
+    file_issues: number;
+  };
   ai_cost_usd: number;
+  ai_cost_products: number;
   ai_cost_by_provider: { openrouter: number; kie: number; other: number };
 };
 
@@ -1609,6 +1619,12 @@ function filterProducts(products: Product[], filters: ProductFilters): Product[]
         return listed;
       case "not_listed":
         return !listed;
+      case "draft_listing":
+        return hasListing && !(product.listing.title && product.listing.description);
+      case "without_ai_images":
+        return !product.assets.some((asset) => asset.kind.startsWith("generated_") || asset.kind.startsWith("color_"));
+      case "file_issues":
+        return productFileWarnings(product).length > 0;
       default:
         return true;
     }
@@ -1681,7 +1697,6 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
   // Which product the listing drafts belong to; for one render after a product
   // switch they still hold the previous product's text.
   const [listingDraftOwner, setListingDraftOwner] = useState("");
-  const [lastExport, setLastExport] = useState<{ filename: string; count: number; marketplace: string } | null>(null);
   const [makerWorldLogin, setMakerWorldLogin] = useState<MakerWorldLoginStatus | null>(null);
   const [makerWorldViewerOpen, setMakerWorldViewerOpen] = useState(false);
   const [collectRunning, setCollectRunning] = useState(false);
@@ -3175,7 +3190,6 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
       count: Number(response.headers.get("X-Eco-Export-Count")) || productIds.length,
       marketplace: response.headers.get("X-Eco-Export-Marketplace") || activeStoreProfile?.marketplace || "shopee",
     };
-    setLastExport(result);
     void Promise.all(productIds.map(refreshProduct));
     return result;
   }
@@ -3274,11 +3288,13 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
 
         {activeTab === "dashboard" && (
           <DashboardTab
-            activeStoreProfile={activeStoreProfile}
-            jobs={storeJobs}
-            lastExport={lastExport}
             stats={catalogStats}
             runtimeStatus={runtimeStatus}
+            onOpenProducts={(filters) => {
+              setProductFilters({ query: "", ...filters });
+              setActiveTab("products");
+            }}
+            onOpenCollect={() => setActiveTab("collect")}
           />
         )}
 
@@ -4081,139 +4097,173 @@ function OnboardingModal({
   );
 }
 
+type DashboardFilters = Pick<ProductFilters, "status" | "characteristic" | "publication">;
+
+const DASHBOARD_ATTENTION: { key: keyof CatalogStats["attention"]; label: string; hint: string; filters: DashboardFilters }[] = [
+  {
+    key: "draft_listing",
+    label: "Anúncio em rascunho",
+    hint: "Falta título ou descrição",
+    filters: { status: "all", characteristic: "draft_listing", publication: "not_listed" },
+  },
+  {
+    key: "without_listing",
+    label: "Sem anúncio",
+    hint: "Ainda não tem texto gerado",
+    filters: { status: "all", characteristic: "without_listing", publication: "not_listed" },
+  },
+  {
+    key: "without_ai_images",
+    label: "Sem fotos de IA",
+    hint: "Só a capa original do MakerWorld",
+    filters: { status: "all", characteristic: "without_ai_images", publication: "not_listed" },
+  },
+  {
+    key: "without_model",
+    label: "Sem arquivo 3D",
+    hint: "Nenhum 3MF baixado",
+    filters: { status: "all", characteristic: "without_model", publication: "not_listed" },
+  },
+  {
+    key: "file_issues",
+    label: "Problema nos arquivos",
+    hint: "Pasta vazia ou arquivo ausente no disco",
+    filters: { status: "all", characteristic: "file_issues", publication: "all" },
+  },
+];
+
 function DashboardTab({
-  activeStoreProfile,
-  jobs,
-  lastExport,
   stats,
   runtimeStatus,
+  onOpenProducts,
+  onOpenCollect,
 }: {
-  activeStoreProfile?: StoreProfile;
-  jobs: Job[];
-  lastExport: { filename: string; count: number; marketplace: string } | null;
   stats: CatalogStats | null;
   runtimeStatus: RuntimeStatus | null;
+  onOpenProducts: (filters: DashboardFilters) => void;
+  onOpenCollect: () => void;
 }) {
   // Counted on the server, so the dashboard never needs the whole catalog.
-  const productCount = stats?.total ?? 0;
-  const readyCount = stats?.ready ?? 0;
-  const imageCount = stats?.with_image ?? 0;
-  const modelCount = stats?.with_model ?? 0;
-  const exportedCount = stats?.exported ?? 0;
-  const pendingCount = Math.max(productCount - readyCount, 0);
-  const totalCost = stats?.ai_cost_usd ?? 0;
-  const costSummary = {
-    openRouter: stats?.ai_cost_by_provider.openrouter ?? 0,
-    kie: stats?.ai_cost_by_provider.kie ?? 0,
-    other: stats?.ai_cost_by_provider.other ?? 0,
-  };
-  const collectJobs = jobs.filter((job) => job.type === "collect_products").slice(0, 5);
-  const collectSummary = collectJobsSummary(jobs.filter((job) => job.type === "collect_products"));
-  const readyPercent = productCount ? Math.round((readyCount / productCount) * 100) : 0;
-  const chartReady = readyPercent;
-  const chartImage = productCount ? Math.round((imageCount / productCount) * 100) : 0;
-  const chartModel = productCount ? Math.round((modelCount / productCount) * 100) : 0;
-  const chartExported = productCount ? Math.round((exportedCount / productCount) * 100) : 0;
-  const maxCost = Math.max(costSummary.openRouter, costSummary.kie, costSummary.other, 0.000001);
+  if (!stats) {
+    return (
+      <section className="dashboard-page">
+        <div className="panel compact-empty">
+          <Loader2 className="spin" size={18} />
+          <span>Carregando números da loja…</span>
+        </div>
+      </section>
+    );
+  }
+
+  if (!stats.total) {
+    return (
+      <section className="dashboard-page">
+        <div className="panel compact-empty dashboard-empty">
+          <strong>Nenhum produto nesta loja ainda</strong>
+          <span>Comece coletando produtos do MakerWorld.</span>
+          <button type="button" className="primary" onClick={onOpenCollect}>
+            <PackageSearch size={16} /> Ir para Coleta
+          </button>
+        </div>
+      </section>
+    );
+  }
+
+  // Same columns, in the same order, as the products board.
+  const stages = BOARD_COLUMNS.map((column) => ({
+    key: column.key,
+    label: column.label,
+    filters: { status: column.status, characteristic: "all", publication: column.publication } as DashboardFilters,
+  }));
+  const readyToPublish = stats.stages.ready;
+  const attention = DASHBOARD_ATTENTION.filter((item) => stats.attention[item.key] > 0);
+  const totalCost = stats.ai_cost_usd;
+  const averageCost = stats.ai_cost_products ? totalCost / stats.ai_cost_products : 0;
+  const costByProvider = stats.ai_cost_by_provider;
+  const maxCost = Math.max(costByProvider.openrouter, costByProvider.kie, costByProvider.other, 0.000001);
   const usdBrl = Number(runtimeStatus?.exchange.usd_brl);
-  const totalCostBrl = Number.isFinite(usdBrl) && usdBrl > 0 ? totalCost * usdBrl : null;
+  const toBrl = (value: number) => (Number.isFinite(usdBrl) && usdBrl > 0 ? formatBrl(value * usdBrl) : null);
 
   return (
     <section className="dashboard-page">
-      <div className="dashboard-hero">
-        <div>
-          <p className="eyebrow">Loja ativa</p>
-          <h2>{activeStoreProfile?.name ?? "Nenhuma loja selecionada"}</h2>
-          <span>{activeStoreProfile?.niche ?? "Crie ou selecione um perfil de loja"}</span>
+      <div className="panel">
+        <div className="panel-title">
+          <Columns3 size={18} />
+          <h2>Produtos por etapa</h2>
+          <span className="dashboard-panel-meta">{stats.total} no total</span>
         </div>
-        <div className="dashboard-cost">
-          <span>Custo IA total</span>
-          <strong>{formatUsd(totalCost)}</strong>
-          {totalCostBrl !== null && (
-            <small>
-              {formatBrl(totalCostBrl)}
-              {runtimeStatus?.exchange.stale ? " · câmbio em cache" : ""}
-            </small>
-          )}
+        <div className="dashboard-funnel-bar" aria-hidden="true">
+          {stages.map((stage) => (
+            stats.stages[stage.key] > 0 && (
+              <span
+                key={stage.key}
+                className={`stage-${stage.key}`}
+                style={{ flexGrow: stats.stages[stage.key] }}
+              />
+            )
+          ))}
         </div>
-      </div>
-
-      <div className="dashboard-visual-grid">
-        <div className="panel dashboard-chart-panel">
-          <div className="panel-title">
-            <BadgeCheck size={18} />
-            <h2>Prontos para venda</h2>
-          </div>
-          <div className="donut-card">
-            <div className="donut-chart" style={{ "--value": `${readyPercent}%` } as React.CSSProperties}>
-              <span>{readyPercent}%</span>
-            </div>
-            <div className="donut-legend">
-              <strong>{readyCount} de {productCount}</strong>
-              <span>{pendingCount} pendente(s) de anúncio completo</span>
-            </div>
-          </div>
+        <div className="dashboard-stages">
+          {stages.map((stage) => {
+            const count = stats.stages[stage.key];
+            return (
+              <button
+                key={stage.key}
+                type="button"
+                className={`dashboard-stage stage-${stage.key}`}
+                onClick={() => onOpenProducts(stage.filters)}
+              >
+                <span className="dashboard-stage-label"><i aria-hidden="true" />{stage.label}</span>
+                <strong>{count}</strong>
+                <small>{Math.round((count / stats.total) * 100)}%</small>
+              </button>
+            );
+          })}
         </div>
-
-        <div className="panel dashboard-chart-panel">
-          <div className="panel-title">
-            <ShoppingBag size={18} />
-            <h2>Pipeline de produtos</h2>
-          </div>
-          <div className="bar-chart-list">
-            <ChartBar label="Imagens" value={imageCount} total={productCount} percent={chartImage} />
-            <ChartBar label="3MF" value={modelCount} total={productCount} percent={chartModel} />
-            <ChartBar label="Anúncios" value={readyCount} total={productCount} percent={chartReady} />
-            <ChartBar label="Exportados" value={exportedCount} total={productCount} percent={chartExported} />
-          </div>
-        </div>
-
-        <div className="panel dashboard-chart-panel">
-          <div className="panel-title">
-            <BrainCircuit size={18} />
-            <h2>Custo IA</h2>
-          </div>
-          <div className="cost-bars">
-            <CostBar label="Texto/OpenRouter" value={costSummary.openRouter} max={maxCost} />
-            <CostBar label="Imagem/Kie" value={costSummary.kie} max={maxCost} />
-            <CostBar label="Outros" value={costSummary.other} max={maxCost} />
-          </div>
-        </div>
-      </div>
-
-      <div className="dashboard-grid">
-        <SummaryItem label="Produtos" value={productCount.toString()} />
-        <SummaryItem label="Coletas" value={collectSummary.totalJobs.toString()} />
-        <SummaryItem label="Coletados" value={collectSummary.totalProducts.toString()} />
-        <SummaryItem label="Curadoria" value="Manual" />
-        <SummaryItem label="CSV exportado" value={exportedCount.toString()} />
       </div>
 
       <div className="dashboard-panels">
         <div className="panel">
           <div className="panel-title">
-            <PackageSearch size={18} />
-            <h2>Últimas coletas</h2>
+            <ListChecks size={18} />
+            <h2>O que fazer agora</h2>
           </div>
-          <div className="mini-job-list">
-            {collectJobs.length ? (
-              collectJobs.map((job) => {
-                const cost = collectJobCost(job);
-                return (
-                  <div className="mini-job" key={job.id}>
-                    <span>
-                      <strong>{job.status === "completed" ? "Concluída" : job.status === "failed" ? "Falhou" : "Em andamento"}</strong>
-                      <small>{displayText(job.message)}</small>
-                      <small>IA: {formatUsd(cost.cost)}</small>
-                    </span>
-                    <progress max={100} value={job.progress} />
-                  </div>
-                );
-              })
-            ) : (
+          <div className="dashboard-todo">
+            {readyToPublish > 0 && (
+              <button
+                type="button"
+                className="dashboard-todo-row highlight"
+                onClick={() => onOpenProducts({ status: "ready", characteristic: "all", publication: "not_listed" })}
+              >
+                <BadgeCheck size={18} />
+                <span>
+                  <strong>Prontos para publicar</strong>
+                  <small>Na etapa Pronto, ainda não exportados nem publicados</small>
+                </span>
+                <b>{readyToPublish}</b>
+                <ArrowRight size={16} />
+              </button>
+            )}
+            {attention.map((item) => (
+              <button
+                key={item.key}
+                type="button"
+                className={item.key === "file_issues" ? "dashboard-todo-row warning" : "dashboard-todo-row"}
+                onClick={() => onOpenProducts(item.filters)}
+              >
+                <AlertCircle size={18} />
+                <span>
+                  <strong>{item.label}</strong>
+                  <small>{item.hint}</small>
+                </span>
+                <b>{stats.attention[item.key]}</b>
+                <ArrowRight size={16} />
+              </button>
+            ))}
+            {!readyToPublish && !attention.length && (
               <div className="compact-empty">
-                <strong>Nenhuma coleta ainda</strong>
-                <span>As coletas recentes da loja ativa aparecerão aqui.</span>
+                <strong>Nada pendente</strong>
+                <span>Todos os produtos não publicados têm anúncio, fotos e 3D.</span>
               </div>
             )}
           </div>
@@ -4221,38 +4271,29 @@ function DashboardTab({
 
         <div className="panel">
           <div className="panel-title">
-            <Download size={18} />
-            <h2>Último CSV</h2>
+            <BrainCircuit size={18} />
+            <h2>Custo de IA</h2>
           </div>
-          {lastExport ? (
-            <div className="export-result">
-              <strong>{lastExport.count} produto(s)</strong>
-              <span>{lastExport.marketplace}</span>
-              <span>{lastExport.filename}</span>
+          <div className="dashboard-cost-figures">
+            <div>
+              <span>Total</span>
+              <strong>{formatUsd(totalCost)}</strong>
+              {toBrl(totalCost) && <small>{toBrl(totalCost)}{runtimeStatus?.exchange.stale ? " · câmbio em cache" : ""}</small>}
             </div>
-          ) : (
-            <div className="compact-empty">
-              <strong>Nenhuma exportação nesta sessão</strong>
-              <span>Selecione produtos em Produtos e use Exportar CSV.</span>
+            <div>
+              <span>Média por produto</span>
+              <strong>{formatUsd(averageCost)}</strong>
+              {toBrl(averageCost) && <small>{toBrl(averageCost)}</small>}
             </div>
-          )}
+          </div>
+          <div className="cost-bars">
+            <CostBar label="Texto (OpenRouter)" value={costByProvider.openrouter} max={maxCost} />
+            <CostBar label="Imagem (Kie)" value={costByProvider.kie} max={maxCost} />
+            {costByProvider.other > 0 && <CostBar label="Outros" value={costByProvider.other} max={maxCost} />}
+          </div>
         </div>
       </div>
     </section>
-  );
-}
-
-function ChartBar({ label, percent, total, value }: { label: string; percent: number; total: number; value: number }) {
-  return (
-    <div className="chart-bar-row">
-      <div>
-        <strong>{label}</strong>
-        <span>{value}/{total}</span>
-      </div>
-      <div className="chart-bar-track">
-        <span style={{ width: `${Math.min(100, Math.max(0, percent))}%` }} />
-      </div>
-    </div>
   );
 }
 
@@ -4694,8 +4735,10 @@ const PRODUCT_QUICK_FILTERS: {
   characteristic: ProductFilters["characteristic"];
 }[] = [
   { key: "without_listing", label: "Sem anúncio", status: "all", characteristic: "without_listing" },
-  { key: "without_image", label: "Sem fotos", status: "all", characteristic: "without_image" },
+  { key: "draft_listing", label: "Rascunho", status: "all", characteristic: "draft_listing" },
+  { key: "without_ai_images", label: "Sem fotos IA", status: "all", characteristic: "without_ai_images" },
   { key: "without_model", label: "Sem 3D", status: "all", characteristic: "without_model" },
+  { key: "file_issues", label: "Arquivos com problema", status: "all", characteristic: "file_issues" },
   { key: "ready", label: "Prontos", status: "ready", characteristic: "all" },
   { key: "exported", label: "Exportados", status: "exported", characteristic: "all" },
 ];

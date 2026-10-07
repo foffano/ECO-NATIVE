@@ -12,6 +12,7 @@ from collections.abc import Iterable
 from threading import Lock
 
 from backend.app.db.models import Asset, Product
+from backend.app.services.product_health import cached_product_file_warnings
 
 CHARACTERISTICS = {
     "all",
@@ -23,6 +24,9 @@ CHARACTERISTICS = {
     "without_model",
     "listed",
     "not_listed",
+    "draft_listing",
+    "without_ai_images",
+    "file_issues",
 }
 PUBLICATIONS = {"all", "listed", "not_listed"}
 PREVIOUS_VERSION_PREFIX = "previous_"
@@ -44,6 +48,24 @@ def is_model_asset(asset: Asset) -> bool:
 
 def has_listing(product: Product) -> bool:
     return bool(product.listing.title or product.listing.description)
+
+
+def has_draft_listing(product: Product) -> bool:
+    """Started but missing the title or the description."""
+    return has_listing(product) and not (product.listing.title and product.listing.description)
+
+
+def has_ai_images(product: Product) -> bool:
+    return any(asset.kind.startswith(("generated_", "color_")) for asset in product.assets)
+
+
+def _status(product: Product) -> str:
+    return str(product.status.value if hasattr(product.status, "value") else product.status)
+
+
+def board_stage(product: Product) -> str:
+    """The board column: published products leave their status column."""
+    return "listed" if is_listed(product) else _status(product)
 
 
 def is_listed(product: Product) -> bool:
@@ -101,6 +123,12 @@ def product_matches(product: Product, *, query: str = "", status: str = "all", c
         return is_listed(product)
     if characteristic == "not_listed":
         return not is_listed(product)
+    if characteristic == "draft_listing":
+        return has_draft_listing(product)
+    if characteristic == "without_ai_images":
+        return not has_ai_images(product)
+    if characteristic == "file_issues":
+        return bool(cached_product_file_warnings(product))
     return True
 
 
@@ -163,12 +191,25 @@ def catalog_stats(products: list[Product]) -> dict:
             provider = str(event.get("provider") or "").lower()
             key = "openrouter" if "openrouter" in provider else "kie" if "kie" in provider else "other"
             by_provider[key] += _event_cost(event)
+    stages = {"collected": 0, "in_edit": 0, "ready": 0, "exported": 0, "listed": 0}
+    for product in products:
+        stage = board_stage(product)
+        if stage in stages:
+            stages[stage] += 1
+    # Only products still to be published need work.
+    pending = [product for product in products if not is_listed(product)]
+    costs = [product_cost_total(product) for product in products]
     return {
         "total": len(products),
-        "ready": sum(1 for product in products if product.listing.title and product.listing.description),
-        "with_image": sum(1 for product in products if any(is_image_asset(asset) for asset in product.assets)),
-        "with_model": sum(1 for product in products if any(is_model_asset(asset) for asset in product.assets)),
-        "exported": sum(1 for product in products if product.status == "exported"),
-        "ai_cost_usd": sum(product_cost_total(product) for product in products),
+        "stages": stages,
+        "attention": {
+            "without_listing": sum(1 for product in pending if not has_listing(product)),
+            "draft_listing": sum(1 for product in pending if has_draft_listing(product)),
+            "without_ai_images": sum(1 for product in pending if not has_ai_images(product)),
+            "without_model": sum(1 for product in pending if not any(is_model_asset(asset) for asset in product.assets)),
+            "file_issues": sum(1 for product in products if cached_product_file_warnings(product)),
+        },
+        "ai_cost_usd": sum(costs),
+        "ai_cost_products": sum(1 for cost in costs if cost > 0),
         "ai_cost_by_provider": by_provider,
     }

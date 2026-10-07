@@ -1,6 +1,6 @@
 from fastapi.testclient import TestClient
 
-from backend.app.db.models import Asset, Job, Listing, Product, Project, StoreProfile
+from backend.app.db.models import Asset, Job, Listing, Product, ProductStatus, Project, StoreProfile
 from backend.app.db.store import store
 
 
@@ -69,6 +69,9 @@ def test_filters_run_on_the_server():
     assert len(names(characteristic="with_image")) == 9
     assert len(names(characteristic="without_listing")) == 6
     assert names(status="exported") == []
+    # Odd indexes have only a title, multiples of 4 only a description.
+    assert len(names(characteristic="draft_listing")) == 12 + 7
+    assert len(names(characteristic="without_ai_images")) == 25
     page = client.get("/api/products/page", params={"characteristic": "with_listing"}).json()
     assert page["total"] == 19 and page["with_title"] == 12
     assert client.get("/api/products/page", params={"characteristic": "nada"}).status_code == 422
@@ -94,7 +97,12 @@ def test_stats_and_detail():
     client, other_client = client_for(shop, other)
     stats = client.get("/api/products/stats").json()
     assert stats["total"] == 4
-    assert stats["with_image"] == 2
+    assert stats["stages"] == {"collected": 4, "in_edit": 0, "ready": 0, "exported": 0, "listed": 0}
+    # 0: description only; 1 and 3: title only; 2: nothing.
+    assert stats["attention"]["without_listing"] == 1
+    assert stats["attention"]["draft_listing"] == 3
+    assert stats["attention"]["without_ai_images"] == 4
+    assert stats["ai_cost_products"] == 4
     assert stats["ai_cost_by_provider"] == {"openrouter": 2.0, "kie": 4.0, "other": 0.0}
     assert stats["ai_cost_usd"] == 6.0
 
@@ -104,6 +112,17 @@ def test_stats_and_detail():
 
     assert other_client.get(f"/api/products/{product.id}").status_code == 404
     assert other_client.get("/api/products/page").json()["total"] == 0
+
+
+def test_stats_stages_follow_the_board():
+    shop, _ = setup_catalog(8)
+    products = store.snapshot().products
+    store.mutate(lambda state: [setattr(product, "status", ProductStatus.ready) for product in state.products[:3]])
+    client = client_for(shop)
+    stats = client.get("/api/products/stats").json()
+    listed = sum(1 for product in products if product.metadata.get("listed"))
+    assert stats["stages"]["listed"] == listed == 1
+    assert sum(stats["stages"].values()) == 8
 
 
 def test_jobs_since_returns_only_recent_changes():
