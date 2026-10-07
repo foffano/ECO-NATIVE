@@ -1,6 +1,6 @@
 from fastapi import HTTPException, Request
 
-from backend.app.db.models import Product, Project, StudioState
+from backend.app.db.models import Product, StudioState
 
 
 def current_store_id(request: Request) -> str:
@@ -26,12 +26,6 @@ def store_project_ids(state: StudioState, store_profile_id: str) -> set[str]:
         if project.store_profile_id == store_profile_id
         or (project.store_profile_id is None and profile is not None and project.store == profile.name)
     }
-
-
-def require_project(state: StudioState, project_id: str, store_profile_id: str) -> Project:
-    if project_id not in store_project_ids(state, store_profile_id):
-        raise HTTPException(status_code=404, detail="Projeto não encontrado")
-    return next(project for project in state.projects if project.id == project_id)
 
 
 def require_product(state: StudioState, product_id: str, store_profile_id: str) -> Product:

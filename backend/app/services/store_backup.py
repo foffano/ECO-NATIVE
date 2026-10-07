@@ -263,6 +263,13 @@ def read_manifest(zip_bytes: bytes) -> tuple[ZipFile, dict]:
     return archive, manifest
 
 
+def _unify_restored_projects() -> None:
+    # Backups from before the single catalog per store may bring several projects.
+    from backend.app.services.store_catalog import unify_store_projects
+
+    unify_store_projects()
+
+
 def restore_app_backup(zip_bytes: bytes) -> dict:
     archive, manifest = read_manifest(zip_bytes)
     try:
@@ -284,6 +291,7 @@ def restore_app_backup(zip_bytes: bytes) -> dict:
 
         remap_restored_paths(state)
         store.replace(state)
+        _unify_restored_projects()
     except (BadZipFile, json.JSONDecodeError, ValueError) as exc:
         if isinstance(exc, ValueError) and "Versao" in str(exc):
             raise
@@ -339,6 +347,7 @@ def restore_store_backup(zip_bytes: bytes) -> dict:
         state.jobs = upsert_many(state.jobs, restored_jobs)
 
     store.mutate(apply)
+    _unify_restored_projects()
 
     return {
         "kind": "legacy_store",

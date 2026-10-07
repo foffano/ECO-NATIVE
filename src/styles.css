@@ -398,134 +398,12 @@ button {
   object-fit: cover;
 }
 
-.project-picker.inline {
-  width: 100%;
-}
-
-.project-picker-control {
-  position: relative;
-  min-width: 0;
-}
-
-.project-picker-button {
-  display: flex;
-  width: 100%;
-  min-height: 39px;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  padding: 8px 12px;
-  color: var(--eco-forest-2);
-  background: #fff;
-  border: 1px solid var(--eco-line);
-  border-radius: 10px;
-  font-weight: 700;
-  text-align: left;
-}
-
-.project-picker-button:disabled {
-  opacity: 0.65;
-  cursor: not-allowed;
-}
-
-.project-picker-button span {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.project-picker-button svg:last-child {
-  flex: 0 0 auto;
-  color: var(--eco-muted);
-  transition: transform 160ms ease;
-}
-
-.project-picker-button[aria-expanded="true"] svg:last-child {
-  transform: rotate(180deg);
-}
-
-.project-picker-menu {
-  position: absolute;
-  z-index: 30;
-  top: calc(100% + 6px);
-  left: 0;
-  right: 0;
-  display: grid;
-  gap: 4px;
-  max-height: 280px;
-  overflow: auto;
-  padding: 6px;
-  background: #fff;
-  border: 1px solid var(--eco-line);
-  border-radius: 12px;
-  box-shadow: 0 16px 40px rgba(18, 38, 32, 0.14);
-}
-
-.project-picker-option {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
-  gap: 10px;
-  align-items: center;
-  width: 100%;
-  padding: 8px 10px;
-  color: var(--eco-forest-2);
-  background: transparent;
-  border: 0;
-  border-radius: 8px;
-  text-align: left;
-}
-
-.project-picker-option:hover,
-.project-picker-option.active {
-  background: var(--eco-soft-2);
-}
-
-.project-picker-option-copy {
-  display: grid;
-  gap: 2px;
-  min-width: 0;
-}
-
-.project-picker-option-copy strong {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 13px;
-}
-
-.project-picker-option-copy small {
-  color: var(--eco-muted);
-  font-size: 11px;
-}
-
-.project-picker-option-icon {
-  display: grid;
-  place-items: center;
-  width: 28px;
-  height: 28px;
-  border-radius: 8px;
-  background: var(--eco-soft);
-  color: var(--eco-forest);
-}
-
-.project-active-field small {
-  color: var(--eco-muted);
-  font-size: 12px;
-}
-
 .panel-title-actions {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
   align-items: center;
   margin-left: auto;
-}
-
-.panel-title-actions .project-picker.inline {
-  min-width: 220px;
-  max-width: 320px;
 }
 
 .panel-title-actions .panel-title-action {
@@ -5888,4 +5766,8 @@ pre {
 
 .jobs-panel .link-button:hover {
   text-decoration: underline;
+}
+
+.collect-catalog-note {
+  margin: 0 0 14px;
 }

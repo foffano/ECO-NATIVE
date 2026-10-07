@@ -13,7 +13,8 @@ from backend.app.services.makerworld_session import (
     open_login_session,
     send_login_session_input,
 )
-from backend.app.services.authorization import current_store_id, require_product, require_project, store_project_ids
+from backend.app.services.authorization import current_store_id, require_product, store_project_ids
+from backend.app.services.store_catalog import ensure_store_catalog
 from backend.app.services.usage_limits import enforce_quota
 from backend.app.services.job_queue import admission_lock, job_queue
 from backend.app.core.maintenance import maintenance_requested
@@ -22,7 +23,8 @@ router = APIRouter()
 
 
 class CollectRequest(BaseModel):
-    project_id: str
+    # Filled by the server with the store's catalog.
+    project_id: str = ""
     store_profile_id: str | None = None
     keyword: str = ""
     urls: list[str] = []
@@ -145,7 +147,8 @@ def collect_products(payload: CollectRequest, request: Request) -> Job:
         store_id = current_store_id(request)
         enforce_quota(state, store_id, "collect_monthly")
         enforce_quota(state, store_id, "ai_cost_usd_monthly")
-        project = require_project(state, payload.project_id, store_id)
+        project = ensure_store_catalog(store_id)
+        payload.project_id = project.id
         payload.store_profile_id = project.store_profile_id
         label = payload.keyword.strip() or (f"{len(payload.urls)} link(s)" if payload.urls else "")
         job = Job(type="collect_products", project_id=payload.project_id, metadata={"label": label} if label else {})

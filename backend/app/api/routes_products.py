@@ -49,7 +49,8 @@ from backend.app.services.production_cost import (
 from backend.app.services.source_url_blacklist import block_product_source_url
 from backend.app.services.sku import ensure_color_skus, ensure_product_sku, variation_sku
 from backend.app.services.store_profiles import get_store_profile
-from backend.app.services.authorization import current_store_id, require_project, store_project_ids
+from backend.app.services.authorization import current_store_id, store_project_ids
+from backend.app.services.store_catalog import ensure_store_catalog
 from backend.app.services.image_versions import replace_with_new_version
 
 router = APIRouter()
@@ -77,7 +78,6 @@ def _unique_slug(base: str, taken: set[str]) -> str:
 
 
 class ProductCreate(BaseModel):
-    project_id: str
     name: str
     source_url: str | None = None
     tags: list[str] = []
@@ -168,13 +168,8 @@ def _public_product(product: Product, *, summary: bool = False) -> Product:
 
 
 @router.get("")
-def list_products(request: Request, project_id: str | None = None) -> list[Product]:
-    products = ensure_skus_for_state_products()
-    state = store.snapshot()
-    allowed_projects = store_project_ids(state, current_store_id(request))
-    products = [p for p in products if p.project_id in allowed_projects]
-    if project_id:
-        products = [p for p in products if p.project_id == project_id]
+def list_products(request: Request) -> list[Product]:
+    products = _store_products(request)
     return sorted((_public_product(p, summary=True) for p in products), key=lambda p: p.created_at, reverse=True)
 
 
@@ -191,7 +186,6 @@ def list_products_page(
     status: str = "all",
     characteristic: str = "all",
     publication: str = "all",
-    project_id: str | None = None,
     limit: int = Query(40, ge=1, le=200),
     cursor: str | None = None,
 ) -> dict:
@@ -204,8 +198,6 @@ def list_products_page(
         raise HTTPException(status_code=422, detail="Publicação inválida")
     products = _store_products(request)
     store_total = len(products)
-    if project_id:
-        products = [product for product in products if product.project_id == project_id]
     matched = [
         product
         for product in products
@@ -247,10 +239,10 @@ def get_product(product_id: str, request: Request) -> Product:
 
 @router.post("")
 def create_product(payload: ProductCreate, request: Request) -> Product:
+    project = ensure_store_catalog(current_store_id(request))
     state = store.load()
-    project = require_project(state, payload.project_id, current_store_id(request))
-    store_profile = get_store_profile(project.store_profile_id if project else None)
-    product = Product(**payload.model_dump())
+    store_profile = get_store_profile(project.store_profile_id)
+    product = Product(**payload.model_dump(), project_id=project.id)
     ensure_product_sku(product, state.products, project, store_profile)
     return _public_product(store.upsert_product(product))
 

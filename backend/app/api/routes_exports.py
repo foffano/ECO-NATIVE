@@ -11,7 +11,7 @@ from backend.app.core.paths import DATA_DIR
 from backend.app.db.models import Marketplace
 from backend.app.services.exporter import export_marketplace_csv, export_shopee_template
 from backend.app.db.store import store
-from backend.app.services.authorization import current_store_id, require_project, store_project_ids
+from backend.app.services.authorization import current_store_id, store_project_ids
 from backend.app.services.shopee_template import ShopeeTemplateError, validate_template
 
 router = APIRouter()
@@ -22,7 +22,6 @@ XLSX_MEDIA_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.s
 
 
 class ExportRequest(BaseModel):
-    project_id: str
     marketplace: Marketplace = Marketplace.shopee
     product_ids: list[str] = []
 
@@ -32,14 +31,15 @@ def shopee_template_path(store_id: str) -> Path:
 
 
 def _store_product_ids(payload: ExportRequest, store_id: str) -> list[str]:
-    """Checks the project and keeps only products of this store."""
+    """The requested products of this store; none requested means the whole catalog."""
     state = store.snapshot()
-    require_project(state, payload.project_id, store_id)
-    if not payload.product_ids:
-        return []
     allowed_projects = store_project_ids(state, store_id)
-    allowed = {product.id for product in state.products if product.project_id in allowed_projects}
-    product_ids = [product_id for product_id in payload.product_ids if product_id in allowed]
+    allowed = [product.id for product in state.products if product.project_id in allowed_projects]
+    if not payload.product_ids:
+        product_ids = allowed
+    else:
+        allowed_set = set(allowed)
+        product_ids = [product_id for product_id in payload.product_ids if product_id in allowed_set]
     if not product_ids:
         raise HTTPException(status_code=400, detail="Nenhum produto valido para exportar")
     return product_ids
@@ -56,7 +56,7 @@ def _export_headers(result: dict) -> dict[str, str]:
 def create_export(payload: ExportRequest, request: Request) -> FileResponse:
     product_ids = _store_product_ids(payload, current_store_id(request))
     result = export_marketplace_csv(
-        project_id=payload.project_id,
+        project_id="",
         marketplace=payload.marketplace,
         product_ids=product_ids,
     )
@@ -111,7 +111,7 @@ def create_shopee_xlsx(payload: ExportRequest, request: Request) -> FileResponse
     if not template.is_file():
         raise HTTPException(status_code=409, detail="Envie primeiro o template de envio em massa baixado da Shopee")
     try:
-        result = export_shopee_template(template, payload.project_id, product_ids)
+        result = export_shopee_template(template, "", product_ids)
     except ShopeeTemplateError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
     if not result:

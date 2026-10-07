@@ -186,16 +186,6 @@ type ProductionCostBreakdown = {
   cost_per_hour_brl: number | null;
 };
 
-type Project = {
-  id: string;
-  name: string;
-  store: string;
-  store_profile_id?: string | null;
-  marketplace: Marketplace;
-  niche: string;
-  created_at: string;
-};
-
 type Listing = {
   title: string;
   description: string;
@@ -310,7 +300,6 @@ type BackupRestoreSummary = {
   kind?: "full_app" | "legacy_store";
   store_profiles: number;
   ai_profiles: number;
-  projects: number;
   products: number;
   jobs: number;
   blocked_source_urls?: number;
@@ -470,7 +459,6 @@ type CatalogStats = {
   exported: number;
   ai_cost_usd: number;
   ai_cost_by_provider: { openrouter: number; kie: number; other: number };
-  by_project: Record<string, number>;
 };
 
 const PRODUCT_PAGE_SIZE = 40;
@@ -1985,7 +1973,6 @@ const tabInfo: Record<AppTab, { title: string; eyebrow: string }> = {
 }
 
 function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<void> }) {
-  const [projects, setProjects] = useState<Project[]>([]);
   const [productList, setProductList] = useState<ProductListState>(EMPTY_PRODUCT_LIST);
   // Full products fetched by id (open details, recently changed). The list
   // holds lighter summaries, so details win when both have the product.
@@ -2003,9 +1990,7 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
   const [settings, setSettings] = useState<SettingsPayload | null>(null);
   const [runtimeStatus, setRuntimeStatus] = useState<RuntimeStatus | null>(null);
   const [activeTab, setActiveTab] = useState<AppTab>("dashboard");
-  const [activeProjectId, setActiveProjectId] = useState<string>("");
   const [selectedProductId, setSelectedProductId] = useState<string>("");
-  const [projectName, setProjectName] = useState("Campanha utilidades casa");
   const [keyword, setKeyword] = useState("organizador cozinha");
   const [manualUrl, setManualUrl] = useState("");
   const [collectLimit, setCollectLimit] = useState(8);
@@ -2067,23 +2052,8 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
   }, []);
 
   const activeStoreProfile = storeProfiles.find((profile) => profile.id === activeStoreProfileId) ?? storeProfiles[0];
-  const activeStoreProjects = useMemo(() => {
-    if (!activeStoreProfile) return [];
-    return projects.filter((project) =>
-      project.store_profile_id
-        ? project.store_profile_id === activeStoreProfile.id
-        : project.store === activeStoreProfile.name,
-    );
-  }, [projects, activeStoreProfile?.id, activeStoreProfile?.name]);
-  const activeStoreProjectIds = useMemo(
-    () => new Set(activeStoreProjects.map((project) => project.id)),
-    [activeStoreProjects],
-  );
-  const activeProject = activeStoreProjects.find((project) => project.id === activeProjectId) ?? activeStoreProjects[0];
-  const storeJobs = useMemo(
-    () => jobs.filter((job) => !job.project_id || activeStoreProjectIds.has(job.project_id)),
-    [jobs, activeStoreProjectIds],
-  );
+  // The server only returns this store's jobs.
+  const storeJobs = jobs;
   const [debouncedProductQuery, setDebouncedProductQuery] = useState(productFilters.query);
   useEffect(() => {
     const timeout = window.setTimeout(() => setDebouncedProductQuery(productFilters.query), 300);
@@ -2200,8 +2170,7 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
   }, [listFilters, activeStoreProfileId]);
 
   async function refresh() {
-    const [nextProjects, nextStats, nextJobs, nextSettings, nextStoreProfiles, nextImageOptions, nextRuntimeStatus] = await Promise.all([
-      api<Project[]>("/api/projects"),
+    const [nextStats, nextJobs, nextSettings, nextStoreProfiles, nextImageOptions, nextRuntimeStatus] = await Promise.all([
       api<CatalogStats>("/api/products/stats"),
       api<Job[]>("/api/jobs"),
       api<SettingsPayload>("/api/settings"),
@@ -2209,21 +2178,11 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
       api<ImageOptions>("/api/image-options"),
       api<RuntimeStatus>("/api/runtime/status"),
     ]);
-    setProjects(nextProjects);
     setCatalogStats(nextStats);
     setJobs(nextJobs);
     setStoreProfiles(nextStoreProfiles);
     const nextStore = nextStoreProfiles.find((profile) => profile.id === activeStoreProfileId) ?? nextStoreProfiles[0];
     if (nextStore && !activeStoreProfileId) setActiveStoreProfileId(nextStore.id);
-    if (nextStore) {
-      const nextStoreProjects = nextProjects.filter((project) =>
-        project.store_profile_id ? project.store_profile_id === nextStore.id : project.store === nextStore.name,
-      );
-      if ((!activeProjectId || !nextStoreProjects.some((project) => project.id === activeProjectId)) && nextStoreProjects[0]) {
-        setActiveProjectId(nextStoreProjects[0].id);
-        setProjectName(nextStoreProjects[0].name);
-      }
-    }
     if (nextStore && (!storeProfileDraft || nextStore.id === activeStoreProfileId)) setStoreProfileDraft(nextStore);
     setSettings(nextSettings);
     setRuntimeStatus(nextRuntimeStatus);
@@ -2234,7 +2193,6 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
     setCodexBinDraft(nextSettings.integrations.codex_bin || "");
     const isCleanDefaultWorkspace =
       (nextStoreProfiles.length === 0 || (nextStoreProfiles.length === 1 && nextStoreProfiles[0]?.name === "Loja principal")) &&
-      nextProjects.length === 0 &&
       nextStats.total === 0;
     if (isCleanDefaultWorkspace && window.localStorage.getItem(ONBOARDING_COMPLETE_KEY) !== "true") {
       setOnboardingOpen(true);
@@ -2247,13 +2205,11 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
   }
 
   async function refreshCatalog() {
-    const [nextProjects, nextJobs] = await Promise.all([
-      api<Project[]>("/api/projects"),
+    const [nextJobs] = await Promise.all([
       api<Job[]>("/api/jobs"),
       reloadProductList(true),
       refreshStats(),
     ]);
-    setProjects(nextProjects);
     setJobs(nextJobs);
   }
 
@@ -2386,14 +2342,6 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
     scheduleStatsRefresh();
   }
 
-  function patchProject(updated: Project) {
-    setProjects((current) => {
-      const exists = current.some((project) => project.id === updated.id);
-      if (!exists) return [...current, updated];
-      return current.map((project) => (project.id === updated.id ? updated : project));
-    });
-  }
-
   function patchStoreProfile(updated: StoreProfile) {
     setStoreProfiles((current) => {
       const exists = current.some((profile) => profile.id === updated.id);
@@ -2504,12 +2452,12 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
   }, [selectedProduct?.id, selectedProduct?.name, listingFingerprint(selectedProduct?.listing)]);
 
   useEffect(() => {
-    if (!activeProject?.id) {
+    if (!activeStoreProfile?.id) {
       setBlockedSourceUrls([]);
       return undefined;
     }
     let cancelled = false;
-    api<BlockedSourceUrl[]>(`/api/projects/${activeProject.id}/blocked-urls`)
+    api<BlockedSourceUrl[]>("/api/blocked-urls")
       .then((entries) => {
         if (!cancelled) setBlockedSourceUrls(entries);
       })
@@ -2519,7 +2467,7 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
     return () => {
       cancelled = true;
     };
-  }, [activeProject?.id, catalogStats?.total]);
+  }, [activeStoreProfile?.id, catalogStats?.total]);
 
   useEffect(() => {
     if (!activeStoreProfile?.id) {
@@ -2547,10 +2495,9 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
   }, [activeStoreProfile?.id, catalogStats?.total]);
 
   async function removeBlockedUrl(entryId: string) {
-    if (!activeProject?.id) return;
     try {
       setBusy(true);
-      await api(`/api/projects/${activeProject.id}/blocked-urls/${entryId}`, { method: "DELETE" });
+      await api(`/api/blocked-urls/${entryId}`, { method: "DELETE" });
       setBlockedSourceUrls((current) => current.filter((entry) => entry.id !== entryId));
       setNotice("URL removida da lista de bloqueio. Ela pode ser coletada novamente.");
     } catch (error) {
@@ -2750,31 +2697,8 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
     });
   }
 
-  function createProject() {
-    return (async () => {
-      const created = await runAction("Criando projeto", async () => {
-        const project = await api<Project>("/api/projects", {
-          method: "POST",
-          body: JSON.stringify({
-            name: projectName,
-            store: activeStoreProfile?.name ?? "Loja principal",
-            store_profile_id: activeStoreProfile?.id ?? null,
-            marketplace: activeStoreProfile?.marketplace ?? "shopee",
-            niche: activeStoreProfile?.niche ?? "Utilidades para casa",
-          }),
-        });
-        patchProject(project);
-        return project;
-      }, { refresh: false, blockUi: true, notifySuccess: true });
-      if (created) selectProject(created.id);
-      return created;
-    })();
-  }
-
   function collectProducts() {
-    if (!activeProject) return Promise.resolve();
     return runCollect("Coletando produtos", {
-      project_id: activeProject.id,
       store_profile_id: activeStoreProfile?.id ?? null,
       keyword,
       urls: [],
@@ -2786,7 +2710,6 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
   }
 
   function extractSelectedLinks() {
-    if (!activeProject) return Promise.resolve();
     const urls = manualUrl
       .split(/\s|,|\n/)
       .map((url) => url.trim())
@@ -2796,7 +2719,6 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
       return Promise.resolve();
     }
     return runCollect("Extraindo links selecionados", {
-      project_id: activeProject.id,
       store_profile_id: activeStoreProfile?.id ?? null,
       keyword: "",
       urls,
@@ -2925,21 +2847,7 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
   function selectStoreProfile(profileId: string) {
     setActiveStoreProfileId(profileId);
     const profile = storeProfiles.find((item) => item.id === profileId);
-    if (profile) {
-      setStoreProfileDraft(profile);
-      const nextProject = projects.find((project) =>
-        project.store_profile_id ? project.store_profile_id === profile.id : project.store === profile.name,
-      );
-      selectProject(nextProject?.id ?? "", { syncName: Boolean(nextProject) });
-    }
-  }
-
-  function selectProject(projectId: string, options?: { syncName?: boolean }) {
-    setActiveProjectId(projectId);
-    if (options?.syncName !== false) {
-      const project = projects.find((item) => item.id === projectId);
-      if (project) setProjectName(project.name);
-    }
+    if (profile) setStoreProfileDraft(profile);
     setSelectedProductId("");
     setSelectedProductIds([]);
     setDetailsOpen(false);
@@ -3051,7 +2959,6 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
       setDetailsOpen(false);
       const restoredParts = [
         `${summary.products} produto(s)`,
-        `${summary.projects} projeto(s)`,
         `${summary.store_profiles} loja(s)`,
         summary.filament_spools ? `${summary.filament_spools} filamento(s)` : null,
         `${summary.files} arquivo(s)`,
@@ -3361,10 +3268,6 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
   }
 
   async function createManualProduct(name: string, sourceUrl?: string) {
-    if (!activeProject?.id) {
-      setNotice("Selecione um projeto antes de criar um produto.");
-      return undefined;
-    }
     const trimmedName = name.trim();
     if (!trimmedName) {
       setNotice("Informe o nome do produto.");
@@ -3374,7 +3277,6 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
       const created = await api<Product>("/api/products", {
         method: "POST",
         body: JSON.stringify({
-          project_id: activeProject.id,
           name: trimmedName,
           source_url: sourceUrl?.trim() || null,
         }),
@@ -3587,8 +3489,7 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
       credentials: "same-origin",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        project_id: activeProject?.id ?? findProduct(productIds[0])?.project_id,
-        marketplace: activeStoreProfile?.marketplace ?? activeProject?.marketplace ?? "shopee",
+        marketplace: activeStoreProfile?.marketplace ?? "shopee",
         product_ids: productIds,
       }),
     });
@@ -3614,7 +3515,7 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
   }
 
   function exportCsv(productIds = selectedProductIds) {
-    if (!activeProject && !listedProducts.length) return Promise.resolve();
+    if (!listedProducts.length) return Promise.resolve();
     const readySelectedIds = readyExportIds(productIds);
     if (!readySelectedIds) return Promise.resolve();
     return runAction(
@@ -3642,7 +3543,7 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
   // Fills the store's own Shopee mass-upload template. Without one yet, the
   // file picker opens right away and the export continues after the upload.
   function exportShopeeSheet(productIds = selectedProductIds) {
-    if (!activeProject && !listedProducts.length) return Promise.resolve();
+    if (!listedProducts.length) return Promise.resolve();
     const readySelectedIds = readyExportIds(productIds);
     if (!readySelectedIds) return Promise.resolve();
     const picked = shopeeTemplate?.configured ? null : pickFile(".xlsx");
@@ -3711,14 +3612,12 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
             jobs={storeJobs}
             lastExport={lastExport}
             stats={catalogStats}
-            projects={activeStoreProjects}
             runtimeStatus={runtimeStatus}
           />
         )}
 
         {activeTab === "collect" && (
           <CollectTab
-            activeProject={activeProject}
             activeStoreProfile={activeStoreProfile}
             busy={busy || collectRunning}
             jobs={storeJobs}
@@ -3726,21 +3625,16 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
             limit={collectLimit}
             loginStatus={makerWorldLogin}
             manualUrl={manualUrl}
-            productCount={activeProject ? catalogStats?.by_project[activeProject.id] ?? 0 : 0}
-            projectName={projectName}
-            projects={activeStoreProjects}
+            productCount={catalogStats?.total ?? 0}
             scrolls={collectScrolls}
             onCollect={collectProducts}
             onExtractSelectedLinks={extractSelectedLinks}
-            onCreateProject={createProject}
             onCloseLogin={closeMakerWorldLogin}
             onKeywordChange={setKeyword}
             onLimitChange={setCollectLimit}
             onOpenLogin={openMakerWorldLogin}
             onManualUrlChange={setManualUrl}
-            onProjectNameChange={setProjectName}
             onScrollsChange={setCollectScrolls}
-            onSelectProject={selectProject}
             blockedSourceUrls={blockedSourceUrls}
             onRemoveBlockedUrl={removeBlockedUrl}
           />
@@ -3748,7 +3642,6 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
 
         {activeTab === "products" && (
           <ProductsTab
-            activeProject={activeProject}
             batchProgress={batchProgress}
             busy={busy}
             imageOptions={imageOptions}
@@ -3814,8 +3707,6 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
               setDetailsOpen(true);
             }}
             onSelectProduct={setSelectedProductId}
-            projects={activeStoreProjects}
-            onSelectProject={selectProject}
             onProductsChanged={() => void refreshProducts()}
           />
         )}
@@ -4529,14 +4420,12 @@ function DashboardTab({
   jobs,
   lastExport,
   stats,
-  projects,
   runtimeStatus,
 }: {
   activeStoreProfile?: StoreProfile;
   jobs: Job[];
   lastExport: { filename: string; count: number; marketplace: string } | null;
   stats: CatalogStats | null;
-  projects: Project[];
   runtimeStatus: RuntimeStatus | null;
 }) {
   // Counted on the server, so the dashboard never needs the whole catalog.
@@ -4627,7 +4516,6 @@ function DashboardTab({
       </div>
 
       <div className="dashboard-grid">
-        <SummaryItem label="Projetos" value={projects.length.toString()} />
         <SummaryItem label="Produtos" value={productCount.toString()} />
         <SummaryItem label="Coletas" value={collectSummary.totalJobs.toString()} />
         <SummaryItem label="Coletados" value={collectSummary.totalProducts.toString()} />
@@ -4807,92 +4695,7 @@ function StorePicker({
   );
 }
 
-function ProjectPicker({
-  activeProject,
-  projects,
-  onChange,
-  variant = "inline",
-}: {
-  activeProject?: Project;
-  projects: Project[];
-  onChange: (projectId: string) => void;
-  variant?: "inline" | "sidebar";
-}) {
-  const [open, setOpen] = useState(false);
-  const pickerRef = useRef<HTMLDivElement | null>(null);
-
-  useEffect(() => {
-    if (!open) return;
-    function handleDocumentClick(event: MouseEvent) {
-      if (!pickerRef.current?.contains(event.target as Node)) setOpen(false);
-    }
-    function handleEscape(event: KeyboardEvent) {
-      if (event.key === "Escape") setOpen(false);
-    }
-    document.addEventListener("mousedown", handleDocumentClick);
-    document.addEventListener("keydown", handleEscape);
-    return () => {
-      document.removeEventListener("mousedown", handleDocumentClick);
-      document.removeEventListener("keydown", handleEscape);
-    };
-  }, [open]);
-
-  return (
-    <div className={variant === "sidebar" ? "project-picker sidebar" : "project-picker inline"} ref={pickerRef}>
-      <div className="project-picker-control">
-        <button
-          className="project-picker-button"
-          type="button"
-          onClick={() => setOpen((value) => !value)}
-          aria-expanded={open}
-          disabled={!projects.length}
-        >
-          <FolderOpen size={16} aria-hidden="true" />
-          <span>{activeProject?.name ?? (projects.length ? "Selecionar projeto" : "Nenhum projeto")}</span>
-          <ChevronDown size={16} aria-hidden="true" />
-        </button>
-        {open && projects.length > 0 && (
-          <div className="project-picker-menu" role="listbox">
-            {projects.map((project) => {
-              const selected = project.id === activeProject?.id;
-              return (
-                <button
-                  className={selected ? "project-picker-option active" : "project-picker-option"}
-                  key={project.id}
-                  type="button"
-                  role="option"
-                  aria-selected={selected}
-                  onClick={() => {
-                    onChange(project.id);
-                    setOpen(false);
-                  }}
-                >
-                  <span className="project-picker-option-icon" aria-hidden="true">
-                    <FolderOpen size={15} />
-                  </span>
-                  <span className="project-picker-option-copy">
-                    <strong>{project.name}</strong>
-                    <small>{formatProjectDate(project.created_at)}</small>
-                  </span>
-                  {selected && <Check size={15} aria-hidden="true" />}
-                </button>
-              );
-            })}
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
-function formatProjectDate(value: string) {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return "Projeto";
-  return date.toLocaleDateString("pt-BR", { day: "2-digit", month: "short", year: "numeric" });
-}
-
 function CollectTab({
-  activeProject,
   activeStoreProfile,
   busy,
   jobs,
@@ -4901,24 +4704,18 @@ function CollectTab({
   loginStatus,
   manualUrl,
   productCount,
-  projectName,
-  projects,
   scrolls,
   onCollect,
   onCloseLogin,
-  onCreateProject,
   onExtractSelectedLinks,
   onKeywordChange,
   onLimitChange,
   onOpenLogin,
   onManualUrlChange,
-  onProjectNameChange,
   onScrollsChange,
-  onSelectProject,
   blockedSourceUrls,
   onRemoveBlockedUrl,
 }: {
-  activeProject?: Project;
   activeStoreProfile?: StoreProfile;
   busy: boolean;
   jobs: Job[];
@@ -4927,20 +4724,15 @@ function CollectTab({
   loginStatus: MakerWorldLoginStatus | null;
   manualUrl: string;
   productCount: number;
-  projectName: string;
-  projects: Project[];
   scrolls: number;
   onCollect: () => void;
   onCloseLogin: () => void;
-  onCreateProject: () => void;
   onExtractSelectedLinks: () => void;
   onKeywordChange: (value: string) => void;
   onLimitChange: (value: number) => void;
   onOpenLogin: () => void;
   onManualUrlChange: (value: string) => void;
-  onProjectNameChange: (value: string) => void;
   onScrollsChange: (value: number) => void;
-  onSelectProject: (projectId: string) => void;
   blockedSourceUrls: BlockedSourceUrl[];
   onRemoveBlockedUrl: (entryId: string) => void;
 }) {
@@ -4956,22 +4748,11 @@ function CollectTab({
           <h2>Coletar produtos</h2>
         </div>
 
+        <p className="settings-note collect-catalog-note">
+          Os produtos coletados entram direto no catálogo da loja ({productCount} produto(s), {blockedSourceUrls.length} URL(s) bloqueada(s)).
+        </p>
+
         <div className="form-grid">
-          <label className="full-span project-active-field">
-            Projeto ativo
-            <ProjectPicker activeProject={activeProject} projects={projects} onChange={onSelectProject} />
-            <small>
-              {activeProject
-                ? `${productCount} produto(s) neste projeto · ${blockedSourceUrls.length} URL(s) bloqueada(s)`
-                : "Selecione ou crie um projeto para coletar."}
-            </small>
-          </label>
-
-          <label>
-            Nome do novo projeto
-            <input value={projectName} onChange={(event) => onProjectNameChange(event.target.value)} />
-          </label>
-
           <label>
             Palavra-chave
             <input value={keyword} onChange={(event) => onKeywordChange(event.target.value)} />
@@ -5014,10 +4795,7 @@ function CollectTab({
           <button className="primary ghost" onClick={onCloseLogin} disabled={busy || !loginStatus?.open}>
             Fechar navegador
           </button>
-          <button className="primary" onClick={onCreateProject} disabled={busy}>
-            <FolderPlus size={18} /> Criar projeto
-          </button>
-          <button className="primary dark" onClick={onCollect} disabled={!activeProject || busy}>
+          <button className="primary dark" onClick={onCollect} disabled={busy}>
             <Play size={18} /> Iniciar coleta
           </button>
         </div>
@@ -5039,7 +4817,7 @@ function CollectTab({
           />
           <div className="option-row">
             <small>{manualUrl.split(/\s|,|\n/).filter((url) => url.trim()).length} link(s) na lista</small>
-            <button className="primary" onClick={onExtractSelectedLinks} disabled={!activeProject || busy || !manualUrl.trim()}>
+            <button className="primary" onClick={onExtractSelectedLinks} disabled={busy || !manualUrl.trim()}>
               <Link2 size={16} /> Extrair links selecionados
             </button>
           </div>
@@ -5072,7 +4850,7 @@ function CollectTab({
               )}
             </div>
           ) : (
-            <p className="settings-note">Nenhuma URL bloqueada neste projeto.</p>
+            <p className="settings-note">Nenhuma URL bloqueada nesta loja.</p>
           )}
         </div>
       </div>
@@ -6280,7 +6058,6 @@ function CostsTab({
 }
 
 function ProductsTab({
-  activeProject,
   batchProgress,
   busy,
   detailsOpen,
@@ -6343,11 +6120,8 @@ function ProductsTab({
   onSelectedProductIdsChange,
   onSelectedColorVariationsChange,
   onSelectProduct,
-  projects,
-  onSelectProject,
   onProductsChanged,
 }: {
-  activeProject?: Project;
   batchProgress: BatchProgress;
   busy: boolean;
   detailsOpen: boolean;
@@ -6410,8 +6184,6 @@ function ProductsTab({
   onSelectedProductIdsChange: (ids: string[]) => void;
   onSelectedColorVariationsChange: (ids: string[]) => void;
   onSelectProduct: (id: string) => void;
-  projects: Project[];
-  onSelectProject: (projectId: string) => void;
   onProductsChanged: () => void;
 }) {
   const [fullscreenAsset, setFullscreenAsset] = useState<Asset | null>(null);
@@ -6574,11 +6346,10 @@ function ProductsTab({
           <ShoppingBag size={18} />
           <h2>Produtos</h2>
           <div className="panel-title-actions">
-            <ProjectPicker activeProject={activeProject} projects={projects} onChange={onSelectProject} />
             <button
               className="primary panel-title-action"
               onClick={openManualProductDialog}
-              disabled={!activeProject || busy}
+              disabled={busy}
             >
               <Plus size={16} /> Novo produto
             </button>
@@ -7201,7 +6972,7 @@ function ProductsTab({
               <button className="quiet-button" onClick={() => setManualProductDialogOpen(false)} disabled={busy}>
                 Cancelar
               </button>
-              <button className="primary" onClick={() => void submitManualProduct()} disabled={busy || !manualProductName.trim() || !activeProject}>
+              <button className="primary" onClick={() => void submitManualProduct()} disabled={busy || !manualProductName.trim()}>
                 <Plus size={16} /> Criar produto
               </button>
             </div>
@@ -8075,7 +7846,6 @@ function ScheduleTab({
   busy,
   printers,
   products,
-  projects,
   scheduleDate,
   scheduleView,
   tasks,
@@ -8088,7 +7858,6 @@ function ScheduleTab({
   busy: boolean;
   printers: Printer3D[];
   products: Product[];
-  projects: Project[];
   scheduleDate: string;
   scheduleView: ScheduleView;
   tasks: PrintScheduleTask[];
@@ -8126,7 +7895,6 @@ function ScheduleTab({
 
   const range = useMemo(() => scheduleRange(scheduleView, scheduleDate), [scheduleView, scheduleDate]);
   const periodLabel = useMemo(() => schedulePeriodLabel(scheduleView, scheduleDate, range.from, range.to), [scheduleView, scheduleDate, range.from, range.to]);
-  const projectById = useMemo(() => new Map(projects.map((project) => [project.id, project])), [projects]);
   const datesInRange = useMemo(() => eachDateInRange(range.from, range.to), [range.from, range.to]);
   const monthGrid = useMemo(() => {
     if (scheduleView !== "month") return [];
@@ -8500,14 +8268,13 @@ function ScheduleTab({
                           <input
                             value={productSearchQuery}
                             onChange={(event) => setProductSearchQuery(event.target.value)}
-                            placeholder="Buscar SKU, nome, projeto..."
+                            placeholder="Buscar SKU ou nome..."
                             autoFocus
                           />
                         </div>
                         <div className="schedule-product-list" role="listbox" aria-label="Selecionar produto">
                           {filteredScheduleProducts.map((product) => {
                             const thumbnailUrl = productThumbnailUrl(product);
-                            const project = projectById.get(product.project_id);
                             const isSelected = selectedProductId === product.id;
                             return (
                               <button
@@ -8533,7 +8300,6 @@ function ScheduleTab({
                                 <div className="schedule-product-copy">
                                   <strong>{productSku(product) || product.name}</strong>
                                   <span>{product.name}</span>
-                                  {project && <small>{project.name}</small>}
                                 </div>
                               </button>
                             );
@@ -9314,7 +9080,7 @@ function SettingsTab({
           <h2>Backup desta loja</h2>
         </div>
         <p className="settings-note">
-          Gera um ZIP somente com a loja deste login, seus projetos, produtos, filamentos e arquivos.
+          Gera um ZIP somente com a loja deste login, seus produtos, filamentos e arquivos.
           Senhas e chaves de integração não entram no arquivo. Por segurança, este login só restaura backups da própria loja.
         </p>
         <div className="backup-actions">

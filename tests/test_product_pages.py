@@ -95,7 +95,6 @@ def test_stats_and_detail():
     stats = client.get("/api/products/stats").json()
     assert stats["total"] == 4
     assert stats["with_image"] == 2
-    assert stats["by_project"] == {project.id: 4}
     assert stats["ai_cost_by_provider"] == {"openrouter": 2.0, "kie": 4.0, "other": 0.0}
     assert stats["ai_cost_usd"] == 6.0
 

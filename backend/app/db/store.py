@@ -469,6 +469,10 @@ class StudioStore:
             self._upsert_unlocked(product)
         return product
 
+    def backup_snapshot(self, label: str) -> Path | None:
+        with _lock:
+            return self._backup_current_unlocked(label)
+
     def merge_product_changes(self, base: Product, mine: Product) -> Product | None:
         """Write what a job changed from `base` to `mine` onto the stored product.
 

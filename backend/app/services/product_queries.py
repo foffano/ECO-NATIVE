@@ -158,9 +158,7 @@ def _event_cost(event: dict) -> float:
 
 def catalog_stats(products: list[Product]) -> dict:
     by_provider = {"openrouter": 0.0, "kie": 0.0, "other": 0.0}
-    by_project: dict[str, int] = {}
     for product in products:
-        by_project[product.project_id] = by_project.get(product.project_id, 0) + 1
         for event in _cost_events(product):
             provider = str(event.get("provider") or "").lower()
             key = "openrouter" if "openrouter" in provider else "kie" if "kie" in provider else "other"
@@ -173,5 +171,4 @@ def catalog_stats(products: list[Product]) -> dict:
         "exported": sum(1 for product in products if product.status == "exported"),
         "ai_cost_usd": sum(product_cost_total(product) for product in products),
         "ai_cost_by_provider": by_provider,
-        "by_project": by_project,
     }

@@ -20,7 +20,7 @@ from backend.app.api.routes_image_options import router as image_options_router
 from backend.app.api.routes_jobs import router as jobs_router
 from backend.app.api.routes_mercadolivre import callback_router as mercadolivre_callback_router, router as mercadolivre_router
 from backend.app.api.routes_products import router as products_router
-from backend.app.api.routes_projects import router as projects_router
+from backend.app.api.routes_blocked_urls import router as blocked_urls_router
 from backend.app.api.routes_r2 import router as r2_router
 from backend.app.api.routes_runtime import router as runtime_router
 from backend.app.api.routes_settings import router as settings_router
@@ -46,6 +46,8 @@ async def lifespan(app):
         # Initialize before concurrent requests can create different secrets.
         setup_required()
         _secret()
+        from backend.app.services.store_catalog import unify_store_projects
+        unify_store_projects()
         job_queue.start()
         try:
             yield
@@ -77,14 +79,12 @@ def _outside_store_scope(path: str, store_profile_id: str | None) -> bool:
         return False
     if parts[1] == "store-profiles":
         return parts[2] != store_profile_id
-    if parts[1] not in {"projects", "products", "assets"}:
+    if parts[1] not in {"products", "assets"}:
         return False
 
     state = store.snapshot()
     project_id: str | None = None
-    if parts[1] == "projects":
-        project_id = parts[2]
-    elif parts[1] == "products":
+    if parts[1] == "products":
         product = next((item for item in state.products if item.id == parts[2]), None)
         if not product:
             return False
@@ -96,8 +96,6 @@ def _outside_store_scope(path: str, store_profile_id: str | None) -> bool:
         project_id = found[0].project_id
 
     project = next((item for item in state.projects if item.id == project_id), None)
-    if parts[1] == "projects" and not project:
-        return False
     return not project or project.id not in store_project_ids(state, store_profile_id)
 
 
@@ -176,7 +174,7 @@ def health() -> dict:
         return payload
 
 
-app.include_router(projects_router, prefix="/api/projects", tags=["projects"])
+app.include_router(blocked_urls_router, prefix="/api/blocked-urls", tags=["blocked-urls"])
 app.include_router(products_router, prefix="/api/products", tags=["products"])
 app.include_router(jobs_router, prefix="/api/jobs", tags=["jobs"])
 app.include_router(backups_router, prefix="/api/backups", tags=["backups"])
