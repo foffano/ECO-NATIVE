@@ -3118,10 +3118,12 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
     try {
       setBusy(true);
       setNotice(`Apagando ${productIds.length} produto(s)...`);
-      for (const productId of productIds) {
-        await api<{ status: string; product_id: string }>(`/api/products/${productId}`, { method: "DELETE" });
-        removeProductFromState(productId);
-      }
+      // One request for the whole batch; the screen updates once.
+      await api<{ status: string; product_ids: string[] }>("/api/products/delete-batch", {
+        method: "POST",
+        body: JSON.stringify({ product_ids: productIds }),
+      });
+      productIds.forEach(removeProductFromState);
       setSelectedProductIds([]);
       setNotice(`${productIds.length} produto(s) apagado(s).`);
     } catch (error) {

@@ -135,3 +135,46 @@ def test_jobs_since_returns_only_recent_changes():
     assert {job["id"] for job in client.get("/api/jobs").json()} == {old.id, recent.id}
     since = client.get("/api/jobs", params={"since": "2026-06-01T00:00:00Z"}).json()
     assert [job["id"] for job in since] == [recent.id]
+
+
+def test_batch_delete_is_one_write_and_skips_other_stores(monkeypatch):
+    from backend.app.services import product_cleanup
+    shop, project = setup_catalog(5)
+    other = store.upsert_store_profile(StoreProfile(name="Outra"))
+    other_project = store.upsert_project(Project(name="O", store_profile_id=other.id))
+    foreign = store.upsert_product(Product(project_id=other_project.id, name="Alheio"))
+    ours = [p for p in store.load().products if p.project_id == project.id]
+    ours[0].source_url = "https://makerworld.com/pt/models/77"
+    store.upsert_product(ours[0])
+    store.upsert_job(Job(type="generate_listing", project_id=project.id, product_id=ours[0].id))
+    purged, backups = [], []
+    monkeypatch.setattr(product_cleanup, "purge_product_data", lambda product, **kw: purged.append(product.id) or {"errors": []})
+    original_backup = store._backup_current_unlocked
+    monkeypatch.setattr(store, "_backup_current_unlocked", lambda label="auto": backups.append(label) or original_backup(label))
+    client = client_for(shop, other)[0]
+
+    targets = [p.id for p in ours[:3]]
+    response = client.post("/api/products/delete-batch", json={"product_ids": [*targets, foreign.id, "missing"]})
+
+    assert response.status_code == 200
+    assert sorted(response.json()["product_ids"]) == sorted(targets)
+    assert sorted(purged) == sorted(targets)
+    assert backups == ["before_shrink"]  # one safety backup for the whole batch
+    state = store.load()
+    remaining = {p.id for p in state.products}
+    assert not remaining & set(targets) and foreign.id in remaining and len(remaining) == 3
+    assert not state.jobs
+    assert [entry.url for entry in state.blocked_source_urls] == ["https://makerworld.com/pt/models/77"]
+    assert not state.pending_cleanups  # cleaned after the response
+
+
+def test_single_delete_answers_before_cleaning_files(monkeypatch):
+    from backend.app.services import product_cleanup
+    shop, project = setup_catalog(2)
+    purged = []
+    monkeypatch.setattr(product_cleanup, "purge_product_data", lambda product, **kw: purged.append(product.id) or {"errors": []})
+    client = client_for(shop)
+    target = store.load().products[0].id
+    assert client.delete(f"/api/products/{target}").json()["status"] == "deleted"
+    assert purged == [target]
+    assert client.delete(f"/api/products/{target}").status_code == 404

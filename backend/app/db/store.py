@@ -19,6 +19,7 @@ from backend.app.db.models import (
     BlockedSourceUrl,
     FilamentSpool,
     Job,
+    PendingCleanup,
     PrintScheduleTask,
     Printer3D,
     Product,
@@ -106,6 +107,7 @@ COLLECTIONS: tuple[Collection, ...] = (
         PrintScheduleTask,
         columns={"printer_id": _attr("printer_id"), "scheduled_date": _attr("scheduled_date")},
     ),
+    Collection("pending_cleanups", PendingCleanup),
 )
 COLLECTIONS_BY_MODEL = {collection.model: collection for collection in COLLECTIONS}
 

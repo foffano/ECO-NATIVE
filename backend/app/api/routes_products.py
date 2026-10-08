@@ -6,11 +6,11 @@ from pathlib import Path
 
 import unicodedata
 
-from fastapi import APIRouter, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse
 from starlette.background import BackgroundTask
 from PIL import Image
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from backend.app.db.models import Asset, Listing, Product, ProductStatus, StudioState, now_iso
 from backend.app.db.store import store
@@ -29,7 +29,7 @@ from backend.app.services.product_paths import (
     variation_image_filename,
 )
 from backend.app.services.prompt_library import IMAGE_PROMPTS
-from backend.app.services.product_cleanup import purge_product_data
+from backend.app.services.product_cleanup import queue_product_cleanup, run_pending_cleanups
 from backend.app.services.product_health import cached_product_file_warnings
 from backend.app.services.product_queries import (
     CHARACTERISTICS,
@@ -784,37 +784,63 @@ def delete_product_asset(product_id: str, asset_id: str) -> Product:
     return _public_product(store.upsert_product(product))
 
 
-@router.delete("/{product_id}")
-def delete_product(product_id: str) -> dict:
-    removed_product: Product | None = None
-    blocked_url: dict | None = None
+class DeleteProductsRequest(BaseModel):
+    product_ids: list[str] = Field(min_length=1, max_length=2000)
+
+
+def _remove_products(product_ids: set[str]) -> tuple[list[Product], list[dict]]:
+    """Remove products, their jobs and schedule entries in one write.
+
+    One write means one safety backup of the store for the whole batch. Their
+    files are queued in the same write and removed after the response.
+    """
+    removed: list[Product] = []
+    blocked_urls: list[dict] = []
 
     def apply(state: StudioState) -> None:
-        nonlocal removed_product, blocked_url
-        target = next((item for item in state.products if item.id == product_id), None)
-        if not target:
-            raise HTTPException(status_code=404, detail="Produto nao encontrado")
-        removed_product = target.model_copy(deep=True)
-        blocked = block_product_source_url(state, target)
-        blocked_url = blocked.model_dump() if blocked else None
-        state.products = [item for item in state.products if item.id != product_id]
-        state.jobs = [job for job in state.jobs if job.product_id != product_id]
+        for target in state.products:
+            if target.id not in product_ids:
+                continue
+            removed.append(target.model_copy(deep=True))
+            blocked = block_product_source_url(state, target)
+            if blocked:
+                blocked_urls.append(blocked.model_dump())
+        state.products = [item for item in state.products if item.id not in product_ids]
+        state.jobs = [job for job in state.jobs if job.product_id not in product_ids]
         state.print_schedule_tasks = [
-            task for task in state.print_schedule_tasks if task.product_id != product_id
+            task for task in state.print_schedule_tasks if task.product_id not in product_ids
         ]
+        queue_product_cleanup(state, removed)
 
-    store.mutate(apply, allow_product_shrink=True)
+    if product_ids:
+        store.mutate(apply, allow_product_shrink=True)
+    return removed, blocked_urls
 
-    cleanup: dict = {"local": None, "r2": None, "errors": []}
-    if removed_product:
-        try:
-            cleanup = purge_product_data(removed_product)
-        except Exception as exc:
-            cleanup["errors"].append(str(exc))
 
+@router.post("/delete-batch")
+def delete_products(payload: DeleteProductsRequest, request: Request, background: BackgroundTasks) -> dict:
+    state = store.snapshot()
+    allowed = store_project_ids(state, current_store_id(request))
+    requested = set(payload.product_ids)
+    # Products of other stores are treated as already gone.
+    owned = {product.id for product in state.products if product.id in requested and product.project_id in allowed}
+    removed, blocked_urls = _remove_products(owned)
+    background.add_task(run_pending_cleanups)
+    return {
+        "status": "deleted",
+        "product_ids": [product.id for product in removed],
+        "blocked_urls": blocked_urls,
+    }
+
+
+@router.delete("/{product_id}")
+def delete_product(product_id: str, background: BackgroundTasks) -> dict:
+    removed, blocked_urls = _remove_products({product_id})
+    if not removed:
+        raise HTTPException(status_code=404, detail="Produto nao encontrado")
+    background.add_task(run_pending_cleanups)
     return {
         "status": "deleted",
         "product_id": product_id,
-        "cleanup": cleanup,
-        "blocked_url": blocked_url,
+        "blocked_url": blocked_urls[0] if blocked_urls else None,
     }

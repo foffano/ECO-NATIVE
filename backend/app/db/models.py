@@ -206,6 +206,15 @@ class Job(BaseModel):
     updated_at: str = Field(default_factory=now_iso)
 
 
+class PendingCleanup(BaseModel):
+    """Files of a deleted product still to be removed: its folder and its R2 objects."""
+    id: str  # the deleted product's id
+    product: Product
+    created_at: str = Field(default_factory=now_iso)
+    attempts: int = 0
+    last_error: str = ""
+
+
 class StudioState(BaseModel):
     projects: list[Project] = Field(default_factory=list)
     products: list[Product] = Field(default_factory=list)
@@ -217,3 +226,4 @@ class StudioState(BaseModel):
     production_settings: list[ProductionSettings] = Field(default_factory=list)
     printers_3d: list[Printer3D] = Field(default_factory=list)
     print_schedule_tasks: list[PrintScheduleTask] = Field(default_factory=list)
+    pending_cleanups: list[PendingCleanup] = Field(default_factory=list)

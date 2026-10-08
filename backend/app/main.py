@@ -1,6 +1,7 @@
 from pathlib import Path
 from contextlib import asynccontextmanager
 import asyncio
+import threading
 import os
 from urllib.parse import urlparse
 
@@ -49,6 +50,9 @@ async def lifespan(app):
         from backend.app.services.store_catalog import unify_store_projects
         unify_store_projects()
         job_queue.start()
+        from backend.app.services.product_cleanup import run_pending_cleanups
+        # Files of products deleted right before a restart; never delays startup.
+        threading.Thread(target=run_pending_cleanups, name="eco-cleanup", daemon=True).start()
         try:
             yield
         finally:
