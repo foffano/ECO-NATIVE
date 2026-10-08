@@ -1700,6 +1700,7 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
   const [makerWorldLogin, setMakerWorldLogin] = useState<MakerWorldLoginStatus | null>(null);
   const [makerWorldViewerOpen, setMakerWorldViewerOpen] = useState(false);
   const [collectRunning, setCollectRunning] = useState(false);
+  const [collectAttention, setCollectAttention] = useState("");
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [selectedProductIds, setSelectedProductIds] = useState<string[]>([]);
   const [productFilters, setProductFilters] = useState<ProductFilters>({ query: "", status: "all", characteristic: "all", publication: "all" });
@@ -2419,6 +2420,7 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
       }
       let attention = "";
       setNotice(`${label}... Você pode usar o resto do app enquanto isso.`);
+      setCollectAttention("");
       setCollectRunning(true);
       setMakerWorldViewerOpen(true);
       try {
@@ -2426,10 +2428,12 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
           const next = typeof job.metadata?.attention === "string" ? job.metadata.attention : "";
           if (next === attention) return;
           attention = next;
+          setCollectAttention(next);
           if (next) setMakerWorldViewerOpen(true);
           setNotice(next || `${label}...`);
         });
       } finally {
+        setCollectAttention("");
         setCollectRunning(false);
         setMakerWorldViewerOpen(false);
       }
@@ -3466,16 +3470,16 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
           onSkip={skipOnboarding}
         />
       )}
-      {notice && (
+      {(collectAttention || notice) && (
         <div className={busy ? "toast-notice busy-toast" : "toast-notice"} role="status" aria-live="polite">
           {busy && <Loader2 className="spin" size={16} />}
-          <span>{displayText(notice)}</span>
+          <span>{displayText(collectAttention || notice)}</span>
           {collectRunning && !makerWorldViewerOpen && (
             <button className="toast-action" onClick={() => setMakerWorldViewerOpen(true)}>
-              Ver navegador da coleta
+              {collectAttention ? "Validar no MakerWorld" : "Ver navegador da coleta"}
             </button>
           )}
-          {!busy && (
+          {!busy && !collectAttention && (
             <button aria-label="Fechar aviso" onClick={() => setNotice("")}>
               ×
             </button>

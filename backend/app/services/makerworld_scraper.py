@@ -32,6 +32,14 @@ MANUAL_CHECK_SECONDS = 180
 VERIFICATION_PROMPT = (
     "O MakerWorld pediu uma verificação. Abra o navegador da coleta e resolva para continuar."
 )
+SLOW_RESPONSE_PROMPT = (
+    "O site está demorando para responder. Abra o navegador da coleta e verifique "
+    "se existe uma solicitação de validação humana."
+)
+DOWNLOAD_WAIT_NOTE = (
+    " O download aguarda por até 3 minutos. Sem validação nesse prazo, "
+    "a coleta continua com as fotos e o anúncio, sem o arquivo 3D."
+)
 STUDIO_BUTTON_TEXT = re.compile(r"Open in Bambu Studio|Abrir no Bambu Studio", re.IGNORECASE)
 DOWNLOAD_3MF_TEXT = re.compile(r"^\s*(Download|Baixar) 3MF\s*$", re.IGNORECASE)
 REJECT_COOKIES_TEXT = re.compile(r"^(Reject All|Rejeitar todos|Rejeitar tudo|Recusar todos)$", re.IGNORECASE)
@@ -165,6 +173,31 @@ def is_cloudflare_challenge(page) -> bool:
         return False
 
 
+def has_human_verification(page) -> bool:
+    """Look for visible challenge UI; a loaded CAPTCHA script alone is not evidence."""
+    if is_cloudflare_challenge(page):
+        return True
+    try:
+        return bool(page.evaluate("""() => {
+            const visible = el => {
+                const style = getComputedStyle(el);
+                return el.getClientRects().length > 0 && style.visibility !== 'hidden'
+                    && style.display !== 'none' && style.opacity !== '0';
+            };
+            const widgets = document.querySelectorAll(
+                'iframe[src*="captcha"], iframe[src*="challenges.cloudflare.com"], '
+                + '[class*="geetest_panel"], [class*="geetest_box"], '
+                + '[class*="captcha-container"], [id*="captcha-container"]'
+            );
+            if ([...widgets].some(visible)) return true;
+            const prompt = /verify (that )?you are human|security verification|complete the puzzle|drag.*puzzle|slide.*verif|verifique se você é humano|verificação de segurança|resolva.*quebra-cabeça/i;
+            return [...document.querySelectorAll('[role="dialog"], [aria-modal="true"]')]
+                .some(el => visible(el) && prompt.test(el.innerText || ''));
+        }"""))
+    except PlaywrightError:
+        return False
+
+
 def wait_with_help(
     page,
     ready: Callable[[], Any],
@@ -172,10 +205,11 @@ def wait_with_help(
     *,
     timeout_seconds: float = MANUAL_CHECK_SECONDS,
     ask_after_seconds: float = 20.0,
+    attention_note: str = "",
 ) -> Any:
     """Poll ready() until it returns a value, asking the user for help if a check blocks the page."""
     started = time.monotonic()
-    asked = False
+    last_notice = None
     try:
         while True:
             try:
@@ -187,12 +221,19 @@ def wait_with_help(
             elapsed = time.monotonic() - started
             if elapsed >= timeout_seconds:
                 return None
-            if on_attention and not asked and (elapsed >= ask_after_seconds or is_cloudflare_challenge(page)):
-                on_attention(VERIFICATION_PROMPT)
-                asked = True
+            if on_attention:
+                challenge = has_human_verification(page)
+                message = VERIFICATION_PROMPT if challenge else (
+                    SLOW_RESPONSE_PROMPT if elapsed >= ask_after_seconds else None
+                )
+                if message:
+                    message += attention_note
+                if message != last_notice:
+                    on_attention(message)
+                    last_notice = message
             page.wait_for_timeout(1000)
     finally:
-        if asked and on_attention:
+        if last_notice and on_attention:
             on_attention(None)
 
 
@@ -530,7 +571,7 @@ def download_from_studio_menu(page, on_attention: AttentionCallback | None = Non
     try:
         target.click(timeout=5_000)
         # A MakerWorld puzzle can hold the download until someone solves it in the panel.
-        download = wait_with_help(page, lambda: downloads[0] if downloads else None, on_attention, ask_after_seconds=8)
+        download = wait_with_help(page, lambda: downloads[0] if downloads else None, on_attention, ask_after_seconds=8, attention_note=DOWNLOAD_WAIT_NOTE)
     finally:
         page.remove_listener("download", handler)
     if download is None:

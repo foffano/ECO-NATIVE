@@ -172,3 +172,44 @@ def test_model_title_reads_logged_in_layout_and_rejects_cloudflare():
     logged_in = StatePage({"challenge": False, "heading": "", "og_title": "Soap Dish - Modern - Free 3D Print Model - MakerWorld"})
     assert scraper.model_page_title(logged_in) == "Soap Dish - Modern"
     assert scraper.strip_makerworld_title_suffix("Saboneteira - Modelo gratuito para impressão 3D - MakerWorld") == "Saboneteira"
+
+
+def test_slow_response_is_not_reported_as_confirmed_puzzle(monkeypatch):
+    monkeypatch.setattr(scraper, "has_human_verification", lambda page: False)
+    ticks = iter([0, 0, 9, 181])
+    monkeypatch.setattr(scraper.time, "monotonic", lambda: next(ticks))
+    notices = []
+    result = scraper.wait_with_help(
+        ChallengePage(10), lambda: None, notices.append,
+        ask_after_seconds=8, attention_note=scraper.DOWNLOAD_WAIT_NOTE,
+    )
+    assert result is None
+    assert notices == [scraper.SLOW_RESPONSE_PROMPT + scraper.DOWNLOAD_WAIT_NOTE, None]
+
+
+def test_download_timeout_keeps_product_and_continues_next_url(monkeypatch):
+    page = FakePage(set())
+
+    @contextmanager
+    def fake_context(*args, **kwargs):
+        yield SimpleNamespace(pages=[page])
+
+    @contextmanager
+    def fake_playwright():
+        yield object()
+
+    def failed_download(*args, **kwargs):
+        raise RuntimeError("verificação não resolvida ou tempo esgotado")
+
+    monkeypatch.setattr(scraper, "sync_playwright", fake_playwright)
+    monkeypatch.setattr(scraper, "open_makerworld_context", fake_context)
+    monkeypatch.setattr(scraper, "download_3mf_from_current_page", failed_download)
+    monkeypatch.setattr(scraper, "scrape_current_product_page", lambda project_id, page, url, *args, **kwargs:
+        ScrapedProduct(name="Produto", source_url=url, sku="SKU-1", image_url="https://example.com/photo.jpg"))
+    saved = []
+    products = scraper.scrape_product_urls(
+        "project", ["https://makerworld.com/pt/models/1", "https://makerworld.com/pt/models/2"],
+        download_model=True, on_product=saved.append,
+    )
+    assert len(saved) == len(products) == 2
+    assert all(p.image_url and not p.model_file_path and "tempo esgotado" in p.model_error for p in products)
