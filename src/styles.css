@@ -110,6 +110,100 @@ body {
 .auth-form .login-button { width: 100%; justify-content: center; margin-top: 4px; }
 .logout-button { color: var(--eco-sidebar-text-muted); width: 100%; }
 
+/* Login: stores as cards, password only; the administrator has a separate, darker card. */
+.store-auth-card { width: min(560px, 100%); }
+.login-store-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 12px;
+  max-height: min(360px, 45vh);
+  overflow-y: auto;
+  padding: 2px;
+}
+.login-store {
+  display: grid;
+  justify-items: center;
+  gap: 10px;
+  padding: 16px 10px 14px;
+  border: 1px solid var(--eco-line);
+  border-radius: 14px;
+  background: var(--eco-panel);
+  color: var(--eco-forest-2);
+  font-weight: 700;
+  cursor: pointer;
+  transition: border-color 0.15s, box-shadow 0.15s, transform 0.15s;
+}
+.login-store:hover { border-color: var(--eco-accent-border); transform: translateY(-1px); }
+.login-store.active {
+  border-color: var(--eco-green-dark);
+  box-shadow: 0 0 0 2px var(--eco-accent-border);
+}
+.login-store-logo {
+  display: grid;
+  width: 64px;
+  height: 64px;
+  place-items: center;
+  overflow: hidden;
+  border-radius: 14px;
+  background: linear-gradient(135deg, var(--eco-mint), var(--eco-green));
+  color: var(--eco-forest);
+  font-size: 26px;
+  font-weight: 900;
+}
+.login-store-logo img { width: 100%; height: 100%; object-fit: cover; }
+.login-store-name {
+  display: -webkit-box;
+  max-width: 100%;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-height: 1.25;
+  text-align: center;
+  overflow-wrap: anywhere;
+}
+.auth-switch {
+  display: inline-flex;
+  align-items: center;
+  justify-self: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--eco-forest-2);
+  font-weight: 700;
+}
+.auth-switch:hover { background: var(--eco-forest-alpha-08); }
+.admin-switch { color: var(--eco-muted); font-size: 13px; }
+.admin-auth-card { border-color: var(--eco-forest-2); overflow: hidden; padding-top: 0; }
+.admin-auth-header {
+  display: grid;
+  gap: 6px;
+  margin: 0 -34px;
+  padding: 26px 34px 22px;
+  background: linear-gradient(145deg, var(--eco-forest), var(--eco-forest-2));
+  color: #f2f7f3;
+}
+.admin-auth-header h1 { margin: 4px 0 0; color: #ffffff; }
+.admin-auth-header .auth-description { color: rgba(242, 247, 243, 0.75); }
+.admin-auth-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-self: start;
+  gap: 6px;
+  padding: 4px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+@media (max-width: 480px) {
+  .auth-card { padding: 24px 18px; }
+  .admin-auth-header { margin: 0 -18px; padding: 22px 18px 18px; }
+  .login-store-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
 .admin-console-page {
   place-items: start center;
   height: 100%;

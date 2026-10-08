@@ -1,4 +1,9 @@
+import threading
+import time
+from pathlib import Path
+
 from fastapi import APIRouter, HTTPException, Request, Response
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from backend.app.db.store import store
@@ -9,6 +14,7 @@ from backend.app.services.auth import (
     create_initial_users,
     create_session,
     create_user,
+    list_auth_users,
     setup_required,
 )
 from backend.app.services.store_profiles import ensure_default_store_profile
@@ -20,6 +26,13 @@ COOKIE_NAME = "eco_native_session"
 class Credentials(BaseModel):
     username: str
     password: str
+
+
+class LoginPayload(BaseModel):
+    """A store signs in by choosing its card; the administrator by login."""
+    password: str
+    store_profile_id: str | None = None
+    username: str | None = None
 
 
 class InitialStoreCredential(Credentials):
@@ -67,6 +80,25 @@ def _session_payload(request: Request) -> dict:
     }
 
 
+def _store_logins() -> dict[str, str]:
+    """Store id -> login of the stores that can sign in."""
+    return {
+        str(user["store_profile_id"]): str(user.get("username", ""))
+        for user in list_auth_users()
+        if user.get("role") == "store" and user.get("store_profile_id") and user.get("enabled", True)
+    }
+
+
+def _login_stores() -> list[dict]:
+    # Shown before login: names and logos only, never the logins.
+    logins = _store_logins()
+    return [
+        {"id": profile.id, "name": profile.name, "photo_version": profile.updated_at if profile.logo_path else None}
+        for profile in store.snapshot().store_profiles
+        if profile.id in logins
+    ]
+
+
 @router.get("/status")
 def status(request: Request) -> dict:
     if getattr(request.state, "auth", None):
@@ -78,7 +110,45 @@ def status(request: Request) -> dict:
         if not profiles:
             profiles = [ensure_default_store_profile()]
         legacy_stores = [{"id": profile.id, "name": profile.name} for profile in profiles]
-    return {"authenticated": False, "setup_required": needs_setup, "legacy_stores": legacy_stores}
+    return {
+        "authenticated": False,
+        "setup_required": needs_setup,
+        "legacy_stores": legacy_stores,
+        "stores": [] if needs_setup else _login_stores(),
+    }
+
+
+@router.get("/stores/{store_profile_id}/photo")
+def store_login_photo(store_profile_id: str) -> FileResponse:
+    profile = next((item for item in store.snapshot().store_profiles if item.id == store_profile_id), None)
+    if not profile or not profile.logo_path or store_profile_id not in _store_logins():
+        raise HTTPException(status_code=404, detail="Foto da loja não encontrada")
+    path = Path(profile.logo_path)
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="Foto da loja não encontrada")
+    return FileResponse(path, headers={"Cache-Control": "public, max-age=86400"})
+
+
+# Without a login to type, the password is all that stands between a visitor and
+# a store, so repeated wrong passwords lock that store for this visitor a while.
+MAX_FAILED_LOGINS = 8
+FAILED_LOGIN_WINDOW_SECONDS = 15 * 60
+_failed_logins: dict[tuple[str, str], list[float]] = {}
+_failed_logins_lock = threading.Lock()
+
+
+def _client_address(request: Request) -> str:
+    # Behind Cloudflare Tunnel every request arrives from the tunnel container.
+    return request.headers.get("cf-connecting-ip") or (request.client.host if request.client else "")
+
+
+def _recent_failures(key: tuple[str, str], now: float) -> list[float]:
+    recent = [moment for moment in _failed_logins.get(key, []) if now - moment < FAILED_LOGIN_WINDOW_SECONDS]
+    if recent:
+        _failed_logins[key] = recent
+    else:
+        _failed_logins.pop(key, None)
+    return recent
 
 
 @router.post("/setup")
@@ -108,10 +178,27 @@ def setup(payload: SetupPayload, request: Request, response: Response) -> dict:
 
 
 @router.post("/login")
-def login(payload: Credentials, request: Request, response: Response) -> dict:
-    user = authenticate(payload.username, payload.password)
+def login(payload: LoginPayload, request: Request, response: Response) -> dict:
+    if payload.store_profile_id:
+        username = _store_logins().get(payload.store_profile_id)
+        target = f"store:{payload.store_profile_id}"
+    else:
+        username = (payload.username or "").strip()
+        target = f"login:{username.casefold()}"
+    key = (_client_address(request), target)
+    with _failed_logins_lock:
+        if len(_recent_failures(key, time.monotonic())) >= MAX_FAILED_LOGINS:
+            raise HTTPException(status_code=429, detail="Muitas tentativas erradas. Aguarde 15 minutos e tente de novo.")
+    user = authenticate(username, payload.password) if username else None
+    # A store card only opens that store, never the administrator account.
+    if user and payload.store_profile_id and user.store_profile_id != payload.store_profile_id:
+        user = None
     if not user:
-        raise HTTPException(status_code=401, detail="Login ou senha inválidos")
+        with _failed_logins_lock:
+            _failed_logins.setdefault(key, []).append(time.monotonic())
+        raise HTTPException(status_code=401, detail="Senha incorreta" if payload.store_profile_id else "Login ou senha inválidos")
+    with _failed_logins_lock:
+        _failed_logins.pop(key, None)
     _set_session(response, request, create_session(user))
     request.state.auth = user
     return _session_payload(request)

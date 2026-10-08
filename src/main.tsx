@@ -328,7 +328,29 @@ type AuthStatus = {
   is_admin?: boolean;
   store?: StoreProfile;
   legacy_stores?: Array<{ id: string; name: string }>;
+  stores?: LoginStore[];
 };
+
+type LoginStore = { id: string; name: string; photo_version?: string | null };
+
+const LAST_LOGIN_STORE_KEY = "eco-native-last-login-store";
+
+function readLastLoginStore(): string {
+  try {
+    return window.localStorage.getItem(LAST_LOGIN_STORE_KEY) || "";
+  } catch {
+    return "";
+  }
+}
+
+function rememberLoginStore(storeId: string) {
+  try {
+    window.localStorage.setItem(LAST_LOGIN_STORE_KEY, storeId);
+  } catch {
+    // Only a convenience: the next visit just starts without a store selected.
+  }
+}
+
 type AdminStoreUsage = {
   store: { id: string; name: string; marketplace: string };
   username?: string | null;
@@ -8281,18 +8303,42 @@ function LoginScreen({ status, onAuthenticated }: { status: AuthStatus; onAuthen
   );
   const [message, setMessage] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const loginStores = status.stores ?? [];
+  const [adminMode, setAdminMode] = useState(!loginStores.length);
+  const [selectedStoreId, setSelectedStoreId] = useState(() => {
+    const last = readLastLoginStore();
+    if (loginStores.some((store) => store.id === last)) return last;
+    return loginStores.length === 1 ? loginStores[0].id : "";
+  });
+  const selectedStore = loginStores.find((store) => store.id === selectedStoreId);
+
+  function chooseStore(storeId: string) {
+    setSelectedStoreId(storeId);
+    setPassword("");
+    setMessage("");
+  }
+
+  function switchToAdmin(next: boolean) {
+    setAdminMode(next);
+    setPassword("");
+    setMessage("");
+  }
 
   async function submit(event: React.FormEvent) {
     event.preventDefault();
     setSubmitting(true);
     setMessage("");
     try {
+      const body = setupRequired
+        ? { admin: { username, password }, stores: storeCredentials, store_name: stores.length === 1 ? storeName : undefined }
+        : adminMode
+          ? { username, password }
+          : { store_profile_id: selectedStoreId, password };
       const nextStatus = await api<AuthStatus>(setupRequired ? "/api/auth/setup" : "/api/auth/login", {
         method: "POST",
-        body: JSON.stringify(setupRequired
-          ? { admin: { username, password }, stores: storeCredentials, store_name: stores.length === 1 ? storeName : undefined }
-          : { username, password }),
+        body: JSON.stringify(body),
       });
+      if (!setupRequired && !adminMode) rememberLoginStore(selectedStoreId);
       onAuthenticated(nextStatus);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Não foi possível entrar");
@@ -8301,47 +8347,113 @@ function LoginScreen({ status, onAuthenticated }: { status: AuthStatus; onAuthen
     }
   }
 
+  if (!setupRequired && adminMode) {
+    return (
+      <main className="auth-page">
+        <section className="auth-card admin-auth-card">
+          <div className="admin-auth-header">
+            <span className="admin-auth-badge"><KeyRound size={14} /> Administração</span>
+            <h1>Acesso do administrador</h1>
+            <p className="auth-description">Gerencie lojas, limites de uso e integrações.</p>
+          </div>
+          <form onSubmit={submit} className="auth-form">
+            <label>Login<input value={username} onChange={(event) => setUsername(event.target.value)} autoComplete="username" required minLength={3} autoFocus /></label>
+            <label>Senha<input type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete="current-password" required minLength={8} /></label>
+            {message && <p className="auth-error">{message}</p>}
+            <button className="primary login-button" disabled={submitting}>
+              {submitting ? <Loader2 size={18} className="spin" /> : <LogIn size={18} />} Entrar como administrador
+            </button>
+          </form>
+          {loginStores.length > 0 && (
+            <button type="button" className="link-button auth-switch" onClick={() => switchToAdmin(false)}>
+              <ArrowLeft size={15} /> Voltar para as lojas
+            </button>
+          )}
+        </section>
+      </main>
+    );
+  }
+
+  if (!setupRequired) {
+    return (
+      <main className="auth-page">
+        <section className="auth-card store-auth-card">
+          <img src="/eco-logo.png" alt="ECO Native" className="auth-logo" />
+          <div>
+            <p className="eyebrow">ECO Native Studio</p>
+            <h1>Escolha sua loja</h1>
+            <p className="auth-description">Toque na sua loja e digite a senha para entrar.</p>
+          </div>
+          <div className="login-store-grid" role="radiogroup" aria-label="Lojas">
+            {loginStores.map((store) => (
+              <button
+                key={store.id}
+                type="button"
+                role="radio"
+                aria-checked={store.id === selectedStoreId}
+                className={`login-store${store.id === selectedStoreId ? " active" : ""}`}
+                onClick={() => chooseStore(store.id)}
+              >
+                <span className="login-store-logo">
+                  {store.photo_version
+                    ? <img src={`${API_BASE}/api/auth/stores/${store.id}/photo?v=${encodeURIComponent(store.photo_version)}`} alt="" />
+                    : store.name.trim().slice(0, 1).toUpperCase()}
+                </span>
+                <span className="login-store-name">{store.name}</span>
+              </button>
+            ))}
+          </div>
+          {selectedStore && (
+            <form onSubmit={submit} className="auth-form" key={selectedStore.id}>
+              <label>
+                Senha de {selectedStore.name}
+                <input type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete="current-password" required minLength={8} autoFocus />
+              </label>
+              {message && <p className="auth-error">{message}</p>}
+              <button className="primary login-button" disabled={submitting}>
+                {submitting ? <Loader2 size={18} className="spin" /> : <LogIn size={18} />} Entrar
+              </button>
+            </form>
+          )}
+          <button type="button" className="link-button auth-switch admin-switch" onClick={() => switchToAdmin(true)}>
+            <KeyRound size={15} /> Acesso do administrador
+          </button>
+        </section>
+      </main>
+    );
+  }
+
   return (
     <main className="auth-page">
       <section className="auth-card">
         <img src="/eco-logo.png" alt="ECO Native" className="auth-logo" />
         <div>
           <p className="eyebrow">ECO Native Studio</p>
-          <h1>{setupRequired ? "Configure o primeiro acesso" : "Entre na sua loja"}</h1>
+          <h1>Configure o primeiro acesso</h1>
           <p className="auth-description">
-            {setupRequired
-              ? "Crie uma conta administrativa independente e um acesso para cada loja. Os dados continuarão neste computador."
-              : "Entre com uma conta administrativa ou com o login específico de uma loja."}
+            Crie uma conta administrativa independente e um acesso para cada loja. Os dados continuarão neste computador.
           </p>
         </div>
 
         <form onSubmit={submit} className="auth-form">
-          {setupRequired && stores.length === 1 && (
+          {stores.length === 1 && (
             <label>Nome da loja<input value={storeName} onChange={(event) => setStoreName(event.target.value)} required /></label>
           )}
-          {setupRequired && (
-            <fieldset className="migration-store">
-              <legend>Conta administradora</legend>
-              <label>Login administrativo<input value={username} onChange={(event) => setUsername(event.target.value)} autoComplete="username" required minLength={3} /></label>
-              <label>Senha administrativa<input type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete="new-password" required minLength={8} /></label>
-            </fieldset>
-          )}
-          {setupRequired ? storeCredentials.map((credential, index) => (
+          <fieldset className="migration-store">
+            <legend>Conta administradora</legend>
+            <label>Login administrativo<input value={username} onChange={(event) => setUsername(event.target.value)} autoComplete="username" required minLength={3} /></label>
+            <label>Senha administrativa<input type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete="new-password" required minLength={8} /></label>
+          </fieldset>
+          {storeCredentials.map((credential, index) => (
             <fieldset className="migration-store" key={credential.store_profile_id}>
               <legend>{stores[index]?.name ?? `Loja ${index + 1}`}</legend>
               <label>Login<input value={credential.username} onChange={(event) => setStoreCredentials((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, username: event.target.value } : item))} autoComplete="off" required minLength={3} /></label>
               <label>Senha<input type="password" value={credential.password} onChange={(event) => setStoreCredentials((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, password: event.target.value } : item))} autoComplete="new-password" required minLength={8} /></label>
             </fieldset>
-          )) : (
-            <>
-              <label>Login<input value={username} onChange={(event) => setUsername(event.target.value)} autoComplete="username" required minLength={3} /></label>
-              <label>Senha<input type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete="current-password" required minLength={8} /></label>
-            </>
-          )}
+          ))}
           {message && <p className="auth-error">{message}</p>}
           <button className="primary login-button" disabled={submitting}>
-            {submitting ? <Loader2 size={18} className="spin" /> : <LogIn size={18} />}
-            {setupRequired ? "Criar acesso" : "Entrar"}
+            {submitting ? <Loader2 size={18} className="spin" /> : <LogIn size={18} />} Criar acesso
           </button>
         </form>
       </section>
