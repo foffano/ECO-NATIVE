@@ -1,4 +1,5 @@
 from contextlib import contextmanager
+import threading
 from types import SimpleNamespace
 
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
@@ -213,3 +214,72 @@ def test_download_timeout_keeps_product_and_continues_next_url(monkeypatch):
     )
     assert len(saved) == len(products) == 2
     assert all(p.image_url and not p.model_file_path and "tempo esgotado" in p.model_error for p in products)
+
+
+def test_wait_with_help_stops_when_the_user_stops_the_collect():
+    stop = threading.Event()
+    stop.set()
+    with scraper.stop_when(stop):
+        try:
+            scraper.wait_with_help(ChallengePage(10), lambda: None)
+        except scraper.CollectStopped:
+            pass
+        else:
+            raise AssertionError("expected CollectStopped")
+    assert scraper.wait_with_help(ChallengePage(0), lambda: "ok") == "ok"  # no stop outside the collect
+
+
+def test_stop_during_download_keeps_that_product_and_skips_the_rest(monkeypatch):
+    page = FakePage(set())
+    stop = threading.Event()
+
+    @contextmanager
+    def fake_context(*args, **kwargs):
+        yield SimpleNamespace(pages=[page])
+
+    @contextmanager
+    def fake_playwright():
+        yield object()
+
+    def stopped_download(*args, **kwargs):
+        stop.set()
+        scraper.raise_if_stopped()
+
+    monkeypatch.setattr(scraper, "sync_playwright", fake_playwright)
+    monkeypatch.setattr(scraper, "open_makerworld_context", fake_context)
+    monkeypatch.setattr(scraper, "download_3mf_from_current_page", stopped_download)
+    monkeypatch.setattr(scraper, "scrape_current_product_page", lambda project_id, page, url, *args, **kwargs:
+        ScrapedProduct(name="Produto", source_url=url, sku="SKU-1"))
+    saved = []
+    with scraper.stop_when(stop):
+        try:
+            scraper.scrape_product_urls(
+                "project", ["https://makerworld.com/pt/models/1", "https://makerworld.com/pt/models/2"],
+                download_model=True, on_product=saved.append,
+            )
+        except scraper.CollectStopped:
+            pass
+        else:
+            raise AssertionError("expected CollectStopped")
+    assert [p.source_url for p in saved] == ["https://makerworld.com/pt/models/1"]
+    assert "interrompido" in saved[0].model_error
+
+
+def test_stopped_collect_is_cancelled_and_keeps_saved_products(monkeypatch):
+    project = setup_project()
+    stop = threading.Event()
+
+    def fake_scrape(**kwargs):
+        kwargs["on_product"](ScrapedProduct(name="Kept", source_url="https://makerworld.com/pt/models/5", sku="LOJA-KEPT-0005"))
+        stop.set()
+        scraper.raise_if_stopped()
+
+    monkeypatch.setattr(job_runner, "scrape_product_urls", fake_scrape)
+    job = store.upsert_job(Job(type="collect_products", project_id=project.id))
+    urls = ["https://makerworld.com/pt/models/5", "https://makerworld.com/pt/models/6"]
+    result = job_runner.run_collect_job(job, collect_payload(project, urls), stop)
+
+    assert result.status == JobStatus.cancelled
+    assert result.metadata["created_products"] == 1
+    assert "1 produto(s)" in result.message
+    assert [p.source_url for p in store.load().products] == ["https://makerworld.com/pt/models/5"]

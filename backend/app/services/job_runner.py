@@ -1,3 +1,5 @@
+import threading
+
 from backend.app.db.models import Asset, Job, JobStatus, Product, ProductStatus
 from backend.app.db.store import store
 from backend.app.services.cost_tracker import add_openrouter_cost
@@ -15,10 +17,13 @@ from backend.app.services.prompt_library import IMAGE_PROMPTS
 from backend.app.services.sku import ensure_color_skus, ensure_product_sku
 from backend.app.services.store_profiles import get_store_profile
 from backend.app.services.makerworld_scraper import (
+    CollectStopped,
     ScrapedProduct,
     clean_makerworld_url,
     discover_model_urls,
     scrape_product_urls,
+    raise_if_stopped,
+    stop_when,
 )
 from backend.app.services.makerworld_session import set_collect_notice
 from backend.app.services.source_url_blacklist import collect_skip_urls
@@ -101,7 +106,13 @@ def _finalize_product_image_metadata(tracked: _JobProduct, store_profile) -> Non
     tracked.save()
 
 
-def run_collect_job(job: Job, payload) -> Job:
+def run_collect_job(job: Job, payload, stop: threading.Event | None = None) -> Job:
+    """Collect products; setting `stop` ends the collect at its next checkpoint."""
+    with stop_when(stop):
+        return _run_collect_job(job, payload)
+
+
+def _run_collect_job(job: Job, payload) -> Job:
     job.status = JobStatus.running
     job.progress = 20
     job.message = "Coletando produtos"
@@ -127,6 +138,7 @@ def run_collect_job(job: Job, payload) -> Job:
         store.upsert_job(job)
 
     try:
+        raise_if_stopped()
         urls = payload.urls
         if not urls:
             job.progress = 35
@@ -257,6 +269,15 @@ def run_collect_job(job: Job, payload) -> Job:
             on_failure=record_failure,
             on_attention=ask_user,
         )
+    except CollectStopped:
+        job.metadata.pop("attention", None)
+        job.metadata["created_products"] = created
+        job.metadata["failed_links"] = len(failures)
+        job.status = JobStatus.cancelled
+        job.progress = 100
+        job.message = f"Coleta interrompida. {created} produto(s) coletado(s) foram mantidos."
+        job.logs.append(job.message)
+        return store.upsert_job(job)
     except Exception as exc:
         job.metadata.pop("attention", None)
         job.status = JobStatus.failed

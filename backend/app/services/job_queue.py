@@ -39,6 +39,9 @@ class JobQueue:
         self._queues = {lane: queue.Queue(maxsize=capacity) for lane in LANES}
         self._stop = threading.Event()
         self._threads: dict[str, threading.Thread] = {}
+        # Per job, until its worker finishes: set when the user asks to stop it.
+        self._stop_events: dict[str, threading.Event] = {}
+        self._started: set[str] = set()
 
     def start(self):
         with admission_lock:
@@ -51,6 +54,8 @@ class JobQueue:
                         lane_queue.task_done()
                     except queue.Empty:
                         break
+            self._stop_events.clear()
+            self._started.clear()
             def recover(state):
                 for job in state.jobs:
                     if job.status in {JobStatus.queued, JobStatus.running}:
@@ -80,6 +85,7 @@ class JobQueue:
                 raise HTTPException(429, "Fila cheia. Aguarde os trabalhos atuais terminarem.")
             response = job.model_copy(deep=True)
             store.upsert_job(job)
+            self._stop_events[job.id] = threading.Event()
             lane_queue.put_nowait((job, action))
             return response
 
@@ -89,6 +95,14 @@ class JobQueue:
                 job, action = lane_queue.get(timeout=0.2)
             except queue.Empty:
                 continue
+            with admission_lock:
+                stop = self._stop_events.get(job.id)
+                if stop is not None and stop.is_set():
+                    # Already recorded as cancelled while it waited.
+                    self._stop_events.pop(job.id, None)
+                    lane_queue.task_done()
+                    continue
+                self._started.add(job.id)
             try:
                 state = store.load()
                 project = next((project for project in state.projects if project.id == job.project_id), None)
@@ -109,7 +123,27 @@ class JobQueue:
                 job.logs.append(f"{type(exc).__name__}: {exc}")
                 store.upsert_job(job)
             finally:
+                with admission_lock:
+                    self._stop_events.pop(job.id, None)
+                    self._started.discard(job.id)
                 lane_queue.task_done()
+
+    def stop_event(self, job_id: str) -> threading.Event | None:
+        return self._stop_events.get(job_id)
+
+    def request_stop(self, job: Job) -> Job:
+        """Stop a job: one still waiting ends now, a running one at its next checkpoint."""
+        with admission_lock:
+            event = self._stop_events.get(job.id)
+            if event is None:
+                raise HTTPException(409, "Esta tarefa já terminou.")
+            event.set()
+            if job.id in self._started:
+                return job
+            job.status = JobStatus.cancelled
+            job.message = "Cancelada antes de começar."
+            job.logs.append(job.message)
+            return store.upsert_job(job)
 
     def stop(self):
         with admission_lock:

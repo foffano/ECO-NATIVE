@@ -2,6 +2,7 @@ from collections.abc import Callable
 from contextlib import ExitStack, contextmanager
 import os
 import re
+import threading
 import time
 import urllib.parse
 from dataclasses import dataclass, field
@@ -173,6 +174,30 @@ def is_cloudflare_challenge(page) -> bool:
         return False
 
 
+class CollectStopped(Exception):
+    """The user stopped the collect; never recorded as a failed link."""
+
+
+# The collect runs in one worker thread, so the stop request is kept per thread
+# instead of being passed through every browser helper.
+_stop_request = threading.local()
+
+
+@contextmanager
+def stop_when(event: threading.Event | None):
+    _stop_request.event = event
+    try:
+        yield
+    finally:
+        _stop_request.event = None
+
+
+def raise_if_stopped() -> None:
+    event = getattr(_stop_request, "event", None)
+    if event is not None and event.is_set():
+        raise CollectStopped("Coleta interrompida pelo usuário")
+
+
 def has_human_verification(page) -> bool:
     """Look for visible challenge UI; a loaded CAPTCHA script alone is not evidence."""
     if is_cloudflare_challenge(page):
@@ -212,6 +237,7 @@ def wait_with_help(
     last_notice = None
     try:
         while True:
+            raise_if_stopped()
             try:
                 value = ready()
             except PlaywrightError:
@@ -303,6 +329,7 @@ def discover_model_urls(
         harvest(page)
         stagnant_rounds = 0
         for _ in range(max(scrolls, 1)):
+            raise_if_stopped()
             previous_height = page.evaluate("() => document.body.scrollHeight")
             page.keyboard.press("End")
             page.mouse.wheel(0, 5000)
@@ -362,6 +389,7 @@ def scrape_product_urls(
         page = first_page(browser)
 
         for url in normalized_urls:
+            raise_if_stopped()
             try:
                 page.goto(url, wait_until="domcontentloaded", timeout=60_000)
                 title = wait_with_help(page, lambda: model_page_title(page), on_attention)
@@ -377,6 +405,8 @@ def scrape_product_urls(
                     store_profile=store_profile,
                     title=title,
                 )
+            except CollectStopped:
+                raise
             except Exception as exc:
                 if on_failure:
                     on_failure(url, capture_error_message(exc))
@@ -396,6 +426,13 @@ def scrape_product_urls(
                     product.model_file_path = download_3mf_from_current_page(
                         page, product_dir, product.sku, on_attention=on_attention,
                     )
+                except CollectStopped:
+                    # Its photos are already on disk: keep it, like a download that timed out.
+                    product.model_error = "download interrompido: coleta parada pelo usuário"
+                    products.append(product)
+                    if on_product:
+                        on_product(product)
+                    raise
                 except Exception as exc:
                     product.model_error = f"{exc.__class__.__name__}: {exc}"
             products.append(product)
@@ -605,6 +642,7 @@ def wait_for_download_entrypoint(page, option_patterns: list[str], timeout_ms: i
     deadline = time.monotonic() + (timeout_ms / 1000)
     first_iteration = True
     while first_iteration or time.monotonic() < deadline:
+        raise_if_stopped()
         first_iteration = False
         try:
             page.evaluate("window.scrollTo(0, 0)")

@@ -152,7 +152,7 @@ def collect_products(payload: CollectRequest, request: Request) -> Job:
         payload.store_profile_id = project.store_profile_id
         label = payload.keyword.strip() or (f"{len(payload.urls)} link(s)" if payload.urls else "")
         job = Job(type="collect_products", project_id=payload.project_id, metadata={"label": label} if label else {})
-        return job_queue.submit(job, lambda: run_collect_job(job, payload))
+        return job_queue.submit(job, lambda: run_collect_job(job, payload, job_queue.stop_event(job.id)))
 
 
 @router.post("/listing", status_code=202)
@@ -202,11 +202,24 @@ def regenerate_image(payload: RegenerateImageRequest, request: Request) -> Job:
         return job_queue.submit(job, lambda: run_regenerate_image_job(job, product, payload.prompt_key, payload.extra_prompt))
 
 
-@router.get("/{job_id}")
-def get_job(job_id: str, request: Request) -> Job:
+def _store_job(job_id: str, request: Request) -> Job:
     state = store.snapshot()
     allowed = store_project_ids(state, current_store_id(request))
     job = next((item for item in state.jobs if item.id == job_id and item.project_id in allowed), None)
     if job is None:
         raise HTTPException(404, "Trabalho não encontrado")
     return job
+
+
+@router.get("/{job_id}")
+def get_job(job_id: str, request: Request) -> Job:
+    return _store_job(job_id, request)
+
+
+@router.post("/{job_id}/stop")
+def stop_job(job_id: str, request: Request) -> Job:
+    """Only collections check for a stop; other jobs are short or already paid for."""
+    job = _store_job(job_id, request)
+    if job.type != "collect_products":
+        raise HTTPException(409, "Só coletas podem ser interrompidas.")
+    return job_queue.request_stop(job.model_copy(deep=True))

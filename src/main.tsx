@@ -41,6 +41,8 @@ import {
   X,
   ListChecks,
   AlertCircle,
+  Ban,
+  CircleStop,
   Clock,
 } from "lucide-react";
 import "./styles.css";
@@ -216,7 +218,7 @@ type CostEvent = {
 type Job = {
   id: string;
   type: string;
-  status: "queued" | "running" | "completed" | "failed";
+  status: "queued" | "running" | "completed" | "failed" | "cancelled";
   project_id?: string;
   product_id?: string;
   progress: number;
@@ -527,6 +529,7 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
 // existing batch sequencing without holding a long HTTP request open.
 async function submitJob(path: string, init: RequestInit, onProgress?: (job: Job) => void): Promise<Job> {
   let job = await api<Job>(path, init);
+  onProgress?.(job);
   while (job.status === "queued" || job.status === "running") {
     await new Promise((resolve) => window.setTimeout(resolve, 1500));
     try {
@@ -1701,6 +1704,7 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
   const [makerWorldViewerOpen, setMakerWorldViewerOpen] = useState(false);
   const [collectRunning, setCollectRunning] = useState(false);
   const [collectAttention, setCollectAttention] = useState("");
+  const [collectJobId, setCollectJobId] = useState("");
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [selectedProductIds, setSelectedProductIds] = useState<string[]>([]);
   const [productFilters, setProductFilters] = useState<ProductFilters>({ query: "", status: "all", characteristic: "all", publication: "all" });
@@ -2307,6 +2311,10 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
       }
       const result = await action();
       await applyRefresh(refreshMode);
+      if (isJobResult(result) && result.status === "cancelled") {
+        setNotice(result.message);
+        return result;
+      }
       if (isJobResult(result) && result.status === "failed") {
         const detail = result.logs?.length ? result.logs[result.logs.length - 1] : result.message;
         throw new Error(detail || "A tarefa falhou.");
@@ -2425,6 +2433,7 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
       setMakerWorldViewerOpen(true);
       try {
         return await submitJob("/api/jobs/collect", { method: "POST", body: JSON.stringify(body) }, (job) => {
+          setCollectJobId(job.id);
           const next = typeof job.metadata?.attention === "string" ? job.metadata.attention : "";
           if (next === attention) return;
           attention = next;
@@ -2434,10 +2443,19 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
         });
       } finally {
         setCollectAttention("");
+        setCollectJobId("");
         setCollectRunning(false);
         setMakerWorldViewerOpen(false);
       }
     }, { refresh: "catalog", blockUi: false, notifySuccess: true });
+  }
+
+  function stopCollect(jobId: string) {
+    return runAction("Parando a coleta", async () => {
+      setNotice("Parando a coleta... Os produtos já coletados ficam salvos.");
+      const job = await api<Job>(`/api/jobs/${jobId}/stop`, { method: "POST" });
+      setJobs((current) => mergeJobs(current, [job]));
+    }, { refresh: false, blockUi: false, notifySuccess: false });
   }
 
   function openMakerWorldLogin() {
@@ -3495,6 +3513,7 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
           collectViewerAvailable={collectRunning}
           onClose={closeJobsPanel}
           onOpenProduct={(productId) => void openProductFromJob(productId)}
+          onStopCollect={(jobId) => void stopCollect(jobId)}
           onOpenCollectViewer={() => {
             setJobsPanelOpen(false);
             setMakerWorldViewerOpen(true);
@@ -3505,6 +3524,7 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
         <MakerWorldRemoteBrowser
           status={makerWorldLogin}
           collect={collectRunning}
+          onStopCollect={collectJobId ? () => void stopCollect(collectJobId) : undefined}
           onCloseViewer={() => setMakerWorldViewerOpen(false)}
           onFinish={() => void closeMakerWorldLogin()}
         />
@@ -3518,11 +3538,13 @@ type DragPoint = [number, number, number];
 function MakerWorldRemoteBrowser({
   status,
   collect,
+  onStopCollect,
   onCloseViewer,
   onFinish,
 }: {
   status: MakerWorldLoginStatus | null;
   collect: boolean;
+  onStopCollect?: () => void;
   onCloseViewer: () => void;
   onFinish: () => void;
 }) {
@@ -3701,6 +3723,11 @@ function MakerWorldRemoteBrowser({
                 </button>
               </>
             )}
+            {collectMode && onStopCollect && (
+              <button className="primary ghost" title="Encerra a coleta; os produtos já coletados ficam salvos" onClick={onStopCollect}>
+                <CircleStop size={16} /> Parar coleta
+              </button>
+            )}
             <button className="primary ghost" onClick={onCloseViewer}>Ocultar</button>
             {!collectMode && <button className="primary" onClick={onFinish}>Concluir e salvar sessão</button>}
           </div>
@@ -3760,6 +3787,7 @@ const JOB_STATUS_LABELS: Record<Job["status"], string> = {
   running: "Rodando",
   completed: "Concluída",
   failed: "Falhou",
+  cancelled: "Interrompida",
 };
 
 type JobsFilter = "all" | "active" | "failed";
@@ -3769,12 +3797,14 @@ function JobsPanel({
   collectViewerAvailable,
   onClose,
   onOpenProduct,
+  onStopCollect,
   onOpenCollectViewer,
 }: {
   jobs: Job[];
   collectViewerAvailable: boolean;
   onClose: () => void;
   onOpenProduct: (productId: string) => void;
+  onStopCollect: (jobId: string) => void;
   onOpenCollectViewer: () => void;
 }) {
   const [filter, setFilter] = useState<JobsFilter>("all");
@@ -3849,6 +3879,7 @@ function JobsPanel({
                   {job.status === "queued" && <Clock size={16} />}
                   {job.status === "completed" && <Check size={16} />}
                   {job.status === "failed" && <AlertCircle size={16} />}
+                  {job.status === "cancelled" && <Ban size={16} />}
                 </span>
                 <div className="jobs-item-body">
                   <div className="jobs-item-title">
@@ -3876,6 +3907,11 @@ function JobsPanel({
                     {job.type === "collect_products" && running && collectViewerAvailable && (
                       <button className="link-button" onClick={onOpenCollectViewer}>
                         Ver navegador
+                      </button>
+                    )}
+                    {job.type === "collect_products" && jobActive(job) && (
+                      <button className="link-button" title="Os produtos já coletados ficam salvos" onClick={() => onStopCollect(job.id)}>
+                        {running ? "Parar coleta" : "Cancelar"}
                       </button>
                     )}
                   </div>
@@ -4595,7 +4631,7 @@ function CollectTab({
               return (
               <div className="mini-job" key={job.id}>
                 <span>
-                  <strong>{job.status === "completed" ? "Concluída" : job.status === "failed" ? "Falhou" : "Em andamento"}</strong>
+                  <strong>{jobActive(job) ? "Em andamento" : JOB_STATUS_LABELS[job.status]}</strong>
                   <small>{displayText(job.message)}</small>
                   <small>
                     {collectJobCreatedCount(job)} produto(s) coletado(s)

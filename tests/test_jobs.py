@@ -54,7 +54,7 @@ def test_api_accepts_without_waiting_and_scopes_job_reads():
     project = store.upsert_project(Project(name="P", store_profile_id=shop.id))
     create_initial_users(("admin", "password123"), [("shop-a", "password123", shop.id), ("shop-b", "password123", other.id)])
     entered, release = threading.Event(), threading.Event()
-    def slow(job, payload):
+    def slow(job, payload, stop=None):
         entered.set()
         release.wait(3)
         job.status = JobStatus.completed
@@ -198,3 +198,43 @@ def test_same_generation_for_a_product_is_not_queued_twice():
             assert client.post("/api/jobs/listing", json={"product_id": product.id}).status_code == 409
         finally:
             release.set()
+
+
+def test_user_can_stop_running_and_queued_collections():
+    from backend.app.main import app
+    from backend.app.services.auth import create_initial_users, create_session
+    from backend.app.services.auth import AuthenticatedStore
+    shop = store.upsert_store_profile(StoreProfile(name="A"))
+    other = store.upsert_store_profile(StoreProfile(name="B"))
+    store.upsert_project(Project(name="P", store_profile_id=shop.id))
+    create_initial_users(("admin", "password123"), [("shop-a", "password123", shop.id), ("shop-b", "password123", other.id)])
+    entered, ran = threading.Event(), []
+
+    def collect(job, payload, stop=None):
+        ran.append(job.id)
+        job.status = JobStatus.running
+        store.upsert_job(job)
+        entered.set()
+        assert stop.wait(3)
+        job.status = JobStatus.cancelled
+        return store.upsert_job(job)
+
+    with patch("backend.app.api.routes_jobs.run_collect_job", side_effect=collect), TestClient(app) as client:
+        client.cookies.set("eco_native_session", create_session(AuthenticatedStore(shop.id, "shop-a")))
+        running = client.post("/api/jobs/collect", json={}).json()["id"]
+        assert entered.wait(2)
+        waiting = client.post("/api/jobs/collect", json={}).json()["id"]
+
+        client.cookies.set("eco_native_session", create_session(AuthenticatedStore(other.id, "shop-b")))
+        assert client.post(f"/api/jobs/{waiting}/stop").status_code == 404
+        client.cookies.set("eco_native_session", create_session(AuthenticatedStore(shop.id, "shop-a")))
+
+        stopped = client.post(f"/api/jobs/{waiting}/stop")
+        assert stopped.status_code == 200 and stopped.json()["status"] == "cancelled"
+        assert client.post(f"/api/jobs/{running}/stop").status_code == 200
+        wait_for(lambda: all(
+            j.status == JobStatus.cancelled for j in store.load().jobs if j.id in {running, waiting}
+        ))
+        time.sleep(0.4)  # the worker dequeues the cancelled job and must skip it
+        assert ran == [running]
+        assert client.post(f"/api/jobs/{running}/stop").status_code == 409

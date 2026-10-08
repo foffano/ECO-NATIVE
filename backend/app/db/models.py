@@ -26,6 +26,7 @@ class JobStatus(StrEnum):
     running = "running"
     completed = "completed"
     failed = "failed"
+    cancelled = "cancelled"
 
 
 class Marketplace(StrEnum):
