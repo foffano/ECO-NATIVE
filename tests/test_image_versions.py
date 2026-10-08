@@ -12,7 +12,7 @@ def product_with_image(tmp_path: Path, kind: str = "generated_studio_classic") -
     current = tmp_path / "SKU_capa_produto_studio_classic.png"
     current.write_bytes(b"old")
     product = Product(project_id="p", name="x")
-    product.assets.append(Asset(product_id=product.id, kind=kind, path=str(current), public_url="https://r2/old.png"))
+    product.assets.append(Asset(product_id=product.id, kind=kind, path=str(current), public_url="https://eco.example.com/old.png"))
     return product, current
 
 
@@ -68,9 +68,8 @@ def test_regenerate_makes_new_versions_and_resume_reuses(tmp_path, monkeypatch):
 
     monkeypatch.setattr(image_generation, "get_settings", lambda: SimpleNamespace(use_codex_image_gen=False, kie_api_key="key", kie_image_model=None))
     monkeypatch.setattr(image_generation, "ensure_product_cover", lambda product: cover)
-    monkeypatch.setattr(image_generation, "resolve_source_ref", lambda product, asset, settings: "https://r2/capa.jpg")
+    monkeypatch.setattr(image_generation, "resolve_source_ref", lambda product, asset, settings: "https://eco.example.com/i/sig/capa.jpg")
     monkeypatch.setattr(image_generation, "render_image_edit", fake_render)
-    monkeypatch.setattr(image_generation, "upload_file_to_r2", lambda path, prefix, force=False: f"https://r2/{Path(path).name}")
     prompts = {"studio_classic": "classic"}
 
     [first] = image_generation.generate_studio_images(product, image_prompts=prompts)

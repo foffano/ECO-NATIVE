@@ -31,14 +31,8 @@ class AppSettings:
     use_codex_image_gen: bool
     codex_bin: str | None
     codex_sandbox_mode: str
-    cloudflare_account_id: str | None
-    cloudflare_r2_bucket_name: str | None
-    cloudflare_r2_access_key: str | None
-    cloudflare_r2_secret_key: str | None
-    cloudflare_r2_public_url: str | None
-    mercadolivre_app_id: str | None
-    mercadolivre_client_secret: str | None
-    mercadolivre_redirect_uri: str | None
+    # Address of the app on the internet; image links for Kie.ai and Shopee start with it.
+    public_app_url: str | None
 
 
 def get_settings() -> AppSettings:
@@ -60,14 +54,7 @@ def get_settings() -> AppSettings:
         # com dono = usuario atual e ACL legivel sem elevacao. Como e a maquina do
         # proprio usuario gerando os proprios assets locais, full access e aceitavel.
         codex_sandbox_mode=(os.getenv("CODEX_SANDBOX_MODE") or "danger-full-access").strip(),
-        cloudflare_account_id=os.getenv("CLOUDFLARE_ACCOUNT_ID"),
-        cloudflare_r2_bucket_name=os.getenv("CLOUDFLARE_R2_BUCKET_NAME"),
-        cloudflare_r2_access_key=os.getenv("CLOUDFLARE_R2_ACCESS_KEY"),
-        cloudflare_r2_secret_key=os.getenv("CLOUDFLARE_R2_SECRET_KEY"),
-        cloudflare_r2_public_url=os.getenv("CLOUDFLARE_R2_PUBLIC_URL"),
-        mercadolivre_app_id=os.getenv("MERCADOLIVRE_APP_ID"),
-        mercadolivre_client_secret=os.getenv("MERCADOLIVRE_CLIENT_SECRET"),
-        mercadolivre_redirect_uri=os.getenv("MERCADOLIVRE_REDIRECT_URI"),
+        public_app_url=os.getenv("PUBLIC_APP_URL"),
     )
 
 

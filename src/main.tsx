@@ -245,8 +245,7 @@ type SettingsPayload = {
     image_models?: ImageModelOption[];
     codex_image_gen: boolean;
     codex_bin?: string | null;
-    cloudflare_r2: boolean;
-    mercado_livre?: boolean;
+    public_app_url: string;
   };
 };
 
@@ -256,14 +255,7 @@ type SettingsSecrets = {
   kie_api_key?: string | null;
   kie_image_model?: string | null;
   codex_bin?: string | null;
-  cloudflare_account_id?: string | null;
-  cloudflare_r2_bucket_name?: string | null;
-  cloudflare_r2_access_key?: string | null;
-  cloudflare_r2_secret_key?: string | null;
-  cloudflare_r2_public_url?: string | null;
-  mercadolivre_app_id?: string | null;
-  mercadolivre_client_secret?: string | null;
-  mercadolivre_redirect_uri?: string | null;
+  public_app_url?: string | null;
 };
 
 type RuntimeStatus = {
@@ -337,7 +329,6 @@ type AuthStatus = {
   store?: StoreProfile;
   legacy_stores?: Array<{ id: string; name: string }>;
 };
-
 type AdminStoreUsage = {
   store: { id: string; name: string; marketplace: string };
   username?: string | null;
@@ -382,11 +373,7 @@ type OnboardingPayload = {
   openrouter_model: string;
   kie_api_key: string;
   kie_image_model: string;
-  cloudflare_account_id: string;
-  cloudflare_r2_bucket_name: string;
-  cloudflare_r2_access_key: string;
-  cloudflare_r2_secret_key: string;
-  cloudflare_r2_public_url: string;
+  public_app_url: string;
 };
 
 type ProductFilters = {
@@ -1161,11 +1148,7 @@ type IntegrationDrafts = {
   kie_image_model: string;
   use_codex_image_gen: boolean;
   codex_bin: string;
-  cloudflare_account_id: string;
-  cloudflare_r2_bucket_name: string;
-  cloudflare_r2_access_key: string;
-  cloudflare_r2_secret_key: string;
-  cloudflare_r2_public_url: string;
+  public_app_url: string;
 };
 
 type ProductionDrafts = {
@@ -1688,11 +1671,7 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
   const [kieImageModelDraft, setKieImageModelDraft] = useState("qwen/image-edit");
   const [useCodexImageGenDraft, setUseCodexImageGenDraft] = useState(false);
   const [codexBinDraft, setCodexBinDraft] = useState("");
-  const [r2AccountIdDraft, setR2AccountIdDraft] = useState("");
-  const [r2BucketDraft, setR2BucketDraft] = useState("");
-  const [r2AccessKeyDraft, setR2AccessKeyDraft] = useState("");
-  const [r2SecretKeyDraft, setR2SecretKeyDraft] = useState("");
-  const [r2PublicUrlDraft, setR2PublicUrlDraft] = useState("");
+  const [publicAppUrlDraft, setPublicAppUrlDraft] = useState("");
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState("");
   const [listingDraft, setListingDraft] = useState<Listing | null>(null);
@@ -1719,23 +1698,6 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
   const [blockedSourceUrls, setBlockedSourceUrls] = useState<BlockedSourceUrl[]>([]);
   const [filaments, setFilaments] = useState<FilamentSpool[]>([]);
   const [productionSettings, setProductionSettings] = useState<ProductionSettings | null>(null);
-
-  // Mercado Livre sends the seller back here after the OAuth consent screen.
-  useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    const result = params.get("mercadolivre");
-    if (!result) return;
-    const messages: Record<string, string> = {
-      connected: "Conta do Mercado Livre conectada. Publique pela aba Anúncio de cada produto.",
-      denied: "A conexão com o Mercado Livre foi cancelada.",
-      error: "Não foi possível conectar ao Mercado Livre. Tente novamente.",
-    };
-    setNotice(messages[result] ?? messages.error);
-    setActiveTab("settings");
-    params.delete("mercadolivre");
-    const query = params.toString();
-    window.history.replaceState(null, "", `${window.location.pathname}${query ? `?${query}` : ""}${window.location.hash}`);
-  }, []);
 
   const activeStoreProfile = storeProfiles.find((profile) => profile.id === activeStoreProfileId) ?? storeProfiles[0];
   // The server only returns this store's jobs.
@@ -1877,6 +1839,7 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
     setKieImageModelDraft(nextSettings.integrations.kie_image_model || "qwen/image-edit");
     setUseCodexImageGenDraft(Boolean(nextSettings.integrations.codex_image_gen));
     setCodexBinDraft(nextSettings.integrations.codex_bin || "");
+    setPublicAppUrlDraft(nextSettings.integrations.public_app_url || "");
     const isCleanDefaultWorkspace =
       (nextStoreProfiles.length === 0 || (nextStoreProfiles.length === 1 && nextStoreProfiles[0]?.name === "Loja principal")) &&
       nextStats.total === 0;
@@ -1957,10 +1920,6 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
     void poll();
     return () => { cancelled = true; clearTimeout(timer); };
   }, []);
-
-  async function refreshProducts() {
-    await Promise.all([reloadProductList(true), refreshStats()]);
-  }
 
   useEffect(() => {
     if (!detailsOpen || !selectedProductId) return;
@@ -2494,11 +2453,6 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
   function clearIntegrationSecretDrafts() {
     setOpenRouterApiKeyDraft("");
     setKieApiKeyDraft("");
-    setR2AccountIdDraft("");
-    setR2BucketDraft("");
-    setR2AccessKeyDraft("");
-    setR2SecretKeyDraft("");
-    setR2PublicUrlDraft("");
   }
 
   function finishOnboarding(payload: OnboardingPayload) {
@@ -2525,11 +2479,7 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
       };
       if (payload.openrouter_api_key.trim()) integrationPayload.openrouter_api_key = payload.openrouter_api_key.trim();
       if (payload.kie_api_key.trim()) integrationPayload.kie_api_key = payload.kie_api_key.trim();
-      if (payload.cloudflare_account_id.trim()) integrationPayload.cloudflare_account_id = payload.cloudflare_account_id.trim();
-      if (payload.cloudflare_r2_bucket_name.trim()) integrationPayload.cloudflare_r2_bucket_name = payload.cloudflare_r2_bucket_name.trim();
-      if (payload.cloudflare_r2_access_key.trim()) integrationPayload.cloudflare_r2_access_key = payload.cloudflare_r2_access_key.trim();
-      if (payload.cloudflare_r2_secret_key.trim()) integrationPayload.cloudflare_r2_secret_key = payload.cloudflare_r2_secret_key.trim();
-      if (payload.cloudflare_r2_public_url.trim()) integrationPayload.cloudflare_r2_public_url = payload.cloudflare_r2_public_url.trim();
+      if (payload.public_app_url.trim()) integrationPayload.public_app_url = payload.public_app_url.trim();
       const updatedSettings = await api<SettingsPayload>("/api/settings", {
         method: "PATCH",
         body: JSON.stringify(integrationPayload),
@@ -2718,16 +2668,20 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
     { refresh: false, blockUi: false, notifySuccess: false });
   }
 
+  // Kie.ai downloads the source image from a link the app serves; Codex reads the file.
+  function publicAppUrlMissing() {
+    if (settings?.integrations.codex_image_gen || settings?.integrations.public_app_url) return false;
+    setNotice("Configure o endereço público do app em Ajustes → Integrações para o Kie.ai baixar as imagens.");
+    return true;
+  }
+
   function generateImages(productId = selectedProduct?.id) {
     if (!productId) return Promise.resolve();
     if (!settings?.integrations.kie_ai) {
       setNotice("Configure KIE_API_KEY em Ajustes para gerar imagens com Kie.ai.");
       return Promise.resolve();
     }
-    if (!settings?.integrations.cloudflare_r2) {
-      setNotice("Configure Cloudflare R2 em Ajustes para salvar imagens permanentes e enviar URLs ao Kie.ai.");
-      return Promise.resolve();
-    }
+    if (publicAppUrlMissing()) return Promise.resolve();
     return runAction("Gerando imagens base", () =>
       (async () => {
         const product = findProduct(productId);
@@ -2765,10 +2719,7 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
       setNotice("Configure KIE_API_KEY em Ajustes para gerar variações de cor com Kie.ai.");
       return Promise.resolve();
     }
-    if (!settings?.integrations.cloudflare_r2) {
-      setNotice("Configure Cloudflare R2 em Ajustes para usar URLs permanentes nas variações de cor.");
-      return Promise.resolve();
-    }
+    if (publicAppUrlMissing()) return Promise.resolve();
     return runAction("Gerando variações de cor", () =>
       (async () => {
         const product = findProduct(productId);
@@ -2794,10 +2745,7 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
       setNotice("Configure KIE_API_KEY em Ajustes para recriar imagens com Kie.ai.");
       return Promise.resolve();
     }
-    if (!settings?.integrations.cloudflare_r2) {
-      setNotice("Configure Cloudflare R2 em Ajustes para salvar a imagem recriada com URL permanente.");
-      return Promise.resolve();
-    }
+    if (publicAppUrlMissing()) return Promise.resolve();
     return runAction("Recriando imagem", async () =>
       noticeQueued(await enqueueJob("/api/jobs/image-regenerate", {
         product_id: productId,
@@ -3096,10 +3044,7 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
       setNotice("Configure KIE_API_KEY em Ajustes para gerar imagens com Kie.ai.");
       return Promise.resolve();
     }
-    if (!settings?.integrations.cloudflare_r2) {
-      setNotice("Configure Cloudflare R2 em Ajustes para salvar imagens permanentes e enviar URLs ao Kie.ai.");
-      return Promise.resolve();
-    }
+    if (publicAppUrlMissing()) return Promise.resolve();
     return runBatchProductAction(
       "Gerando imagens base em lote",
       productIds,
@@ -3216,17 +3161,6 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
     };
     void Promise.all(productIds.map(refreshProduct));
     return result;
-  }
-
-  function exportCsv(productIds = selectedProductIds) {
-    if (!listedProducts.length) return Promise.resolve();
-    const readySelectedIds = readyExportIds(productIds);
-    if (!readySelectedIds) return Promise.resolve();
-    return runAction(
-      "Exportando CSV",
-      () => downloadExport("/api/exports", readySelectedIds, `exportacao-${todayDateString()}.csv`),
-      { refresh: false, blockUi: true, notifySuccess: true },
-    );
   }
 
   async function uploadShopeeTemplate(file: File) {
@@ -3383,7 +3317,6 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
             onGenerateImages={generateImages}
             onGenerateListing={generateListing}
             onRegenerateImage={regenerateImage}
-            onExportSelected={exportCsv}
             onExportShopeeSheet={exportShopeeSheet}
             onReplaceShopeeTemplate={replaceShopeeTemplate}
             shopeeTemplate={shopeeTemplate}
@@ -3413,7 +3346,6 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
               setDetailsOpen(true);
             }}
             onSelectProduct={setSelectedProductId}
-            onProductsChanged={() => void refreshProducts()}
           />
         )}
 
@@ -3443,11 +3375,7 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
             kieImageModelDraft={kieImageModelDraft}
             useCodexImageGenDraft={useCodexImageGenDraft}
             codexBinDraft={codexBinDraft}
-            r2AccessKeyDraft={r2AccessKeyDraft}
-            r2AccountIdDraft={r2AccountIdDraft}
-            r2BucketDraft={r2BucketDraft}
-            r2PublicUrlDraft={r2PublicUrlDraft}
-            r2SecretKeyDraft={r2SecretKeyDraft}
+            publicAppUrlDraft={publicAppUrlDraft}
             settings={settings}
             onOpenRouterApiKeyChange={setOpenRouterApiKeyDraft}
             onOpenRouterModelChange={setOpenRouterModelDraft}
@@ -3455,11 +3383,7 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
             onKieImageModelChange={setKieImageModelDraft}
             onUseCodexImageGenChange={setUseCodexImageGenDraft}
             onCodexBinChange={setCodexBinDraft}
-            onR2AccessKeyChange={setR2AccessKeyDraft}
-            onR2AccountIdChange={setR2AccountIdDraft}
-            onR2BucketChange={setR2BucketDraft}
-            onR2PublicUrlChange={setR2PublicUrlDraft}
-            onR2SecretKeyChange={setR2SecretKeyDraft}
+            onPublicAppUrlChange={setPublicAppUrlDraft}
             onSaveOpenRouterSettings={saveOpenRouterSettings}
             onClearIntegrationSecrets={clearIntegrationSecretDrafts}
             onStoreProfileDraftChange={setStoreProfileDraft}
@@ -4005,11 +3929,7 @@ function OnboardingModal({
   const [openRouterModelValue, setOpenRouterModelValue] = useState(openRouterModel || "qwen/qwen3.5-flash-02-23");
   const [kieKey, setKieKey] = useState("");
   const [kieImageModelValue, setKieImageModelValue] = useState(kieImageModel || "qwen/image-edit");
-  const [r2AccountId, setR2AccountId] = useState("");
-  const [r2Bucket, setR2Bucket] = useState("");
-  const [r2AccessKey, setR2AccessKey] = useState("");
-  const [r2SecretKey, setR2SecretKey] = useState("");
-  const [r2PublicUrl, setR2PublicUrl] = useState("");
+  const [publicAppUrl, setPublicAppUrl] = useState(window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1" ? "" : window.location.origin);
 
   useEffect(() => {
     if (!storeProfile) return;
@@ -4028,11 +3948,7 @@ function OnboardingModal({
       openrouter_model: openRouterModelValue,
       kie_api_key: kieKey,
       kie_image_model: kieImageModelValue,
-      cloudflare_account_id: r2AccountId,
-      cloudflare_r2_bucket_name: r2Bucket,
-      cloudflare_r2_access_key: r2AccessKey,
-      cloudflare_r2_secret_key: r2SecretKey,
-      cloudflare_r2_public_url: r2PublicUrl,
+      public_app_url: publicAppUrl,
     });
   }
 
@@ -4104,24 +4020,9 @@ function OnboardingModal({
               <h3>Arquivos e exportação</h3>
             </div>
             <label>
-              Cloudflare Account ID
-              <input value={r2AccountId} onChange={(event) => setR2AccountId(event.target.value)} placeholder="opcional agora" />
-            </label>
-            <label>
-              Bucket R2
-              <input value={r2Bucket} onChange={(event) => setR2Bucket(event.target.value)} placeholder="opcional agora" />
-            </label>
-            <label>
-              Access key
-              <input type="password" value={r2AccessKey} onChange={(event) => setR2AccessKey(event.target.value)} placeholder="opcional agora" />
-            </label>
-            <label>
-              Secret key
-              <input type="password" value={r2SecretKey} onChange={(event) => setR2SecretKey(event.target.value)} placeholder="opcional agora" />
-            </label>
-            <label>
-              URL pública do R2
-              <input value={r2PublicUrl} onChange={(event) => setR2PublicUrl(event.target.value)} placeholder="https://..." />
+              Endereço público do app
+              <input value={publicAppUrl} onChange={(event) => setPublicAppUrl(event.target.value)} placeholder="https://eco.seudominio.com" />
+              <small>O Kie.ai e a planilha da Shopee baixam as imagens por links neste endereço.</small>
             </label>
           </section>
         </div>
@@ -5846,7 +5747,6 @@ function ProductsTab({
   onGenerateColorVariations,
   onGenerateImages,
   onGenerateListing,
-  onExportSelected,
   onExportShopeeSheet,
   onReplaceShopeeTemplate,
   shopeeTemplate,
@@ -5871,7 +5771,6 @@ function ProductsTab({
   onSelectedProductIdsChange,
   onSelectedColorVariationsChange,
   onSelectProduct,
-  onProductsChanged,
 }: {
   batchProgress: BatchProgress;
   busy: boolean;
@@ -5910,7 +5809,6 @@ function ProductsTab({
   onGenerateColorVariations: (id?: string, colorVariations?: string[]) => void;
   onGenerateImages: (id?: string) => void;
   onGenerateListing: (id?: string) => void;
-  onExportSelected: (ids?: string[]) => void;
   onExportShopeeSheet: (ids?: string[]) => void;
   onReplaceShopeeTemplate: () => void;
   shopeeTemplate: ShopeeTemplateStatus | null;
@@ -5935,10 +5833,8 @@ function ProductsTab({
   onSelectedProductIdsChange: (ids: string[]) => void;
   onSelectedColorVariationsChange: (ids: string[]) => void;
   onSelectProduct: (id: string) => void;
-  onProductsChanged: () => void;
 }) {
   const [fullscreenAsset, setFullscreenAsset] = useState<Asset | null>(null);
-  const [mercadoLivreOpen, setMercadoLivreOpen] = useState(false);
   const [viewMode, setViewMode] = useState<ProductViewMode>(readProductViewMode);
   // Both views stay mounted once shown, so switching only flips visibility.
   const [boardMounted, setBoardMounted] = useState(viewMode === "board");
@@ -6302,7 +6198,6 @@ function ProductsTab({
                 placement="up"
                 disabled={busy}
                 items={[
-                  { key: "csv", label: "CSV", icon: <Download size={15} />, onClick: () => onExportSelected(selectedProductIds) },
                   {
                     key: "shopee",
                     label: "Planilha Shopee",
@@ -6368,9 +6263,6 @@ function ProductsTab({
                 </button>
                 <button onClick={onApproveProduct} disabled={busy || !listingDraft?.title || !listingDraft?.description}>
                   <BadgeCheck size={16} /> Aprovar
-                </button>
-                <button onClick={() => setMercadoLivreOpen(true)} disabled={busy || !listingDraft?.title}>
-                  <ShoppingBag size={16} /> {mercadoLivrePublished(selectedProduct).length ? "No Mercado Livre" : "Mercado Livre"}
                 </button>
               </div>
             </div>
@@ -6634,13 +6526,6 @@ function ProductsTab({
           </div>
         </div>
       )}
-      {mercadoLivreOpen && selectedProduct && (
-        <MercadoLivrePublishModal
-          product={selectedProduct}
-          onClose={() => setMercadoLivreOpen(false)}
-          onPublished={onProductsChanged}
-        />
-      )}
       {fullscreenAsset && (
         <div className="image-fullscreen-backdrop" onClick={() => setFullscreenAsset(null)}>
           <div className="image-fullscreen-viewer" onClick={(event) => event.stopPropagation()}>
@@ -6821,7 +6706,7 @@ function ProductImageGallery({
             title=""
           />
           <small className="gallery-cover-note">
-            A capa local é enviada ao R2 antes de gerar imagens com IA.
+            A IA recebe a capa por um link público do próprio app.
           </small>
         </div>
         <BaseStyleGallery
@@ -7253,11 +7138,7 @@ function SettingsTab({
   kieImageModelDraft,
   useCodexImageGenDraft,
   codexBinDraft,
-  r2AccessKeyDraft,
-  r2AccountIdDraft,
-  r2BucketDraft,
-  r2PublicUrlDraft,
-  r2SecretKeyDraft,
+  publicAppUrlDraft,
   settings,
   storeProfileDraft,
   storeProfiles,
@@ -7269,11 +7150,7 @@ function SettingsTab({
   onKieImageModelChange,
   onUseCodexImageGenChange,
   onCodexBinChange,
-  onR2AccessKeyChange,
-  onR2AccountIdChange,
-  onR2BucketChange,
-  onR2PublicUrlChange,
-  onR2SecretKeyChange,
+  onPublicAppUrlChange,
   onSaveOpenRouterSettings,
   onClearIntegrationSecrets,
   onSaveStoreProfile,
@@ -7297,11 +7174,7 @@ function SettingsTab({
   kieImageModelDraft: string;
   useCodexImageGenDraft: boolean;
   codexBinDraft: string;
-  r2AccessKeyDraft: string;
-  r2AccountIdDraft: string;
-  r2BucketDraft: string;
-  r2PublicUrlDraft: string;
-  r2SecretKeyDraft: string;
+  publicAppUrlDraft: string;
   settings: SettingsPayload | null;
   storeProfileDraft: StoreProfile | null;
   storeProfiles: StoreProfile[];
@@ -7313,11 +7186,7 @@ function SettingsTab({
   onKieImageModelChange: (value: string) => void;
   onUseCodexImageGenChange: (value: boolean) => void;
   onCodexBinChange: (value: string) => void;
-  onR2AccessKeyChange: (value: string) => void;
-  onR2AccountIdChange: (value: string) => void;
-  onR2BucketChange: (value: string) => void;
-  onR2PublicUrlChange: (value: string) => void;
-  onR2SecretKeyChange: (value: string) => void;
+  onPublicAppUrlChange: (value: string) => void;
   onSaveOpenRouterSettings: (draft: IntegrationDrafts) => Promise<unknown>;
   onClearIntegrationSecrets: () => void;
   onSaveStoreProfile: (draft: StoreProfile) => Promise<unknown>;
@@ -7462,11 +7331,6 @@ function SettingsTab({
       onKieApiKeyChange(secrets.kie_api_key || "");
       onKieImageModelChange(secrets.kie_image_model || kieImageModelDraft || "qwen/image-edit");
       onCodexBinChange(secrets.codex_bin || codexBinDraft || "");
-      onR2AccountIdChange(secrets.cloudflare_account_id || "");
-      onR2BucketChange(secrets.cloudflare_r2_bucket_name || "");
-      onR2AccessKeyChange(secrets.cloudflare_r2_access_key || "");
-      onR2SecretKeyChange(secrets.cloudflare_r2_secret_key || "");
-      onR2PublicUrlChange(secrets.cloudflare_r2_public_url || "");
       setIntegrationSecretsVisible(true);
     } finally {
       setLoadingIntegrationSecrets(false);
@@ -7603,11 +7467,7 @@ function SettingsTab({
       || codexBinDraft !== (settings.integrations.codex_bin || "")
       || Boolean(openRouterApiKeyDraft.trim())
       || Boolean(kieApiKeyDraft.trim())
-      || Boolean(r2AccountIdDraft.trim())
-      || Boolean(r2BucketDraft.trim())
-      || Boolean(r2AccessKeyDraft.trim())
-      || Boolean(r2SecretKeyDraft.trim())
-      || Boolean(r2PublicUrlDraft.trim())
+      || publicAppUrlDraft !== (settings.integrations.public_app_url || "")
     ),
   );
   const colorsDirty = settingsSection === "colors" && !imageColorsEqual(colorDrafts, imageOptions.colors);
@@ -7644,11 +7504,7 @@ function SettingsTab({
       kie_image_model: kieImageModelDraft,
       use_codex_image_gen: useCodexImageGenDraft,
       codex_bin: codexBinDraft,
-      cloudflare_account_id: r2AccountIdDraft,
-      cloudflare_r2_bucket_name: r2BucketDraft,
-      cloudflare_r2_access_key: r2AccessKeyDraft,
-      cloudflare_r2_secret_key: r2SecretKeyDraft,
-      cloudflare_r2_public_url: r2PublicUrlDraft,
+      public_app_url: publicAppUrlDraft,
     },
     save: onSaveOpenRouterSettings,
   });
@@ -7737,7 +7593,6 @@ function SettingsTab({
             </div>
           ))}
         </div>
-        <MercadoLivreConnection />
         {isAdmin && (
           <button className="primary profile-create-button" onClick={() => setNewStoreOpen(true)}>
             <FolderPlus size={18} /> Criar perfil de loja
@@ -7770,10 +7625,10 @@ function SettingsTab({
         <div className="integrations">
           <Integration label="OpenRouter" enabled={Boolean(settings?.integrations.openrouter)} />
           <Integration label="Kie.ai" enabled={Boolean(settings?.integrations.kie_ai)} />
-          <Integration label="Cloudflare R2" enabled={Boolean(settings?.integrations.cloudflare_r2)} />
+          <Integration label="Endereço público" enabled={Boolean(settings?.integrations.public_app_url)} />
         </div>
         <p className="settings-note">
-          Configure OpenRouter (texto/anúncios), Kie.ai (imagens) e Cloudflare R2 (hospedagem pública). As credenciais só são carregadas quando você pedir para mostrar.
+          Configure OpenRouter (texto/anúncios), Kie.ai (imagens) e o endereço público do app (links das imagens). As credenciais só são carregadas quando você pedir para mostrar.
         </p>
         <button className="primary profile-create-button" onClick={openIntegrationEditor}>
           <KeyRound size={18} /> Editar integrações
@@ -8223,79 +8078,16 @@ function SettingsTab({
               </section>
 
               <section className="profile-editor-section">
-                <div className="subsection-title">Cloudflare R2</div>
-                <div className="form-grid">
-                  <label>
-                    Account ID
-                    <div className="credential-field">
-                      <input
-                        type={integrationSecretsVisible ? "text" : "password"}
-                        value={r2AccountIdDraft}
-                        onChange={(event) => onR2AccountIdChange(event.target.value)}
-                        placeholder={settings?.integrations.cloudflare_r2 ? "Configurado. Mostrar para visualizar ou cole um novo." : "CLOUDFLARE_ACCOUNT_ID"}
-                      />
-                      <button type="button" onClick={revealIntegrationSecrets} disabled={loadingIntegrationSecrets}>
-                        {integrationSecretsVisible ? "Ocultar" : "Mostrar"}
-                      </button>
-                    </div>
-                  </label>
-                  <label>
-                    Bucket
-                    <div className="credential-field">
-                      <input
-                        type={integrationSecretsVisible ? "text" : "password"}
-                        value={r2BucketDraft}
-                        onChange={(event) => onR2BucketChange(event.target.value)}
-                        placeholder={settings?.integrations.cloudflare_r2 ? "Configurado. Mostrar para visualizar ou cole um novo." : "CLOUDFLARE_R2_BUCKET_NAME"}
-                      />
-                      <button type="button" onClick={revealIntegrationSecrets} disabled={loadingIntegrationSecrets}>
-                        {integrationSecretsVisible ? "Ocultar" : "Mostrar"}
-                      </button>
-                    </div>
-                  </label>
-                  <label>
-                    Access Key
-                    <div className="credential-field">
-                      <input
-                        type={integrationSecretsVisible ? "text" : "password"}
-                        value={r2AccessKeyDraft}
-                        onChange={(event) => onR2AccessKeyChange(event.target.value)}
-                        placeholder={settings?.integrations.cloudflare_r2 ? "Configurado. Mostrar para visualizar ou cole uma nova." : "CLOUDFLARE_R2_ACCESS_KEY"}
-                      />
-                      <button type="button" onClick={revealIntegrationSecrets} disabled={loadingIntegrationSecrets}>
-                        {integrationSecretsVisible ? "Ocultar" : "Mostrar"}
-                      </button>
-                    </div>
-                  </label>
-                  <label>
-                    Secret Key
-                    <div className="credential-field">
-                      <input
-                        type={integrationSecretsVisible ? "text" : "password"}
-                        value={r2SecretKeyDraft}
-                        onChange={(event) => onR2SecretKeyChange(event.target.value)}
-                        placeholder={settings?.integrations.cloudflare_r2 ? "Configurado. Mostrar para visualizar ou cole uma nova." : "CLOUDFLARE_R2_SECRET_KEY"}
-                      />
-                      <button type="button" onClick={revealIntegrationSecrets} disabled={loadingIntegrationSecrets}>
-                        {integrationSecretsVisible ? "Ocultar" : "Mostrar"}
-                      </button>
-                    </div>
-                  </label>
-                  <label className="full-span">
-                    URL pública do bucket
-                    <div className="credential-field">
-                      <input
-                        type={integrationSecretsVisible ? "text" : "password"}
-                        value={r2PublicUrlDraft}
-                        onChange={(event) => onR2PublicUrlChange(event.target.value)}
-                        placeholder={settings?.integrations.cloudflare_r2 ? "Configurada. Mostrar para visualizar ou cole uma nova." : "https://pub-...r2.dev"}
-                      />
-                      <button type="button" onClick={revealIntegrationSecrets} disabled={loadingIntegrationSecrets}>
-                        {integrationSecretsVisible ? "Ocultar" : "Mostrar"}
-                      </button>
-                    </div>
-                  </label>
-                </div>
+                <div className="subsection-title">Endereço público do app</div>
+                <label>
+                  Endereço na internet
+                  <input
+                    value={publicAppUrlDraft}
+                    onChange={(event) => onPublicAppUrlChange(event.target.value)}
+                    placeholder={settings?.integrations.public_app_url || "https://eco.seudominio.com"}
+                  />
+                  <small>O Kie.ai e a planilha da Shopee baixam as imagens por links que começam com este endereço.</small>
+                </label>
               </section>
             </div>
             <div className="profile-editor-footer">
@@ -8312,389 +8104,6 @@ function SettingsTab({
       )}
 
     </section>
-  );
-}
-
-type MercadoLivreStatus = {
-  configured: boolean;
-  connected: boolean;
-  nickname?: string | null;
-  user_product_seller: boolean;
-  redirect_uri: string;
-};
-
-type MercadoLivreAttribute = {
-  id: string;
-  name: string;
-  value_type: string;
-  values: { id?: string | null; name: string }[];
-  allowed_units: string[];
-  default_unit?: string | null;
-  required: boolean;
-  hint: string;
-};
-
-type MercadoLivreSuggestion = {
-  category_id: string;
-  category_name: string;
-  domain_name: string;
-  remembered?: boolean;
-};
-
-type MercadoLivrePublishedItem = { id: string; permalink?: string; status?: string; color?: string; title?: string };
-
-type MercadoLivreDraft = {
-  connection: { nickname?: string | null; user_product_seller: boolean };
-  query: string;
-  suggestions: MercadoLivreSuggestion[];
-  category: {
-    category_id: string;
-    category_name: string;
-    path: string;
-    listing_allowed: boolean;
-    max_title_length: number;
-    attributes: MercadoLivreAttribute[];
-  } | null;
-  values: Record<string, string>;
-  missing_required: string[];
-  family_name: string;
-  price: string;
-  quantity: number;
-  listing_type_id: string;
-  listing_types: Record<string, string>;
-  warranty_time: string;
-  colors: string[];
-  image_count: number;
-  r2_configured: boolean;
-  published: MercadoLivrePublishedItem[];
-};
-
-const MERCADO_LIVRE_STATUS: Record<string, string> = {
-  active: "ativo",
-  paused: "pausado",
-  under_review: "em revisão",
-  inactive: "inativo",
-  closed: "finalizado",
-};
-
-function mercadoLivrePublished(product?: Product): MercadoLivrePublishedItem[] {
-  const record = product?.metadata?.mercado_livre as { items?: MercadoLivrePublishedItem[] } | undefined;
-  return Array.isArray(record?.items) ? record.items : [];
-}
-
-function MercadoLivreConnection() {
-  const [status, setStatus] = useState<MercadoLivreStatus | null>(null);
-  const [error, setError] = useState("");
-  const [working, setWorking] = useState(false);
-
-  const load = useCallback(async () => {
-    try {
-      setStatus(await api<MercadoLivreStatus>("/api/integrations/mercado-livre/status"));
-    } catch (loadError) {
-      setError(loadError instanceof Error ? loadError.message : String(loadError));
-    }
-  }, []);
-
-  useEffect(() => { void load(); }, [load]);
-
-  async function connect() {
-    setWorking(true);
-    setError("");
-    try {
-      const { url } = await api<{ url: string }>("/api/integrations/mercado-livre/connect", { method: "POST" });
-      window.location.assign(url);
-    } catch (connectError) {
-      setError(connectError instanceof Error ? connectError.message : String(connectError));
-      setWorking(false);
-    }
-  }
-
-  async function disconnect() {
-    setWorking(true);
-    try {
-      await api("/api/integrations/mercado-livre/connection", { method: "DELETE" });
-      await load();
-    } finally {
-      setWorking(false);
-    }
-  }
-
-  return (
-    <div className="marketplace-connection">
-      <div>
-        <strong>Mercado Livre</strong>
-        <small>
-          {!status
-            ? "Verificando conexão..."
-            : !status.configured
-              ? "O administrador precisa cadastrar o App ID e a chave secreta do Mercado Livre."
-              : status.connected
-                ? `Conectado como ${status.nickname ?? "vendedor"}. Os produtos podem ser publicados pela aba Anúncio.`
-                : "Conecte a conta de vendedor desta loja para publicar anúncios direto do app."}
-        </small>
-        {error && <small className="marketplace-error">{error}</small>}
-      </div>
-      {status?.configured && (status.connected ? (
-        <button className="quiet-button" onClick={() => void disconnect()} disabled={working}>Desconectar</button>
-      ) : (
-        <button className="primary" onClick={() => void connect()} disabled={working}>
-          <Link2 size={16} /> Conectar conta
-        </button>
-      ))}
-    </div>
-  );
-}
-
-function MercadoLivrePublishModal({
-  product,
-  onClose,
-  onPublished,
-}: {
-  product: Product;
-  onClose: () => void;
-  onPublished: () => void;
-}) {
-  const [draft, setDraft] = useState<MercadoLivreDraft | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState("");
-  const [search, setSearch] = useState("");
-  const [values, setValues] = useState<Record<string, string>>({});
-  const [familyName, setFamilyName] = useState("");
-  const [price, setPrice] = useState("");
-  const [quantity, setQuantity] = useState(10);
-  const [listingType, setListingType] = useState("gold_special");
-  const [warranty, setWarranty] = useState("90 dias");
-  const [publishColors, setPublishColors] = useState(true);
-  const [publishing, setPublishing] = useState(false);
-  const [published, setPublished] = useState<MercadoLivrePublishedItem[]>(mercadoLivrePublished(product));
-  const [warnings, setWarnings] = useState<string[]>([]);
-
-  const load = useCallback(async (options: { categoryId?: string; query?: string; initial?: boolean } = {}) => {
-    setLoading(true);
-    setError("");
-    const params = new URLSearchParams();
-    if (options.categoryId) params.set("category_id", options.categoryId);
-    if (options.query) params.set("q", options.query);
-    try {
-      const next = await api<MercadoLivreDraft>(`/api/integrations/mercado-livre/products/${product.id}/draft?${params}`);
-      setDraft(next);
-      setValues(next.values);
-      if (options.initial) {
-        setSearch(next.query);
-        setFamilyName(next.family_name);
-        setPrice(next.price);
-        setQuantity(next.quantity);
-        setListingType(next.listing_type_id);
-        setWarranty(next.warranty_time);
-        if (next.published.length) setPublished(next.published);
-      }
-    } catch (loadError) {
-      setError(loadError instanceof Error ? loadError.message : String(loadError));
-    } finally {
-      setLoading(false);
-    }
-  }, [product.id]);
-
-  useEffect(() => { void load({ initial: true }); }, [load]);
-
-  const category = draft?.category ?? null;
-  const maxTitle = category?.max_title_length ?? 60;
-  const missing = (category?.attributes ?? []).filter((attribute) => {
-    if (!attribute.required || values[attribute.id]?.trim()) return false;
-    return !(attribute.id === "GTIN" && values.EMPTY_GTIN_REASON?.trim());
-  });
-  const canPublish = Boolean(
-    category && category.listing_allowed && !missing.length && familyName.trim() && price.trim() &&
-    draft?.r2_configured && draft.image_count > 0 && familyName.length <= maxTitle,
-  );
-  const colorCount = publishColors ? draft?.colors.length ?? 0 : 0;
-
-  async function publish() {
-    if (!category) return;
-    setPublishing(true);
-    setError("");
-    try {
-      const result = await api<{ items: MercadoLivrePublishedItem[]; warnings: string[] }>(
-        `/api/integrations/mercado-livre/products/${product.id}/publish`,
-        {
-          method: "POST",
-          body: JSON.stringify({
-            category_id: category.category_id,
-            listing_type_id: listingType,
-            family_name: familyName.trim(),
-            price,
-            quantity,
-            warranty_time: warranty,
-            attributes: values,
-            publish_colors: publishColors,
-          }),
-        },
-      );
-      setPublished(result.items);
-      setWarnings(result.warnings);
-      onPublished();
-    } catch (publishError) {
-      setError(publishError instanceof Error ? publishError.message : String(publishError));
-      onPublished();
-    } finally {
-      setPublishing(false);
-    }
-  }
-
-  // Portal: the product details panel creates its own stacking context.
-  return createPortal(
-    <div className="confirm-backdrop" role="presentation" onClick={onClose}>
-      <div className="ml-publish-dialog" role="dialog" aria-modal="true" aria-labelledby="ml-publish-title" onClick={(event) => event.stopPropagation()}>
-        <div className="ml-publish-header">
-          <div>
-            <p className="eyebrow">Mercado Livre{draft?.connection.nickname ? ` · ${draft.connection.nickname}` : ""}</p>
-            <h2 id="ml-publish-title">{published.length ? "Anúncio publicado" : "Publicar anúncio"}</h2>
-          </div>
-          <button className="close-button" onClick={onClose}>Fechar</button>
-        </div>
-
-        {error && <p className="notice ml-publish-error">{error}</p>}
-
-        {published.length > 0 ? (
-          <div className="ml-publish-body">
-            <p className="settings-note">Este produto já está no Mercado Livre. Alterações de preço e estoque são feitas pelo painel do Mercado Livre.</p>
-            <ul className="ml-published-list">
-              {published.map((item) => (
-                <li key={item.id}>
-                  <div>
-                    <strong>{item.color || item.title || item.id}</strong>
-                    <small>{item.id}{item.status ? ` · ${MERCADO_LIVRE_STATUS[item.status] ?? item.status}` : ""}</small>
-                  </div>
-                  {item.permalink && <a href={item.permalink} target="_blank" rel="noreferrer">Ver anúncio</a>}
-                </li>
-              ))}
-            </ul>
-            {warnings.map((warning) => <p className="settings-note" key={warning}>{warning}</p>)}
-          </div>
-        ) : !draft && loading ? (
-          <div className="ml-publish-body"><p className="settings-note"><Loader2 size={14} className="spin" /> Consultando o Mercado Livre...</p></div>
-        ) : draft ? (
-          <div className="ml-publish-body">
-            <section className="ml-publish-section">
-              <h3>Categoria no Mercado Livre</h3>
-              <p className="settings-note">
-                Sugerida pelo próprio Mercado Livre a partir do título. A categoria gerada pela IA ({product.listing.category || "vazia"}) serve só como referência; a escolha fica memorizada para os próximos produtos com a mesma categoria.
-              </p>
-              <form
-                className="ml-category-search"
-                onSubmit={(event) => {
-                  event.preventDefault();
-                  void load({ query: search });
-                }}
-              >
-                <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Buscar categoria (ex.: organizador de mesa)" />
-                <button className="quiet-button" disabled={loading || !search.trim()}><Search size={14} /> Buscar</button>
-              </form>
-              <div className="ml-category-options" role="radiogroup" aria-label="Categorias sugeridas">
-                {draft.suggestions.map((suggestion) => (
-                  <label key={suggestion.category_id} className={suggestion.category_id === category?.category_id ? "ml-category-option active" : "ml-category-option"}>
-                    <input
-                      type="radio"
-                      name="ml-category"
-                      checked={suggestion.category_id === category?.category_id}
-                      onChange={() => void load({ categoryId: suggestion.category_id, query: search !== draft.query ? search : undefined })}
-                      disabled={loading}
-                    />
-                    <span>
-                      <strong>{suggestion.category_name}</strong>
-                      <small>{suggestion.remembered ? `Usada antes · ${suggestion.domain_name}` : suggestion.domain_name}</small>
-                    </span>
-                  </label>
-                ))}
-                {!draft.suggestions.length && <p className="settings-note">Nenhuma sugestão. Tente outras palavras na busca.</p>}
-              </div>
-              {category && (
-                <p className={category.listing_allowed ? "ml-category-path" : "ml-category-path invalid"}>
-                  {category.path} <code>{category.category_id}</code>
-                  {!category.listing_allowed && " — esta categoria não aceita anúncios, escolha outra."}
-                </p>
-              )}
-            </section>
-
-            <section className="ml-publish-section">
-              <h3>Anúncio</h3>
-              <div className="listing-editor">
-                <label className="full-span">
-                  {draft.connection.user_product_seller ? "Nome da família (o Mercado Livre gera o título final)" : "Título"}
-                  <input value={familyName} onChange={(event) => setFamilyName(event.target.value)} />
-                  <small className={familyName.length > maxTitle ? "ml-counter invalid" : "ml-counter"}>{familyName.length}/{maxTitle}</small>
-                </label>
-                <label>
-                  Preço (R$)
-                  <input value={price} onChange={(event) => setPrice(event.target.value)} />
-                </label>
-                <label>
-                  Estoque{colorCount > 1 ? " por cor" : ""}
-                  <input type="number" min="1" value={quantity} onChange={(event) => setQuantity(Math.max(1, Number(event.target.value) || 1))} />
-                </label>
-                <label>
-                  Tipo de anúncio
-                  <select value={listingType} onChange={(event) => setListingType(event.target.value)}>
-                    {Object.entries(draft.listing_types).map(([id, label]) => <option key={id} value={id}>{label}</option>)}
-                  </select>
-                </label>
-                <label>
-                  Garantia do vendedor
-                  <input value={warranty} onChange={(event) => setWarranty(event.target.value)} />
-                </label>
-              </div>
-            </section>
-
-            {category && category.attributes.length > 0 && (
-              <section className="ml-publish-section">
-                <h3>Ficha técnica</h3>
-                <div className="listing-editor">
-                  {category.attributes.map((attribute) => (
-                    <label key={attribute.id}>
-                      {attribute.name}{attribute.required ? " *" : ""}
-                      <input
-                        list={attribute.values.length ? `ml-values-${attribute.id}` : undefined}
-                        value={values[attribute.id] ?? ""}
-                        placeholder={attribute.allowed_units.length ? `ex.: 10 ${attribute.default_unit ?? attribute.allowed_units[0]}` : undefined}
-                        onChange={(event) => setValues({ ...values, [attribute.id]: event.target.value })}
-                      />
-                      {attribute.values.length > 0 && (
-                        <datalist id={`ml-values-${attribute.id}`}>
-                          {attribute.values.map((value) => <option key={`${value.id}-${value.name}`} value={value.name} />)}
-                        </datalist>
-                      )}
-                      {attribute.hint && <small>{attribute.hint}</small>}
-                    </label>
-                  ))}
-                </div>
-              </section>
-            )}
-
-            <section className="ml-publish-section ml-publish-summary">
-              <span>{draft.image_count} imagem(ns) do produto</span>
-              {draft.colors.length > 0 && (
-                <label className="checkbox-row">
-                  <input type="checkbox" checked={publishColors} onChange={(event) => setPublishColors(event.target.checked)} />
-                  Publicar as {draft.colors.length} cores ({draft.colors.join(", ")}){draft.connection.user_product_seller ? " como variações da mesma família" : " como variações"}
-                </label>
-              )}
-              {!draft.r2_configured && <span className="ml-category-path invalid">O Cloudflare R2 não está configurado: o Mercado Livre precisa de URLs públicas das imagens.</span>}
-              {missing.length > 0 && <span className="ml-category-path invalid">Falta preencher: {missing.map((attribute) => attribute.name).join(", ")}</span>}
-            </section>
-          </div>
-        ) : null}
-
-        <div className="confirm-actions ml-publish-footer">
-          <button className="primary ghost" onClick={onClose}>{published.length ? "Fechar" : "Cancelar"}</button>
-          {!published.length && (
-            <button className="primary" onClick={() => void publish()} disabled={!canPublish || publishing || loading}>
-              {publishing ? <Loader2 size={16} className="spin" /> : <ShoppingBag size={16} />} Publicar no Mercado Livre
-            </button>
-          )}
-        </div>
-      </div>
-    </div>,
-    document.body,
   );
 }
 
@@ -8840,8 +8249,7 @@ function AdminConsole({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Pr
           <div className="integrations">
             <Integration label="OpenRouter" enabled={Boolean(settings?.integrations.openrouter)} />
             <Integration label="Kie.ai" enabled={Boolean(settings?.integrations.kie_ai)} />
-            <Integration label="Cloudflare R2" enabled={Boolean(settings?.integrations.cloudflare_r2)} />
-            <Integration label="Mercado Livre" enabled={Boolean(settings?.integrations.mercado_livre)} />
+            <Integration label="Endereço público" enabled={Boolean(settings?.integrations.public_app_url)} />
           </div>
           <button className="quiet-button" onClick={() => void loadSecrets()}>Carregar configuração</button>
           <div className="form-grid">
@@ -8849,16 +8257,9 @@ function AdminConsole({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Pr
             <label>Modelo OpenRouter<input value={secrets.openrouter_model ?? ""} onChange={(e) => setSecrets({ ...secrets, openrouter_model: e.target.value })} /></label>
             <label>Kie API key<input type="password" value={secrets.kie_api_key ?? ""} onChange={(e) => setSecrets({ ...secrets, kie_api_key: e.target.value })} /></label>
             <label>Modelo Kie<ImageModelSelect value={secrets.kie_image_model ?? ""} models={settings?.integrations.image_models ?? []} onChange={(value) => setSecrets({ ...secrets, kie_image_model: value })} /></label>
-            <label>R2 Account ID<input value={secrets.cloudflare_account_id ?? ""} onChange={(e) => setSecrets({ ...secrets, cloudflare_account_id: e.target.value })} /></label>
-            <label>R2 Bucket<input value={secrets.cloudflare_r2_bucket_name ?? ""} onChange={(e) => setSecrets({ ...secrets, cloudflare_r2_bucket_name: e.target.value })} /></label>
-            <label>R2 Access key<input type="password" value={secrets.cloudflare_r2_access_key ?? ""} onChange={(e) => setSecrets({ ...secrets, cloudflare_r2_access_key: e.target.value })} /></label>
-            <label>R2 Secret key<input type="password" value={secrets.cloudflare_r2_secret_key ?? ""} onChange={(e) => setSecrets({ ...secrets, cloudflare_r2_secret_key: e.target.value })} /></label>
-            <label>R2 URL pública<input value={secrets.cloudflare_r2_public_url ?? ""} onChange={(e) => setSecrets({ ...secrets, cloudflare_r2_public_url: e.target.value })} /></label>
-            <label>Mercado Livre App ID<input value={secrets.mercadolivre_app_id ?? ""} onChange={(e) => setSecrets({ ...secrets, mercadolivre_app_id: e.target.value })} /></label>
-            <label>Mercado Livre chave secreta<input type="password" value={secrets.mercadolivre_client_secret ?? ""} onChange={(e) => setSecrets({ ...secrets, mercadolivre_client_secret: e.target.value })} /></label>
-            <label>Mercado Livre URL de redirecionamento
-              <input value={secrets.mercadolivre_redirect_uri ?? ""} placeholder={`${window.location.origin}/api/auth/mercado-livre/callback`} onChange={(e) => setSecrets({ ...secrets, mercadolivre_redirect_uri: e.target.value })} />
-              <small>Cadastre exatamente esta URL (HTTPS) no aplicativo em developers.mercadolivre.com.br. Deixe vazio para usar o endereço acima.</small>
+            <label>Endereço público do app
+              <input value={secrets.public_app_url ?? ""} placeholder="https://eco.seudominio.com" onChange={(e) => setSecrets({ ...secrets, public_app_url: e.target.value })} />
+              <small>Os links das imagens enviados ao Kie.ai e à planilha da Shopee começam com este endereço.</small>
             </label>
           </div>
           <button className="primary" onClick={() => void saveIntegrations()}><Check size={16} /> Salvar integrações</button>

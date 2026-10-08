@@ -1,6 +1,6 @@
 """Keep earlier versions of generated images when a new one replaces them.
 
-The current image of each style or color keeps its file name, which R2 keys, exports and
+The current image of each style or color keeps its file name, which public links, exports and
 downloads rely on. Earlier versions move to a subfolder and stay on the product under a
 "previous_" kind, which exports and the current gallery ignore.
 """
@@ -43,7 +43,6 @@ def keep_previous_versions(product: Product, kind: str, current_path: Path) -> N
         os.replace(source, target)
         asset.kind = PREVIOUS_KIND_PREFIX + kind
         asset.path = str(target)
-        # The R2 object under the current name is about to hold the new version.
         asset.public_url = None
 
 

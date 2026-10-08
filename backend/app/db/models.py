@@ -207,7 +207,7 @@ class Job(BaseModel):
 
 
 class PendingCleanup(BaseModel):
-    """Files of a deleted product still to be removed: its folder and its R2 objects."""
+    """Files of a deleted product still to be removed."""
     id: str  # the deleted product's id
     product: Product
     created_at: str = Field(default_factory=now_iso)

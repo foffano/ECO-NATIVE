@@ -1,4 +1,3 @@
-import csv
 import re
 from datetime import datetime
 from pathlib import Path
@@ -6,8 +5,7 @@ from pathlib import Path
 from backend.app.core.paths import EXPORTS_DIR
 from backend.app.db.models import Asset, Marketplace, Product, ProductStatus, StudioState
 from backend.app.db.store import store
-from backend.app.services.cloudflare_r2 import r2_configured, upload_file_to_r2
-from backend.app.services.image_generation import r2_key_prefix
+from backend.app.services.public_images import public_image_url
 from backend.app.services.shopee_template import fill_template, parse_dimensions
 from backend.app.services.sku import ensure_color_skus, ensure_product_sku
 from backend.app.services.store_profiles import get_store_profile
@@ -109,12 +107,10 @@ def is_image_asset(asset: Asset) -> bool:
 
 
 def _ensure_public_url(product: Product, asset: Asset) -> str | None:
-    # Sempre republica o arquivo local no R2 (force=True) antes de exportar o
-    # link. Nao confiamos em uma public_url ja existente: o objeto pode ter sumido
-    # do bucket, gerando imagem quebrada no anuncio exportado.
-    if r2_configured() and asset.path and Path(asset.path).is_file():
-        asset.public_url = upload_file_to_r2(asset.path, r2_key_prefix(product), force=True)
-    return asset.public_url
+    """Link the app serves for the image; the Shopee upload downloads it from there."""
+    if asset.path and Path(asset.path).is_file():
+        return public_image_url(asset.path)
+    return asset.public_url  # A cover not downloaded yet: where it came from.
 
 
 def gallery_image_urls(product: Product) -> list[str]:
@@ -232,32 +228,10 @@ def _rows_with_products(products: list[Product], state: StudioState) -> list[tup
 
 
 def _mark_exported(products: list[Product]) -> None:
-    # Also saves the SKUs and image URLs filled in while building the rows.
+    # Also saves the SKUs filled in while building the rows.
     for product in products:
         product.status = ProductStatus.exported
         store.upsert_product(product)
-
-
-def export_marketplace_csv(
-    project_id: str,
-    marketplace: Marketplace,
-    product_ids: list[str],
-) -> dict[str, str | int] | None:
-    ready, state = _ready_products(project_id, product_ids)
-    if not ready:
-        return None
-
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    output = Path(EXPORTS_DIR) / f"{marketplace.value}_export_{timestamp}.csv"
-
-    rows = [row for row, _ in _rows_with_products(ready, state)]
-    with output.open("w", newline="", encoding="utf-8-sig") as handle:
-        writer = csv.DictWriter(handle, fieldnames=SHOPEE_HEADERS, delimiter=";")
-        writer.writeheader()
-        writer.writerows(rows)
-    _mark_exported(ready)
-
-    return {"path": str(output), "count": len(ready), "marketplace": marketplace.value}
 
 
 def export_shopee_template(template: Path, project_id: str, product_ids: list[str]) -> dict[str, str | int] | None:

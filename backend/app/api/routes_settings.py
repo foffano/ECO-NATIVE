@@ -15,14 +15,7 @@ class SettingsUpdate(BaseModel):
     kie_image_model: str | None = None
     use_codex_image_gen: bool | None = None
     codex_bin: str | None = None
-    cloudflare_account_id: str | None = None
-    cloudflare_r2_bucket_name: str | None = None
-    cloudflare_r2_access_key: str | None = None
-    cloudflare_r2_secret_key: str | None = None
-    cloudflare_r2_public_url: str | None = None
-    mercadolivre_app_id: str | None = None
-    mercadolivre_client_secret: str | None = None
-    mercadolivre_redirect_uri: str | None = None
+    public_app_url: str | None = None
 
 
 @router.get("")
@@ -37,14 +30,7 @@ def read_settings() -> dict[str, object]:
             "image_models": image_model_options(),
             "codex_image_gen": settings.use_codex_image_gen,
             "codex_bin": settings.codex_bin,
-            "cloudflare_r2": bool(
-                settings.cloudflare_account_id
-                and settings.cloudflare_r2_bucket_name
-                and settings.cloudflare_r2_access_key
-                and settings.cloudflare_r2_secret_key
-                and settings.cloudflare_r2_public_url
-            ),
-            "mercado_livre": bool(settings.mercadolivre_app_id and settings.mercadolivre_client_secret),
+            "public_app_url": settings.public_app_url or "",
         },
     }
 
@@ -59,14 +45,7 @@ def read_setting_secrets(request: Request) -> dict[str, str | None]:
         "kie_api_key": settings.kie_api_key,
         "kie_image_model": settings.kie_image_model,
         "codex_bin": settings.codex_bin,
-        "cloudflare_account_id": settings.cloudflare_account_id,
-        "cloudflare_r2_bucket_name": settings.cloudflare_r2_bucket_name,
-        "cloudflare_r2_access_key": settings.cloudflare_r2_access_key,
-        "cloudflare_r2_secret_key": settings.cloudflare_r2_secret_key,
-        "cloudflare_r2_public_url": settings.cloudflare_r2_public_url,
-        "mercadolivre_app_id": settings.mercadolivre_app_id,
-        "mercadolivre_client_secret": settings.mercadolivre_client_secret,
-        "mercadolivre_redirect_uri": settings.mercadolivre_redirect_uri,
+        "public_app_url": settings.public_app_url,
     }
 
 
@@ -89,22 +68,11 @@ def update_settings(payload: SettingsUpdate, request: Request) -> dict[str, obje
         values["USE_CODEX_IMAGE_GEN"] = "true" if payload.use_codex_image_gen else "false"
     if payload.codex_bin is not None:
         values["CODEX_BIN"] = payload.codex_bin
-    if payload.cloudflare_account_id:
-        values["CLOUDFLARE_ACCOUNT_ID"] = payload.cloudflare_account_id
-    if payload.cloudflare_r2_bucket_name:
-        values["CLOUDFLARE_R2_BUCKET_NAME"] = payload.cloudflare_r2_bucket_name
-    if payload.cloudflare_r2_access_key:
-        values["CLOUDFLARE_R2_ACCESS_KEY"] = payload.cloudflare_r2_access_key
-    if payload.cloudflare_r2_secret_key:
-        values["CLOUDFLARE_R2_SECRET_KEY"] = payload.cloudflare_r2_secret_key
-    if payload.cloudflare_r2_public_url:
-        values["CLOUDFLARE_R2_PUBLIC_URL"] = payload.cloudflare_r2_public_url
-    if payload.mercadolivre_app_id:
-        values["MERCADOLIVRE_APP_ID"] = payload.mercadolivre_app_id
-    if payload.mercadolivre_client_secret:
-        values["MERCADOLIVRE_CLIENT_SECRET"] = payload.mercadolivre_client_secret
-    if payload.mercadolivre_redirect_uri:
-        values["MERCADOLIVRE_REDIRECT_URI"] = payload.mercadolivre_redirect_uri
+    if payload.public_app_url is not None:
+        url = payload.public_app_url.strip().rstrip("/")
+        if url and not url.startswith(("http://", "https://")):
+            url = f"https://{url}"
+        values["PUBLIC_APP_URL"] = url
 
     if values:
         set_env_values(values)

@@ -9,10 +9,9 @@ from PIL import Image
 
 from backend.app.core.settings import AppSettings, get_settings
 from backend.app.db.models import Asset, Product
-from backend.app.services.cloudflare_r2 import upload_file_to_r2
 from backend.app.services.codex_image import edit_image_with_codex
 from backend.app.services.cost_tracker import add_kie_image_cost
-from backend.app.services.cover_image import cover_r2_public_url, ensure_product_cover
+from backend.app.services.cover_image import ensure_product_cover
 from backend.app.services.http_client import HttpResponseError, download as http_download, read_response_json, read_response_text, request as http_request
 from backend.app.services.image_models import DEFAULT_IMAGE_MODEL, get_image_model
 from backend.app.services.image_versions import replace_with_new_version
@@ -23,6 +22,7 @@ from backend.app.services.product_paths import (
     studio_image_filename,
 )
 from backend.app.services.prompt_library import IMAGE_PROMPTS, render_color_variation_prompt
+from backend.app.services.public_images import public_image_url
 from backend.app.services.rate_limiter import kie_generation_limiter
 
 
@@ -34,26 +34,11 @@ def product_sku(product: Product) -> str:
     return str(product.metadata.get("sku") or "").strip().upper()
 
 
-def r2_key_prefix(product: Product) -> str:
-    return f"eco-native/{product.project_id}/{product.id}"
-
-
 def asset_public_url(product: Product, asset: Asset) -> str:
-    if asset.kind == "cover_image":
-        return cover_r2_public_url(product, asset)
-    # Sempre republica o arquivo local no R2 antes de entregar a URL. Nunca
-    # reaproveitamos uma URL ja existente (force=True): o objeto pode ter sumido
-    # do bucket ou apontar para uma versao antiga, o que faria a IA receber um
-    # link quebrado/desatualizado.
+    """Link the app serves for this image, so the Kie.ai API can download it."""
     if asset.path and Path(asset.path).is_file():
-        public_url = upload_file_to_r2(asset.path, r2_key_prefix(product), force=True)
-        asset.public_url = public_url
-        return public_url
-    if asset.public_url:
-        return asset.public_url
-    raise RuntimeError(
-        "Asset sem arquivo local e sem URL publica valida para enviar a IA."
-    )
+        return public_image_url(asset.path)
+    raise RuntimeError("Imagem sem arquivo local para enviar à IA.")
 
 
 def asset_local_path(product: Product, asset: Asset) -> Path:
@@ -84,7 +69,7 @@ def resolve_source_ref(product: Product, asset: Asset, settings: AppSettings) ->
     """Resolve a referencia da imagem base conforme o provedor ativo.
 
     - Codex CLI: caminho de arquivo local (str).
-    - Kie.ai: URL publica no R2 (str).
+    - Kie.ai: link publico servido pelo app (str).
     """
     if settings.use_codex_image_gen:
         return str(asset_local_path(product, asset))
@@ -284,13 +269,7 @@ def generate_studio_images(
         kind = f"generated_{prompt_key}"
         output_path = output_dir / studio_image_filename(sku, prompt_key)
         if output_path.exists() and not regenerate:
-            public_url = upload_file_to_r2(output_path, r2_key_prefix(product), force=True)
-            asset = Asset(
-                product_id=product.id,
-                kind=kind,
-                path=str(output_path),
-                public_url=public_url,
-            )
+            asset = Asset(product_id=product.id, kind=kind, path=str(output_path))
             created_assets.append(asset)
             if on_asset is not None:
                 on_asset(asset)
@@ -311,8 +290,7 @@ def generate_studio_images(
             # mesmo lote sejam tentados.
             failures.append(f"{prompt_key}: {exc}")
             continue
-        public_url = upload_file_to_r2(output_path, r2_key_prefix(product), force=True)
-        asset = Asset(product_id=product.id, kind=kind, path=str(output_path), public_url=public_url)
+        asset = Asset(product_id=product.id, kind=kind, path=str(output_path))
         created_assets.append(asset)
         if on_asset is not None:
             on_asset(asset)
@@ -360,8 +338,7 @@ def regenerate_studio_image(
         cost_label=f"Recriação de imagem: {prompt_key}",
     )
     replace_with_new_version(product, kind, output_path, render)
-    public_url = upload_file_to_r2(output_path, r2_key_prefix(product), force=True)
-    return Asset(product_id=product.id, kind=kind, path=str(output_path), public_url=public_url)
+    return Asset(product_id=product.id, kind=kind, path=str(output_path))
 
 
 def regenerate_color_variation_with_kie(
@@ -400,8 +377,7 @@ def regenerate_color_variation_with_kie(
         cost_label=f"Recriação de variação de cor: {color_name}",
     )
     replace_with_new_version(product, kind, output_path, render)
-    public_url = upload_file_to_r2(output_path, r2_key_prefix(product), force=True)
-    return Asset(product_id=product.id, kind=kind, path=str(output_path), public_url=public_url)
+    return Asset(product_id=product.id, kind=kind, path=str(output_path))
 
 
 def generate_color_variations_with_kie(
@@ -445,13 +421,7 @@ def generate_color_variations_with_kie(
         output_path = output_dir / color_variation_filename(sku, source_prompt_key, color_name)
         kind = f"color_{color_name}"
         if output_path.exists() and not regenerate:
-            public_url = upload_file_to_r2(output_path, r2_key_prefix(product), force=True)
-            asset = Asset(
-                product_id=product.id,
-                kind=kind,
-                path=str(output_path),
-                public_url=public_url,
-            )
+            asset = Asset(product_id=product.id, kind=kind, path=str(output_path))
             created_assets.append(asset)
             if on_asset is not None:
                 on_asset(asset)
@@ -467,8 +437,7 @@ def generate_color_variations_with_kie(
             cost_label=f"Variação de cor: {color_name}",
         )
         replace_with_new_version(product, kind, output_path, render)
-        public_url = upload_file_to_r2(output_path, r2_key_prefix(product), force=True)
-        asset = Asset(product_id=product.id, kind=kind, path=str(output_path), public_url=public_url)
+        asset = Asset(product_id=product.id, kind=kind, path=str(output_path))
         created_assets.append(asset)
         if on_asset is not None:
             on_asset(asset)

@@ -10,13 +10,9 @@ from pathlib import Path
 from PIL import Image
 
 from backend.app.db.models import Asset, Product
-from backend.app.services.cloudflare_r2 import r2_configured, upload_file_to_r2
 from backend.app.services.http_client import HttpResponseError, download as http_download
 from backend.app.services.product_paths import cover_image_filename, product_assets_dir
 
-
-def r2_key_prefix(product: Product) -> str:
-    return f"eco-native/{product.project_id}/{product.id}"
 
 logger = logging.getLogger(__name__)
 
@@ -176,27 +172,6 @@ def ensure_product_cover(product: Product) -> Asset:
 
     validate_cover_bytes(path.read_bytes(), path)
     return cover
-
-
-def cover_r2_public_url(product: Product, cover: Asset | None = None) -> str:
-    """Publica a capa local no R2 e retorna a URL publica usada pela IA."""
-    if not r2_configured():
-        raise CoverImageError(
-            "Cloudflare R2 nao configurado. Configure R2 em Ajustes para enviar a capa capturada a IA."
-        )
-
-    cover = cover or ensure_product_cover(product)
-    path = Path(cover.path)
-    if not path.is_file():
-        raise CoverImageError("Capa local nao encontrada no disco.")
-
-    try:
-        public_url = upload_file_to_r2(path, r2_key_prefix(product), force=True)
-    except Exception as exc:
-        raise CoverImageError(f"Falha ao publicar capa no R2: {exc}") from exc
-
-    cover.public_url = public_url
-    return public_url
 
 
 def repair_product_cover(product: Product) -> Asset:

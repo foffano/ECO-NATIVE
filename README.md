@@ -48,21 +48,15 @@ A antiga gestão de impressoras, placas e agenda de impressão foi retirada da v
 
 Para desenvolvimento com recarga automática, use `npm run dev`. O frontend fica em `http://127.0.0.1:5173` e a API em `http://127.0.0.1:18765`.
 
-## Publicação no Mercado Livre
+## Links públicos das imagens
 
-1. Crie um aplicativo em [developers.mercadolivre.com.br](https://developers.mercadolivre.com.br/pt_br/registre-o-seu-aplicativo)
-   com os escopos de leitura/escrita e cadastre a URL de redirecionamento
-   `https://SEU-DOMINIO/api/auth/mercado-livre/callback` (precisa ser HTTPS).
-2. No painel administrativo, preencha App ID, chave secreta e, se o endereço
-   público for diferente do acessado, a URL de redirecionamento.
-3. Em cada loja, abra Ajustes > Loja e prompts e clique em **Conectar conta**.
-4. No produto, use o botão **Mercado Livre**: a categoria vem da previsão do
-   próprio Mercado Livre a partir do título, a ficha técnica obrigatória é
-   pré-preenchida e cada cor vira um anúncio da mesma família (User Products).
-
-As imagens são enviadas por URL pública, então o Cloudflare R2 precisa estar
-configurado. Os tokens ficam em `mercadolivre.json` no diretório de dados, fora
-do banco e dos backups; após restaurar um backup, conecte a conta novamente.
+O Kie.ai e a planilha de envio em massa da Shopee baixam as imagens por link.
+O próprio app serve esses links em `/i/...`, sem login: cada link leva uma
+assinatura secreta do arquivo, então não pode ser adivinhado e deixa de
+funcionar quando a imagem é apagada. Configure o endereço público do app
+(por exemplo `https://eco.seudominio.com`) em Ajustes → Integrações ou na
+variável `PUBLIC_APP_URL`. O caminho `/i/` precisa ficar acessível sem
+proteção extra (como Cloudflare Access).
 
 ## Dados locais e migração
 

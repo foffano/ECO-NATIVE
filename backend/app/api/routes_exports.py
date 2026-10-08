@@ -9,7 +9,8 @@ from pydantic import BaseModel
 
 from backend.app.core.paths import DATA_DIR
 from backend.app.db.models import Marketplace
-from backend.app.services.exporter import export_marketplace_csv, export_shopee_template
+from backend.app.services.exporter import export_shopee_template
+from backend.app.services.public_images import PublicUrlMissing
 from backend.app.db.store import store
 from backend.app.services.authorization import current_store_id, store_project_ids
 from backend.app.services.shopee_template import ShopeeTemplateError, validate_template
@@ -50,25 +51,6 @@ def _export_headers(result: dict) -> dict[str, str]:
         "X-Eco-Export-Count": str(result["count"]),
         "X-Eco-Export-Marketplace": str(result["marketplace"]),
     }
-
-
-@router.post("")
-def create_export(payload: ExportRequest, request: Request) -> FileResponse:
-    product_ids = _store_product_ids(payload, current_store_id(request))
-    result = export_marketplace_csv(
-        project_id="",
-        marketplace=payload.marketplace,
-        product_ids=product_ids,
-    )
-    if not result:
-        raise HTTPException(status_code=400, detail="Nenhum produto valido para exportar")
-    path = str(result["path"])
-    return FileResponse(
-        path,
-        media_type="text/csv; charset=utf-8",
-        filename=path.rsplit("\\", 1)[-1].rsplit("/", 1)[-1],
-        headers=_export_headers(result),
-    )
 
 
 @router.get("/shopee-template")
@@ -112,7 +94,7 @@ def create_shopee_xlsx(payload: ExportRequest, request: Request) -> FileResponse
         raise HTTPException(status_code=409, detail="Envie primeiro o template de envio em massa baixado da Shopee")
     try:
         result = export_shopee_template(template, "", product_ids)
-    except ShopeeTemplateError as error:
+    except (ShopeeTemplateError, PublicUrlMissing) as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
     if not result:
         raise HTTPException(status_code=400, detail="Nenhum produto valido para exportar")

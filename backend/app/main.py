@@ -5,9 +5,9 @@ import threading
 import os
 from urllib.parse import urlparse
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -19,10 +19,8 @@ from backend.app.api.routes_assets import router as assets_router
 from backend.app.api.routes_backups import router as backups_router
 from backend.app.api.routes_image_options import router as image_options_router
 from backend.app.api.routes_jobs import router as jobs_router
-from backend.app.api.routes_mercadolivre import callback_router as mercadolivre_callback_router, router as mercadolivre_router
 from backend.app.api.routes_products import router as products_router
 from backend.app.api.routes_blocked_urls import router as blocked_urls_router
-from backend.app.api.routes_r2 import router as r2_router
 from backend.app.api.routes_runtime import router as runtime_router
 from backend.app.api.routes_settings import router as settings_router
 from backend.app.api.routes_filaments import router as filaments_router
@@ -34,6 +32,7 @@ from backend.app.core.maintenance import maintenance_requested
 from backend.app.db.store import store
 from backend.app.services.auth import read_session, setup_required
 from backend.app.services.authorization import store_project_ids
+from backend.app.services.public_images import PUBLIC_IMAGE_PREFIX, forget_r2_links, resolve_public_image
 
 ensure_app_dirs()
 
@@ -49,6 +48,7 @@ async def lifespan(app):
         _secret()
         from backend.app.services.store_catalog import unify_store_projects
         unify_store_projects()
+        forget_r2_links()
         job_queue.start()
         from backend.app.services.product_cleanup import run_pending_cleanups
         # Files of products deleted right before a restart; never delays startup.
@@ -178,6 +178,16 @@ def health() -> dict:
         return payload
 
 
+@app.get(PUBLIC_IMAGE_PREFIX + "/{signature}/{relative:path}", include_in_schema=False)
+def public_image(signature: str, relative: str) -> FileResponse:
+    """Product image for Kie.ai and the Shopee upload; open to anyone with the signed link."""
+    path = resolve_public_image(signature, relative)
+    if path is None:
+        raise HTTPException(status_code=404, detail="Imagem não encontrada")
+    # Short cache: the current image of a style keeps its file name when regenerated.
+    return FileResponse(path, headers={"Cache-Control": "public, max-age=300"})
+
+
 app.include_router(blocked_urls_router, prefix="/api/blocked-urls", tags=["blocked-urls"])
 app.include_router(products_router, prefix="/api/products", tags=["products"])
 app.include_router(jobs_router, prefix="/api/jobs", tags=["jobs"])
@@ -190,11 +200,8 @@ app.include_router(assets_router, prefix="/api/assets", tags=["assets"])
 app.include_router(store_profiles_router, prefix="/api/store-profiles", tags=["store-profiles"])
 app.include_router(filaments_router, prefix="/api/store-profiles", tags=["filaments"])
 app.include_router(image_options_router, prefix="/api/image-options", tags=["image-options"])
-app.include_router(r2_router, prefix="/api/r2", tags=["r2"])
 app.include_router(auth_router, prefix="/api/auth", tags=["auth"])
 app.include_router(admin_router, prefix="/api/admin", tags=["admin"])
-app.include_router(mercadolivre_router, prefix="/api/integrations/mercado-livre", tags=["mercado-livre"])
-app.include_router(mercadolivre_callback_router, prefix="/api/auth/mercado-livre", tags=["mercado-livre"])
 
 # In production the same local process serves the compiled React application.
 # Cloudflare Tunnel therefore exposes one origin while all files and work stay here.

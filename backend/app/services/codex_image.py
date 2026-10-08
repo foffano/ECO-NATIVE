@@ -1,10 +1,9 @@
 """Geracao/edicao de imagens usando o Codex CLI.
 
-Diferente do caminho da Kie.ai (que recebe uma URL publica), o Codex CLI roda
-localmente e aceita a imagem base como arquivo no disco (flag --image). Por isso
-aqui trabalhamos sempre com caminhos locais: a imagem de origem e o destino sao
-arquivos no proprio computador do usuario, sem necessidade de subir nada para o
-Cloudflare R2 antes de gerar.
+Diferente do caminho da Kie.ai (que recebe um link publico servido pelo app), o
+Codex CLI roda localmente e aceita a imagem base como arquivo no disco (flag
+--image). Por isso aqui trabalhamos sempre com caminhos locais: a imagem de origem
+e o destino sao arquivos no proprio computador do usuario.
 
 O Codex usa a assinatura ChatGPT (login OAuth) para a skill `imagegen` /
 ferramenta `image_gen`, entao no modo padrao nao e necessaria a OPENAI_API_KEY.

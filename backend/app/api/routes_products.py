@@ -15,8 +15,7 @@ from pydantic import BaseModel, Field
 from backend.app.db.models import Asset, Listing, Product, ProductStatus, StudioState, now_iso
 from backend.app.db.store import store
 from backend.app.core.paths import CACHE_DIR
-from backend.app.services.cover_image import CoverImageError, cover_r2_public_url, normalize_cover_to_jpeg, validate_cover_bytes
-from backend.app.services.cloudflare_r2 import r2_configured, upload_file_to_r2
+from backend.app.services.cover_image import CoverImageError, normalize_cover_to_jpeg, validate_cover_bytes
 from backend.app.services.product_paths import (
     MODEL_FILE_SUFFIXES,
     cover_image_filename,
@@ -478,11 +477,6 @@ async def upload_cover_image(product_id: str, file: UploadFile = File(...)) -> P
         cover = Asset(product_id=product.id, kind="cover_image", path=str(output_path))
         product.assets.append(cover)
 
-    if r2_configured():
-        try:
-            cover.public_url = cover_r2_public_url(product, cover)
-        except CoverImageError as exc:
-            raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     product.updated_at = now_iso()
     return _public_product(store.upsert_product(product))
@@ -533,15 +527,6 @@ async def upload_style_image(product_id: str, prompt_key: str, file: UploadFile 
     asset = Asset(product_id=product.id, kind=kind, path=str(output_path))
     product.assets.append(asset)
 
-    if r2_configured():
-        try:
-            asset.public_url = upload_file_to_r2(
-                str(output_path),
-                f"eco-native/{product.project_id}/{product.id}",
-                force=True,
-            )
-        except Exception as exc:
-            raise HTTPException(status_code=500, detail=f"Falha ao publicar imagem no R2: {exc}") from exc
 
     product.updated_at = now_iso()
     return _public_product(store.upsert_product(product))
@@ -625,15 +610,6 @@ async def upload_manual_color_image(
     labels[slug] = color_name
     product.metadata["color_labels"] = labels
 
-    if r2_configured():
-        try:
-            asset.public_url = upload_file_to_r2(
-                str(output_path),
-                f"eco-native/{product.project_id}/{product.id}",
-                force=True,
-            )
-        except Exception as exc:
-            raise HTTPException(status_code=500, detail=f"Falha ao publicar imagem no R2: {exc}") from exc
 
     product.updated_at = now_iso()
     return _public_product(store.upsert_product(product))
@@ -709,15 +685,6 @@ async def upload_variation_image(product_id: str, slug: str, file: UploadFile = 
         asset = Asset(product_id=product.id, kind=kind, path=str(output_path))
         product.assets.append(asset)
 
-    if r2_configured():
-        try:
-            asset.public_url = upload_file_to_r2(
-                str(output_path),
-                f"eco-native/{product.project_id}/{product.id}",
-                force=True,
-            )
-        except Exception as exc:
-            raise HTTPException(status_code=500, detail=f"Falha ao publicar imagem no R2: {exc}") from exc
 
     product.updated_at = now_iso()
     return _public_product(store.upsert_product(product))
