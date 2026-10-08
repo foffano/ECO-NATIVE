@@ -168,6 +168,16 @@ class StudioStore:
     def _initialize(self, conn: sqlite3.Connection) -> None:
         version = conn.execute("PRAGMA user_version").fetchone()[0]
         if version == SCHEMA_VERSION:
+            # A release can add a collection; every statement is IF NOT EXISTS,
+            # so this only creates the tables an older database lacks.
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                for statement in _schema_statements():
+                    conn.execute(statement)
+                conn.execute("COMMIT")
+            except BaseException:
+                conn.execute("ROLLBACK")
+                raise
             self._warn_if_legacy_json_changed(conn)
             return
         if version > SCHEMA_VERSION:

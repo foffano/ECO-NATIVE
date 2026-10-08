@@ -138,3 +138,17 @@ def test_deleting_a_product_removes_its_assets(studio):
     studio.mutate(lambda state: state.products.clear(), allow_product_shrink=True)
     with sqlite3.connect(studio.path) as conn:
         assert conn.execute("SELECT COUNT(*) FROM assets").fetchone()[0] == 0
+
+
+def test_existing_database_gains_tables_added_by_an_update(studio):
+    studio.upsert_project(Project(id="p", name="P"))
+    studio.snapshot()
+    # A database written before a release that added a collection.
+    studio._conn.execute("DROP TABLE pending_cleanups")
+    studio = reopen(studio)
+    try:
+        state = studio.load()
+        assert [project.id for project in state.projects] == ["p"]
+        assert state.pending_cleanups == []
+    finally:
+        studio.close()
