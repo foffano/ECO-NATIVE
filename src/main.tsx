@@ -7947,6 +7947,7 @@ function SettingsTab({
           <h2>Ambiente local</h2>
         </div>
         <div className="summary-list path-list">
+          <SummaryItem label="Versão do app" value={`v${__APP_VERSION__}`} />
           <SummaryItem label="Armazenamento" value="Neste computador" />
           <SummaryItem label="Modelo OpenRouter" value={settings?.integrations.openrouter_model ?? "--"} />
           <SummaryItem label="Modelo Kie imagem" value={settings?.integrations.kie_image_model ?? "--"} />
