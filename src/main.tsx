@@ -47,10 +47,9 @@ import {
 } from "lucide-react";
 import "./styles.css";
 import {
-  applyUiThemePreference,
   initUiTheme,
-  readUiThemePreference,
-  saveUiThemePreference,
+  normalizeUiThemePreference,
+  showUiTheme,
   UI_THEME_PRESETS,
   type UiThemeId,
   type UiThemePreference,
@@ -310,6 +309,7 @@ type StoreProfile = {
   marketplace: Marketplace;
   niche: string;
   logo_path?: string | null;
+  ui_theme?: UiThemePreference | null;
   ai_profile_id?: string | null;
   search_prompt: string;
   curation_prompt: string;
@@ -331,7 +331,7 @@ type AuthStatus = {
   stores?: LoginStore[];
 };
 
-type LoginStore = { id: string; name: string; photo_version?: string | null };
+type LoginStore = { id: string; name: string; photo_version?: string | null; ui_theme?: UiThemePreference | null };
 
 const LAST_LOGIN_STORE_KEY = "eco-native-last-login-store";
 
@@ -1722,6 +1722,10 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
   const [productionSettings, setProductionSettings] = useState<ProductionSettings | null>(null);
 
   const activeStoreProfile = storeProfiles.find((profile) => profile.id === activeStoreProfileId) ?? storeProfiles[0];
+  const storeTheme = (activeStoreProfile ?? auth.store)?.ui_theme;
+  const storeThemeKey = JSON.stringify(storeTheme ?? null);
+  // Each store keeps its own colours, whichever browser it signs in from.
+  useEffect(() => showUiTheme(storeTheme), [storeThemeKey]);
   // The server only returns this store's jobs.
   const storeJobs = jobs;
   const [debouncedProductQuery, setDebouncedProductQuery] = useState(productFilters.query);
@@ -2007,6 +2011,19 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
         : current,
     );
     scheduleStatsRefresh();
+  }
+
+  async function saveStoreTheme(theme: UiThemePreference) {
+    const profileId = activeStoreProfile?.id;
+    if (!profileId) return;
+    try {
+      patchStoreProfile(await api<StoreProfile>(`/api/store-profiles/${profileId}/theme`, {
+        method: "PUT",
+        body: JSON.stringify(theme),
+      }));
+    } catch (error) {
+      setNotice(error instanceof Error ? `Não foi possível salvar o tema da loja. ${error.message}` : "Não foi possível salvar o tema da loja.");
+    }
   }
 
   function patchStoreProfile(updated: StoreProfile) {
@@ -3388,6 +3405,8 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
         {activeTab === "settings" && (
           <SettingsTab
             isAdmin={Boolean(auth.is_admin)}
+            uiTheme={normalizeUiThemePreference(storeTheme)}
+            onSaveUiTheme={saveStoreTheme}
             storeProfileDraft={storeProfileDraft}
             storeProfiles={storeProfiles}
             imageOptions={imageOptions}
@@ -7153,6 +7172,8 @@ function GalleryGroup({
 
 function SettingsTab({
   isAdmin,
+  uiTheme,
+  onSaveUiTheme,
   imageOptions,
   openRouterApiKeyDraft,
   openRouterModelDraft,
@@ -7189,6 +7210,8 @@ function SettingsTab({
   onWrapAction,
 }: {
   isAdmin: boolean;
+  uiTheme: UiThemePreference;
+  onSaveUiTheme: (theme: UiThemePreference) => Promise<void>;
   imageOptions: ImageOptions;
   openRouterApiKeyDraft: string;
   openRouterModelDraft: string;
@@ -7256,26 +7279,33 @@ function SettingsTab({
   const [printerUsefulLifeHours, setPrinterUsefulLifeHours] = useState("5000");
   const [maintenanceCostPerHour, setMaintenanceCostPerHour] = useState("0");
   const [laborCostPerHour, setLaborCostPerHour] = useState("0");
-  const [uiThemePreference, setUiThemePreference] = useState<UiThemePreference>(() => readUiThemePreference());
+  const uiThemePreference = uiTheme;
   const [customAccentDraft, setCustomAccentDraft] = useState(
-    () => readUiThemePreference().accent ?? UI_THEME_PRESETS[0].tokens.greenDark,
+    () => uiTheme.accent ?? UI_THEME_PRESETS[0].tokens.greenDark,
   );
 
+  // The colour picker fires on every move; only the colour it stops on is saved.
+  const themeSaveTimer = useRef<number | undefined>(undefined);
+  useEffect(() => () => window.clearTimeout(themeSaveTimer.current), []);
+  function queueThemeSave(next: UiThemePreference) {
+    window.clearTimeout(themeSaveTimer.current);
+    themeSaveTimer.current = window.setTimeout(() => void onSaveUiTheme(next), 400);
+  }
+
   function selectUiTheme(id: UiThemeId) {
-    const next: UiThemePreference = id === "custom"
+    const next = normalizeUiThemePreference(id === "custom"
       ? { id: "custom", accent: customAccentDraft }
-      : { id: id as Exclude<UiThemeId, "custom"> };
-    setUiThemePreference(next);
-    saveUiThemePreference(next);
-    applyUiThemePreference(next);
+      : { id: id as Exclude<UiThemeId, "custom"> });
+    showUiTheme(next);
+    queueThemeSave(next);
   }
 
   function applyCustomAccent(accent: string) {
     setCustomAccentDraft(accent);
-    const next: UiThemePreference = { id: "custom", accent };
-    setUiThemePreference(next);
-    saveUiThemePreference(next);
-    applyUiThemePreference(next);
+    const next = normalizeUiThemePreference({ id: "custom", accent });
+    if (next.id !== "custom") return;  // Not a colour yet (still typing).
+    showUiTheme(next);
+    queueThemeSave(next);
   }
 
   // A newer server copy (usually an autosave reply) only replaces drafts the
@@ -7665,7 +7695,7 @@ function SettingsTab({
           <h2>Aparência da interface</h2>
         </div>
         <p className="settings-note">
-          Escolha a paleta do app. A preferência fica salva neste navegador/computador e é aplicada imediatamente.
+          Escolha a paleta desta loja. Ela fica salva na loja e aparece em qualquer computador, inclusive na tela de login.
         </p>
         <div className="theme-grid">
           {UI_THEME_PRESETS.map((preset) => (
@@ -8148,6 +8178,7 @@ function Integration({ label, enabled }: { label: string; enabled: boolean }) {
 }
 
 function AdminConsole({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<void> }) {
+  useEffect(() => showUiTheme(null), []);
   const [usage, setUsage] = useState<AdminUsage | null>(null);
   const [settings, setSettings] = useState<SettingsPayload | null>(null);
   const [secrets, setSecrets] = useState<SettingsSecrets>({});
@@ -8311,6 +8342,9 @@ function LoginScreen({ status, onAuthenticated }: { status: AuthStatus; onAuthen
     return loginStores.length === 1 ? loginStores[0].id : "";
   });
   const selectedStore = loginStores.find((store) => store.id === selectedStoreId);
+  // The chosen store's colours, already on the login page; the administrator uses the default.
+  const loginThemeKey = JSON.stringify(setupRequired || adminMode ? null : selectedStore?.ui_theme ?? null);
+  useEffect(() => showUiTheme(JSON.parse(loginThemeKey)), [loginThemeKey]);
 
   function chooseStore(storeId: string) {
     setSelectedStoreId(storeId);
@@ -8476,7 +8510,9 @@ function Root() {
 
   async function logout() {
     await api<void>("/api/auth/logout", { method: "POST" });
-    setAuth({ authenticated: false, setup_required: false });
+    // The login page needs the store list from the status, or it opens on the administrator card.
+    setAuth(null);
+    loadStatus();
   }
 
   if (!auth) return <main className="auth-page"><Loader2 size={28} className="spin" /></main>;

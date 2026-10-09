@@ -313,27 +313,40 @@ export function resolveUiThemeTokens(preference: UiThemePreference): UiThemeToke
   return preset?.tokens ?? UI_THEME_PRESETS[0].tokens;
 }
 
-export function readUiThemePreference(): UiThemePreference {
-  try {
-    const raw = window.localStorage.getItem(UI_THEME_STORAGE_KEY);
-    if (!raw) return DEFAULT_THEME;
-    const parsed = JSON.parse(raw) as UiThemePreference;
-    if (parsed.id === "custom") {
-      const accent = normalizeHex(parsed.accent ?? "");
-      if (!accent) return DEFAULT_THEME;
-      return { id: "custom", accent };
-    }
-    if (UI_THEME_PRESETS.some((preset) => preset.id === parsed.id)) {
-      return { id: parsed.id as Exclude<UiThemeId, "custom"> };
-    }
-  } catch {
-    return DEFAULT_THEME;
+export function normalizeUiThemePreference(value: Partial<UiThemePreference> | null | undefined): UiThemePreference {
+  if (!value) return DEFAULT_THEME;
+  if (value.id === "custom") {
+    const accent = normalizeHex(value.accent ?? "");
+    return accent ? { id: "custom", accent } : DEFAULT_THEME;
+  }
+  if (UI_THEME_PRESETS.some((preset) => preset.id === value.id)) {
+    return { id: value.id as Exclude<UiThemeId, "custom"> };
   }
   return DEFAULT_THEME;
 }
 
+export function readUiThemePreference(): UiThemePreference {
+  try {
+    const raw = window.localStorage.getItem(UI_THEME_STORAGE_KEY);
+    return raw ? normalizeUiThemePreference(JSON.parse(raw) as UiThemePreference) : DEFAULT_THEME;
+  } catch {
+    return DEFAULT_THEME;
+  }
+}
+
 export function saveUiThemePreference(preference: UiThemePreference) {
-  window.localStorage.setItem(UI_THEME_STORAGE_KEY, JSON.stringify(preference));
+  try {
+    window.localStorage.setItem(UI_THEME_STORAGE_KEY, JSON.stringify(preference));
+  } catch {
+    // Only avoids a flash of the default colours on the next load.
+  }
+}
+
+/** Shows a store's theme (the default when none) and remembers it for the next page load. */
+export function showUiTheme(value: Partial<UiThemePreference> | null | undefined) {
+  const preference = normalizeUiThemePreference(value);
+  saveUiThemePreference(preference);
+  applyUiThemePreference(preference);
 }
 
 export function applyUiThemePreference(preference: UiThemePreference) {

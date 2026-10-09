@@ -6,7 +6,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from backend.app.core.paths import DATA_DIR
-from backend.app.db.models import Marketplace, StoreProfile
+from backend.app.db.models import Marketplace, StoreProfile, UiTheme
 from backend.app.db.store import store
 from backend.app.services.store_profiles import list_store_profiles
 from backend.app.services.auth import create_user
@@ -44,6 +44,23 @@ class StoreProfileUpdate(BaseModel):
     image_prompts: dict[str, str] | None = None
     disabled_image_prompts: list[str] | None = None
     color_variation_prompt: str | None = None
+
+
+@router.put("/{profile_id}/theme")
+def update_profile_theme(profile_id: str, theme: UiTheme) -> StoreProfile:
+    """The store's colour theme, the same on every browser it signs in from.
+
+    Kept out of the profile PATCH so saving the profile editor never brings back an old theme.
+    """
+    if theme.id == "custom" and not theme.accent:
+        raise HTTPException(status_code=422, detail="Escolha a cor personalizada")
+    def apply(state) -> StoreProfile:
+        profile = next((item for item in state.store_profiles if item.id == profile_id), None)
+        if not profile:
+            raise HTTPException(status_code=404, detail="Perfil de loja nao encontrado")
+        profile.ui_theme = theme
+        return profile.model_copy(deep=True)
+    return store.mutate(apply)
 
 
 class StoreProfilePhotoUpdate(BaseModel):

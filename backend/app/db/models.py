@@ -1,6 +1,6 @@
 from datetime import datetime
 from enum import StrEnum
-from typing import Any
+from typing import Any, Literal
 from uuid import uuid4
 
 from pydantic import BaseModel, Field
@@ -55,12 +55,19 @@ class AiProfile(BaseModel):
     updated_at: str = Field(default_factory=now_iso)
 
 
+class UiTheme(BaseModel):
+    """Colour theme of a store's screens: a preset, or a custom accent colour."""
+    id: Literal["forest", "ocean", "sunset", "grape", "slate", "rose", "custom"] = "forest"
+    accent: str | None = Field(default=None, pattern=r"^#[0-9a-fA-F]{6}$")
+
+
 class StoreProfile(BaseModel):
     id: str = Field(default_factory=new_id)
     name: str
     marketplace: Marketplace = Marketplace.shopee
     niche: str = "Utilidades para casa"
     logo_path: str | None = None
+    ui_theme: UiTheme | None = None
     ai_profile_id: str | None = None
     search_prompt: str = "Buscar produtos funcionais, uteis e com potencial comercial."
     curation_prompt: str = "Aprovar apenas produtos com bom potencial comercial para a loja."

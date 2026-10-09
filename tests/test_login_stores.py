@@ -46,3 +46,21 @@ def test_wrong_passwords_lock_that_store_for_a_while(tmp_path):
     assert locked.status_code == 429
     other = client.post("/api/auth/login", json={"store_profile_id": second.id, "password": "toffa-pass1"})
     assert other.status_code == 200  # only the attacked store is locked
+
+
+def test_each_store_keeps_its_own_theme(tmp_path):
+    from backend.app.services.auth import AuthenticatedStore, create_session
+    client, first, second = setup_stores(tmp_path)
+    client.cookies.set("eco_native_session", create_session(AuthenticatedStore(first.id, "luma")))
+
+    saved = client.put(f"/api/store-profiles/{first.id}/theme", json={"id": "ocean"})
+    assert saved.status_code == 200 and saved.json()["ui_theme"] == {"id": "ocean", "accent": None}
+    assert client.put(f"/api/store-profiles/{first.id}/theme", json={"id": "custom", "accent": "azul"}).status_code == 422
+    assert client.put(f"/api/store-profiles/{second.id}/theme", json={"id": "rose"}).status_code == 404  # other store
+
+    # Saving the profile editor never brings back an older theme.
+    profile = client.get("/api/store-profiles").json()[0]
+    client.patch(f"/api/store-profiles/{first.id}", json={**profile, "niche": "Casa", "ui_theme": None})
+    stores = {item["id"]: item for item in TestClient(client.app).get("/api/auth/status").json()["stores"]}
+    assert stores[first.id]["ui_theme"] == {"id": "ocean", "accent": None}
+    assert stores[second.id]["ui_theme"] is None

@@ -93,7 +93,12 @@ def _login_stores() -> list[dict]:
     # Shown before login: names and logos only, never the logins.
     logins = _store_logins()
     return [
-        {"id": profile.id, "name": profile.name, "photo_version": profile.updated_at if profile.logo_path else None}
+        {
+            "id": profile.id,
+            "name": profile.name,
+            "photo_version": profile.updated_at if profile.logo_path else None,
+            "ui_theme": profile.ui_theme.model_dump() if profile.ui_theme else None,
+        }
         for profile in store.snapshot().store_profiles
         if profile.id in logins
     ]
