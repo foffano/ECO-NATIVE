@@ -8693,9 +8693,10 @@ function NewVersionBanner() {
         const response = await fetch(`${API_BASE}/health`, { cache: "no-store" });
         const health = (await response.json()) as { version?: string; maintenance?: boolean };
         // A development server reports "dev"; only a released version means an update.
-        const released = /^\d+\.\d+\.\d+$/.test(health.version ?? "");
-        if (!cancelled && released && !health.maintenance && health.version !== __APP_VERSION__) {
-          setServerVersion(health.version);
+        const version = health.version ?? "";
+        const released = /^\d+\.\d+\.\d+$/.test(version);
+        if (!cancelled && released && !health.maintenance && version !== __APP_VERSION__) {
+          setServerVersion(version);
         }
       } catch {
         // The server may be restarting for the update; the next check retries.
