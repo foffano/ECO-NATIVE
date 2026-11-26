@@ -1,3 +1,4 @@
+from collections import deque
 from collections.abc import Callable
 from contextlib import ExitStack, contextmanager
 import os
@@ -16,6 +17,7 @@ from playwright.sync_api import sync_playwright
 from backend.app.core.playwright_env import configure_playwright_browsers, playwright_install_hint
 
 from backend.app.services.browser_capacity import browser_lease
+from backend.app.services import rate_limiter
 from backend.app.core.paths import DATA_DIR
 from backend.app.db.models import Product, Project, StoreProfile
 from backend.app.services.cover_image import download_cover_file
@@ -28,19 +30,29 @@ from backend.app.services.product_paths import (
 MAKERWORLD_BASE = "https://makerworld.com"
 MAKERWORLD_HOME = "https://makerworld.com/pt"
 
-# Time the user gets to solve a Cloudflare check or MakerWorld puzzle in the collect browser.
+# How long a page or download may take while no check is on screen.
 MANUAL_CHECK_SECONDS = 180
+# While a Cloudflare check or MakerWorld puzzle is on screen the collect pauses for the user,
+# up to this long; after it the page counts as not loaded.
+VERIFICATION_MAX_WAIT_SECONDS = 30 * 60
 VERIFICATION_PROMPT = (
-    "O MakerWorld pediu uma verificação. Abra o navegador da coleta e resolva para continuar."
+    "O MakerWorld pediu uma verificação (captcha ou puzzle). A coleta está pausada: "
+    "abra o navegador da coleta e resolva. Ela continua sozinha depois."
 )
 SLOW_RESPONSE_PROMPT = (
     "O site está demorando para responder. Abra o navegador da coleta e verifique "
     "se existe uma solicitação de validação humana."
 )
 DOWNLOAD_WAIT_NOTE = (
-    " O download aguarda por até 3 minutos. Sem validação nesse prazo, "
+    " O download aguarda por até 3 minutos. Sem resposta nesse prazo, "
     "a coleta continua com as fotos e o anúncio, sem o arquivo 3D."
 )
+# Model pages open at the same time in the store's collect browser, each in its own tab.
+# Two keeps a download running while the next page loads; more adds little and draws
+# Cloudflare checks sooner, since every store's browser leaves through the same IP.
+DEFAULT_COLLECT_PARALLEL = 2
+MAX_COLLECT_PARALLEL = max(1, int(os.getenv("ECO_NATIVE_COLLECT_MAX_PARALLEL", "4")))
+
 STUDIO_BUTTON_TEXT = re.compile(r"Open in Bambu Studio|Abrir no Bambu Studio", re.IGNORECASE)
 DOWNLOAD_3MF_TEXT = re.compile(r"^\s*(Download|Baixar) 3MF\s*$", re.IGNORECASE)
 REJECT_COOKIES_TEXT = re.compile(r"^(Reject All|Rejeitar todos|Rejeitar tudo|Recusar todos)$", re.IGNORECASE)
@@ -56,6 +68,21 @@ MODEL_PAGE_STATE_JS = """() => {
 }"""
 
 AttentionCallback = Callable[[str | None], None]
+
+
+def collect_parallelism(requested: int | None) -> int:
+    if requested is None:
+        requested = DEFAULT_COLLECT_PARALLEL
+    return max(1, min(MAX_COLLECT_PARALLEL, int(requested)))
+
+
+def wait_for_page_slot(page) -> None:
+    """Hold a MakerWorld page load until the shared pace allows it, staying stoppable."""
+    def pause(seconds: float) -> None:
+        raise_if_stopped()
+        page.wait_for_timeout(seconds * 1000)
+
+    rate_limiter.makerworld_page_limiter.acquire(sleep=pause)
 
 
 @dataclass
@@ -250,9 +277,16 @@ def wait_with_help(
     timeout_seconds: float = MANUAL_CHECK_SECONDS,
     ask_after_seconds: float = 20.0,
     attention_note: str = "",
+    max_pause_seconds: float = VERIFICATION_MAX_WAIT_SECONDS,
 ) -> Any:
-    """Poll ready() until it returns a value, asking the user for help if a check blocks the page."""
+    """Poll ready() until it returns a value, asking the user for help if a check blocks the page.
+
+    Time spent with a check on screen pauses the timeout: the collect waits for the user
+    (up to max_pause_seconds per check) and goes on by itself once the check is solved.
+    """
     started = time.monotonic()
+    paused_seconds = 0.0
+    pause_started: float | None = None
     last_notice = None
     try:
         while True:
@@ -263,16 +297,26 @@ def wait_with_help(
                 value = None  # The page is navigating.
             if value:
                 return value
-            elapsed = time.monotonic() - started
-            if elapsed >= timeout_seconds:
+            now = time.monotonic()
+            challenge = has_human_verification(page)
+            if challenge:
+                if pause_started is None:
+                    pause_started = now
+                if now - pause_started >= max_pause_seconds:
+                    return None
+            elif pause_started is not None:
+                paused_seconds += now - pause_started
+                pause_started = None
+            elapsed = now - started - paused_seconds
+            if not challenge and elapsed >= timeout_seconds:
                 return None
             if on_attention:
-                challenge = has_human_verification(page)
-                message = VERIFICATION_PROMPT if challenge else (
-                    SLOW_RESPONSE_PROMPT if elapsed >= ask_after_seconds else None
-                )
-                if message:
-                    message += attention_note
+                if challenge:
+                    message = VERIFICATION_PROMPT
+                elif elapsed >= ask_after_seconds:
+                    message = SLOW_RESPONSE_PROMPT + attention_note
+                else:
+                    message = None
                 if message != last_notice:
                     on_attention(message)
                     last_notice = message
@@ -339,6 +383,7 @@ def discover_model_urls(
             playwright, headless=False, store_profile_id=store_profile_id, watch=True,
         ))
         page = first_page(browser)
+        wait_for_page_slot(page)
         page.goto(target_url, wait_until="domcontentloaded", timeout=60_000)
         page.wait_for_timeout(6000)
 
@@ -369,6 +414,140 @@ def discover_model_urls(
     return urls[:effective_max]
 
 
+@dataclass
+class _LoadingPage:
+    url: str
+    page: Any
+    started_at: float
+
+
+@dataclass
+class _PendingDownload:
+    product: "ScrapedProduct"
+    download: Any
+    page: Any
+
+
+class _CollectTabs:
+    """The collect browser's pages: up to `limit` model pages load or download at once.
+
+    Playwright's sync API is single-threaded, so the job's thread still drives one page at a
+    time; the others keep loading and downloading in the browser meanwhile. Each extra page
+    opens in its own window, so Chromium keeps painting it and the panel can show it.
+    """
+
+    def __init__(self, context, limit: int, store_profile_id: str | None, on_log: Callable[[str], None] | None):
+        self.context = context
+        self.limit = limit
+        self.store_profile_id = store_profile_id
+        self.on_log = on_log
+        self.free = [first_page(context)]
+        self.created = 1
+        self.loading: deque[_LoadingPage] = deque()
+        self.pending: deque[_PendingDownload] = deque()
+        self._targets: dict[int, str] = {}
+        self._states: dict[int, str] = {}
+        self._current = None
+        # When the user last solved a check in this browser, and whether one is open now.
+        self.cleared_at = 0.0
+        self._checking = False
+
+    @property
+    def busy(self) -> int:
+        return len(self.loading) + len(self.pending)
+
+    def take_tab(self):
+        if self.free:
+            return self.free.pop()
+        if self.created < self.limit:
+            self.created += 1
+            page = self._new_window()
+            if self.created == 2:
+                self._track(self.context.pages[0] if self.context.pages else page)
+            self._track(page)
+            return page
+        return None
+
+    def _new_window(self):
+        try:
+            cdp = self.context.new_cdp_session(self.context.pages[0])
+            try:
+                with self.context.expect_page(timeout=10_000) as opened:
+                    cdp.send("Target.createTarget", {"url": "about:blank", "newWindow": True})
+            finally:
+                cdp.detach()
+            return opened.value
+        except Exception:
+            # A tab in the same window still works; its preview just may not refresh.
+            return self.context.new_page()
+
+    def _track(self, page) -> None:
+        if id(page) in self._targets or not self.store_profile_id:
+            return
+        try:
+            cdp = self.context.new_cdp_session(page)
+            try:
+                self._targets[id(page)] = cdp.send("Target.getTargetInfo")["targetInfo"]["targetId"]
+            finally:
+                cdp.detach()
+        except Exception:
+            pass
+
+    def mark(self, page, state: str) -> None:
+        """Record what a page is doing (loading, reading, downloading, verification, idle) for the panel."""
+        self._states[id(page)] = state
+        if self.created == 1 or not self.store_profile_id:
+            return
+        from backend.app.services.makerworld_session import set_collect_tabs
+
+        set_collect_tabs(self.store_profile_id, [
+            {"id": target, "state": self._states.get(key, "idle")} for key, target in self._targets.items()
+        ])
+
+    def release(self, page) -> None:
+        self.free.append(page)
+        self.mark(page, "idle")
+
+    def focus(self, page) -> None:
+        """Bring the page the job works on to the front, and show that one in the panel."""
+        self._current = page
+        self.mark(page, "reading")
+        if self.created == 1:
+            return  # A single page: the panel already shows it.
+        try:
+            page.bring_to_front()
+        except (AttributeError, PlaywrightError):
+            pass
+        target = self._targets.get(id(page))
+        if target and self.store_profile_id:
+            from backend.app.services.makerworld_session import set_collect_target
+
+            set_collect_target(self.store_profile_id, target)
+
+    def attention(self, on_attention: AttentionCallback | None) -> AttentionCallback:
+        """Pass notices on, slowing down after each check: they come with too many page loads."""
+        def notify(message: str | None) -> None:
+            if message == VERIFICATION_PROMPT and not self._checking:
+                self._checking = True
+                if self._current is not None:
+                    self.mark(self._current, "verification")
+                if self.limit > 1:
+                    self.limit -= 1
+                    if self.on_log:
+                        self.on_log(
+                            f"O MakerWorld pediu verificação; a coleta segue com {self.limit} página(s) por vez."
+                        )
+            elif message != VERIFICATION_PROMPT and self._checking:
+                self._checking = False
+                self.cleared_at = time.monotonic()
+                if self._current is not None:
+                    self.mark(self._current, "reading")
+            if on_attention:
+                on_attention(message)
+
+        return notify
+
+
 def scrape_product_urls(
     project_id: str,
     urls: list[str],
@@ -382,11 +561,14 @@ def scrape_product_urls(
     on_product: Callable[[ScrapedProduct], None] | None = None,
     on_failure: Callable[[str, str], None] | None = None,
     on_attention: AttentionCallback | None = None,
+    parallel: int | None = 1,
+    on_log: Callable[[str], None] | None = None,
 ) -> list[ScrapedProduct]:
     """Capture model pages, reporting each product as soon as its files are on disk.
 
-    A page that never loads is reported through on_failure instead of becoming a product,
-    so the link can be collected again later.
+    Up to `parallel` model pages load or download at the same time, each in its own tab of
+    the store's browser. A page that never loads is reported through on_failure instead of
+    becoming a product, so the link can be collected again later.
     """
     normalized_urls = []
     for url in urls:
@@ -399,6 +581,7 @@ def scrape_product_urls(
 
     products: list[ScrapedProduct] = []
     sku_candidates = list(sku_reference_products or [])
+    queue = deque(normalized_urls)
     with sync_playwright() as playwright, ExitStack() as contexts:
         browser = contexts.enter_context(open_makerworld_context(
             playwright,
@@ -407,13 +590,58 @@ def scrape_product_urls(
             store_profile_id=store_profile.id if store_profile else None,
             watch=True,
         ))
-        page = first_page(browser)
+        tabs = _CollectTabs(
+            browser, collect_parallelism(parallel), store_profile.id if store_profile else None, on_log,
+        )
+        notify = tabs.attention(on_attention)
 
-        for url in normalized_urls:
-            raise_if_stopped()
+        def report(product: ScrapedProduct) -> None:
+            products.append(product)
+            if on_product:
+                on_product(product)
+
+        def fail(url: str, exc: Exception) -> None:
+            if on_failure:
+                on_failure(url, capture_error_message(exc))
+
+        def start_loading() -> None:
+            while queue and tabs.busy < tabs.limit:
+                page = tabs.take_tab()
+                if page is None:
+                    return
+                url = queue.popleft()
+                wait_for_page_slot(page)
+                try:
+                    # Only wait for the response: the page finishes loading while other tabs work.
+                    page.goto(url, wait_until="commit" if tabs.limit > 1 else "domcontentloaded", timeout=60_000)
+                except CollectStopped:
+                    raise
+                except Exception as exc:
+                    tabs.release(page)
+                    fail(url, exc)
+                    continue
+                tabs.loading.append(_LoadingPage(url, page, time.monotonic()))
+                tabs.mark(page, "loading")
+
+        def finish_download(item: _PendingDownload) -> None:
+            product = item.product
             try:
-                page.goto(url, wait_until="domcontentloaded", timeout=60_000)
-                title = wait_with_help(page, lambda: model_page_title(page), on_attention)
+                product.model_file_path = save_3mf_download(
+                    item.download, product_assets_dir(project_id, product.sku), product.sku,
+                )
+            except Exception as exc:
+                product.model_error = f"{exc.__class__.__name__}: {exc}"
+            tabs.release(item.page)
+            report(product)
+
+        def capture(item: _LoadingPage) -> None:
+            page, url = item.page, item.url
+            tabs.focus(page)
+            try:
+                if tabs.cleared_at > item.started_at and is_cloudflare_challenge(page):
+                    # Loaded before the user solved a check in another tab: the clearance applies now.
+                    page.reload(wait_until="commit", timeout=60_000)
+                title = wait_with_help(page, lambda: model_page_title(page), notify)
                 if not title:
                     raise RuntimeError("a página do modelo não carregou (verificação não resolvida ou tempo esgotado)")
                 product = scrape_current_product_page(
@@ -429,9 +657,9 @@ def scrape_product_urls(
             except CollectStopped:
                 raise
             except Exception as exc:
-                if on_failure:
-                    on_failure(url, capture_error_message(exc))
-                continue
+                tabs.release(page)
+                fail(url, exc)
+                return
             if product.sku:
                 sku_candidates.append(
                     Product(
@@ -440,25 +668,44 @@ def scrape_product_urls(
                         metadata={"sku": product.sku},
                     )
                 )
-            if download_model and product.sku:
-                product_dir = product_assets_dir(project_id, product.sku)
-                product_dir.mkdir(parents=True, exist_ok=True)
-                try:
-                    product.model_file_path = download_3mf_from_current_page(
-                        page, product_dir, product.sku, on_attention=on_attention,
-                    )
-                except CollectStopped:
-                    # Its photos are already on disk: keep it, like a download that timed out.
-                    product.model_error = "download interrompido: coleta parada pelo usuário"
-                    products.append(product)
-                    if on_product:
-                        on_product(product)
-                    raise
-                except Exception as exc:
-                    product.model_error = f"{exc.__class__.__name__}: {exc}"
-            products.append(product)
-            if on_product:
-                on_product(product)
+            if not (download_model and product.sku):
+                tabs.release(page)
+                report(product)
+                return
+            product_assets_dir(project_id, product.sku).mkdir(parents=True, exist_ok=True)
+            try:
+                download = start_3mf_download(page, on_attention=notify)
+            except CollectStopped:
+                # Its photos are already on disk: keep it, like a download that timed out.
+                product.model_error = "download interrompido: coleta parada pelo usuário"
+                report(product)
+                raise
+            except Exception as exc:
+                product.model_error = f"{exc.__class__.__name__}: {exc}"
+                tabs.release(page)
+                report(product)
+                return
+            # The tab keeps the download until it is saved; the next page loads in another tab.
+            tabs.pending.append(_PendingDownload(product, download, page))
+            tabs.mark(page, "downloading")
+
+        try:
+            while queue or tabs.loading or tabs.pending:
+                raise_if_stopped()
+                start_loading()
+                # Save the oldest download when its tab is needed or nothing else is left to do.
+                if tabs.pending and (not tabs.loading or (queue and len(tabs.pending) >= 2)):
+                    finish_download(tabs.pending.popleft())
+                    continue
+                if tabs.loading:
+                    capture(tabs.loading.popleft())
+        except CollectStopped:
+            # Pages already read keep their photos and text, without the 3D file.
+            while tabs.pending:
+                item = tabs.pending.popleft()
+                item.product.model_error = "download interrompido: coleta parada pelo usuário"
+                report(item.product)
+            raise
 
     return products
 
@@ -573,14 +820,23 @@ def download_3mf_from_current_page(
     sku: str,
     on_attention: AttentionCallback | None = None,
 ) -> str | None:
+    return save_3mf_download(start_3mf_download(page, on_attention), product_dir, sku)
+
+
+def start_3mf_download(page, on_attention: AttentionCallback | None = None):
+    """Click the page's 3MF download and return it once the browser has started it."""
     try:
         page.wait_for_load_state("networkidle", timeout=15_000)
     except PlaywrightTimeoutError:
         pass
     page.wait_for_timeout(3500)
     dismiss_cookie_banner(page)
+    return download_from_studio_menu(page, on_attention) or download_from_legacy_buttons(page)
 
-    download = download_from_studio_menu(page, on_attention) or download_from_legacy_buttons(page)
+
+def save_3mf_download(download, product_dir: Path, sku: str) -> str:
+    """Wait for a started download to finish and keep it under the product's SKU."""
+    product_dir.mkdir(parents=True, exist_ok=True)
     suffix = Path(download.suggested_filename).suffix or ".3mf"
     output_path = product_dir / model_filename(sku, suffix)
     download.save_as(str(output_path))

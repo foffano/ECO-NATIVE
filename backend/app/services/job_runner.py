@@ -17,9 +17,11 @@ from backend.app.services.prompt_library import IMAGE_PROMPTS
 from backend.app.services.sku import ensure_color_skus, ensure_product_sku
 from backend.app.services.store_profiles import get_store_profile
 from backend.app.services.makerworld_scraper import (
+    VERIFICATION_PROMPT,
     CollectStopped,
     ScrapedProduct,
     clean_makerworld_url,
+    collect_parallelism,
     discover_model_urls,
     weight_filter_param,
     scrape_product_urls,
@@ -136,6 +138,17 @@ def _run_collect_job(job: Job, payload) -> Job:
             job.metadata["attention"] = message
         else:
             job.metadata.pop("attention", None)
+        # Paused until the user solves the check; the panel shows it as waiting on them.
+        if message == VERIFICATION_PROMPT:
+            if not job.metadata.get("paused_for_verification"):
+                job.logs.append("Coleta pausada: o MakerWorld pediu verificação.")
+            job.metadata["paused_for_verification"] = True
+        elif job.metadata.pop("paused_for_verification", None):
+            job.logs.append("Verificação resolvida; a coleta continua.")
+        store.upsert_job(job)
+
+    def log(line: str) -> None:
+        job.logs.append(line)
         store.upsert_job(job)
 
     try:
@@ -196,6 +209,9 @@ def _run_collect_job(job: Job, payload) -> Job:
                 f"Apenas {len(urls)} link(s) novo(s) de {target_count} solicitado(s) após varrer a busca."
             )
         job.logs.append(f"{len(urls)} link(s) novo(s) para extração direta.")
+        parallel = collect_parallelism(getattr(payload, "parallel", None))
+        if len(urls) > 1:
+            job.logs.append(f"Até {parallel} página(s) de produto por vez.")
         store.upsert_job(job)
 
         def report_progress() -> None:
@@ -280,9 +296,12 @@ def _run_collect_job(job: Job, payload) -> Job:
             on_product=save_product,
             on_failure=record_failure,
             on_attention=ask_user,
+            parallel=parallel,
+            on_log=log,
         )
     except CollectStopped:
         job.metadata.pop("attention", None)
+        job.metadata.pop("paused_for_verification", None)
         job.metadata["created_products"] = created
         job.metadata["failed_links"] = len(failures)
         job.status = JobStatus.cancelled
@@ -292,6 +311,7 @@ def _run_collect_job(job: Job, payload) -> Job:
         return store.upsert_job(job)
     except Exception as exc:
         job.metadata.pop("attention", None)
+        job.metadata.pop("paused_for_verification", None)
         job.status = JobStatus.failed
         job.progress = 100
         job.message = "Falha na coleta MakerWorld"
@@ -303,6 +323,7 @@ def _run_collect_job(job: Job, payload) -> Job:
         set_collect_notice(store_profile.id, None)
 
     job.metadata.pop("attention", None)
+    job.metadata.pop("paused_for_verification", None)
     job.metadata["ai_cost_total_usd"] = 0
     job.metadata["ai_request_count"] = 0
     job.metadata["created_products"] = created

@@ -86,6 +86,17 @@ def test_interrupted_collect_keeps_products_already_saved(monkeypatch):
     assert [product.name for product in store.load().products] == ["Kept"]
 
 
+class FakeDownload:
+    suggested_filename = "model.3mf"
+
+    def __init__(self, log=None, name=""):
+        self.log = log if log is not None else []
+        self.name = name
+
+    def save_as(self, path):
+        self.log.append(("save", self.name))
+
+
 class FakePage:
     def __init__(self, fail_urls):
         self.fail_urls = fail_urls
@@ -115,7 +126,9 @@ def test_scrape_reports_failed_pages_instead_of_placeholder_products(monkeypatch
 
     monkeypatch.setattr(scraper, "sync_playwright", fake_playwright)
     monkeypatch.setattr(scraper, "open_makerworld_context", fake_context)
-    monkeypatch.setattr(scraper, "download_3mf_from_current_page", lambda *args, **kwargs: str(tmp_path / "model.3mf"))
+    monkeypatch.setattr(scraper, "product_assets_dir", lambda project_id, sku: tmp_path)
+    monkeypatch.setattr(scraper, "model_filename", lambda sku, suffix: "model" + suffix)
+    monkeypatch.setattr(scraper, "start_3mf_download", lambda *args, **kwargs: FakeDownload())
     monkeypatch.setattr(
         scraper,
         "scrape_current_product_page",
@@ -156,7 +169,7 @@ def test_wait_with_help_asks_for_help_during_a_check_and_clears_it():
 
     notices.clear()
     stuck = ChallengePage(challenge_polls=10**6)
-    assert scraper.wait_with_help(stuck, lambda: None, notices.append, timeout_seconds=0.05) is None
+    assert scraper.wait_with_help(stuck, lambda: None, notices.append, timeout_seconds=0.01, max_pause_seconds=0.05) is None
     assert notices == [scraper.VERIFICATION_PROMPT, None]
 
 
@@ -204,7 +217,7 @@ def test_download_timeout_keeps_product_and_continues_next_url(monkeypatch):
 
     monkeypatch.setattr(scraper, "sync_playwright", fake_playwright)
     monkeypatch.setattr(scraper, "open_makerworld_context", fake_context)
-    monkeypatch.setattr(scraper, "download_3mf_from_current_page", failed_download)
+    monkeypatch.setattr(scraper, "start_3mf_download", failed_download)
     monkeypatch.setattr(scraper, "scrape_current_product_page", lambda project_id, page, url, *args, **kwargs:
         ScrapedProduct(name="Produto", source_url=url, sku="SKU-1", image_url="https://example.com/photo.jpg"))
     saved = []
@@ -247,7 +260,7 @@ def test_stop_during_download_keeps_that_product_and_skips_the_rest(monkeypatch)
 
     monkeypatch.setattr(scraper, "sync_playwright", fake_playwright)
     monkeypatch.setattr(scraper, "open_makerworld_context", fake_context)
-    monkeypatch.setattr(scraper, "download_3mf_from_current_page", stopped_download)
+    monkeypatch.setattr(scraper, "start_3mf_download", stopped_download)
     monkeypatch.setattr(scraper, "scrape_current_product_page", lambda project_id, page, url, *args, **kwargs:
         ScrapedProduct(name="Produto", source_url=url, sku="SKU-1"))
     saved = []

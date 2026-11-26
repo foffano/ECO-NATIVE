@@ -300,9 +300,14 @@ type BackupRestoreSummary = {
   store_profile_name?: string;
 };
 
+type CollectPageState = "loading" | "reading" | "downloading" | "verification" | "idle";
+
 type MakerWorldLoginStatus = {
-  pages?: { id: string; url: string }[];
+  // In the collect browser, `state` and `preview` describe each page the collect has open.
+  pages?: { id: string; url: string; state?: CollectPageState; preview?: string }[];
   active_page_id?: string | null;
+  job_page_id?: string | null;
+  following?: boolean;
   open: boolean;
   url?: string | null;
   message: string;
@@ -1697,6 +1702,8 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
   const [manualUrl, setManualUrl] = useState("");
   const [collectLimit, setCollectLimit] = useState(8);
   const [collectScrolls, setCollectScrolls] = useState(8);
+  // Model pages read at the same time in the store's collect browser.
+  const [collectParallel, setCollectParallel] = useState(2);
   const [collectMode, setCollectMode] = useState<CollectMode>("keyword");
   const [collectMinWeight, setCollectMinWeight] = useState<number>(WEIGHT_STEPS_G[0]);
   const [collectMaxWeight, setCollectMaxWeight] = useState<number | null>(null);
@@ -2414,6 +2421,7 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
       urls: [],
       limit: collectLimit,
       scrolls: collectScrolls,
+      parallel: collectParallel,
       visible_browser: true,
       skip_ai_curation: true,
     });
@@ -2434,6 +2442,7 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
       urls,
       limit: urls.length,
       scrolls: collectScrolls,
+      parallel: collectParallel,
       visible_browser: true,
       skip_ai_curation: true,
     });
@@ -3336,6 +3345,8 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
             manualUrl={manualUrl}
             productCount={catalogStats?.total ?? 0}
             scrolls={collectScrolls}
+            parallel={collectParallel}
+            onParallelChange={setCollectParallel}
             onCollect={collectProducts}
             onExtractSelectedLinks={extractSelectedLinks}
             onCloseLogin={closeMakerWorldLogin}
@@ -3532,6 +3543,14 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
 
 type DragPoint = [number, number, number];
 
+const COLLECT_PAGE_STATE_LABELS: Record<CollectPageState, string> = {
+  loading: "Carregando",
+  reading: "Lendo",
+  downloading: "Baixando 3MF",
+  verification: "Verificação",
+  idle: "Livre",
+};
+
 function MakerWorldRemoteBrowser({
   status,
   collect,
@@ -3546,6 +3565,9 @@ function MakerWorldRemoteBrowser({
   onFinish: () => void;
 }) {
   const [frameNonce, setFrameNonce] = useState(0);
+  // Previews of the collect's other pages change every few seconds on the server.
+  const [previewNonce, setPreviewNonce] = useState(0);
+  const refreshCount = useRef(0);
   const [frameReady, setFrameReady] = useState(false);
   const [liveStatus, setLiveStatus] = useState(status);
   const [inputError, setInputError] = useState("");
@@ -3558,6 +3580,7 @@ function MakerWorldRemoteBrowser({
   const viewportWidth = liveStatus?.width || 1280;
   const viewportHeight = liveStatus?.height || 720;
   const collectMode = collect || liveStatus?.mode === "collect";
+  const collectPages = collectMode && (liveStatus?.pages?.length ?? 0) > 1 ? liveStatus!.pages! : [];
 
   useEffect(() => {
     let cancelled = false;
@@ -3569,6 +3592,8 @@ function MakerWorldRemoteBrowser({
           liveStatusRef.current = next;
           setLiveStatus(next);
           setFrameNonce((value) => value + 1);
+          refreshCount.current += 1;
+          if (refreshCount.current % 4 === 0) setPreviewNonce(refreshCount.current);
         }
       } catch (error) {
         if (!cancelled) setInputError(String(error));
@@ -3690,7 +3715,7 @@ function MakerWorldRemoteBrowser({
               {liveStatus?.loading && <Loader2 className="spin" size={12} aria-label="Carregando página" />}
               {liveStatus?.url || liveStatus?.message || "Iniciando Chromium no PC..."}
             </span>
-            {!!liveStatus?.pages?.length && (
+            {!!liveStatus?.pages?.length && !collectPages.length && (
               <label>Janela: <select
                 aria-label="Janela do navegador"
                 value={liveStatus.active_page_id || ""}
@@ -3719,6 +3744,11 @@ function MakerWorldRemoteBrowser({
                   <LogIn size={16} /> Tela de login
                 </button>
               </>
+            )}
+            {collectMode && liveStatus?.following === false && (
+              <button className="primary ghost" title="Volta a mostrar a página em que a coleta está trabalhando" onClick={() => sendInput({ type: "select_page" })}>
+                Seguir a coleta
+              </button>
             )}
             {collectMode && onStopCollect && (
               <button className="primary ghost" title="Encerra a coleta; os produtos já coletados ficam salvos" onClick={onStopCollect}>
@@ -3757,8 +3787,37 @@ function MakerWorldRemoteBrowser({
             onLoad={() => setFrameReady(true)}
           />
         </div>
+        {collectPages.length > 0 && (
+          <nav className="remote-browser-pages" aria-label="Páginas abertas pela coleta">
+            {collectPages.map((page, index) => {
+              const shown = page.id === liveStatus?.active_page_id;
+              const working = page.id === liveStatus?.job_page_id;
+              const state = page.state ?? "idle";
+              return (
+                <button
+                  key={page.id}
+                  className={`remote-browser-page${shown ? " shown" : ""}${state === "verification" ? " alert" : ""}`}
+                  aria-pressed={shown}
+                  title={page.url}
+                  onClick={() => sendInput(working && liveStatus?.following === false ? { type: "select_page" } : { type: "select_page", page_id: page.id })}
+                >
+                  {shown || !page.preview ? (
+                    <span className="remote-browser-page-blank">{shown ? "Em exibição" : "Sem prévia"}</span>
+                  ) : (
+                    <img src={`${API_BASE}/api/jobs/makerworld-login/frame?page_id=${encodeURIComponent(page.id)}&t=${previewNonce}`} alt="" draggable={false} />
+                  )}
+                  <span className="remote-browser-page-label">
+                    {index + 1} · {COLLECT_PAGE_STATE_LABELS[state]}{working ? " · coleta aqui" : ""}
+                  </span>
+                </button>
+              );
+            })}
+          </nav>
+        )}
         <footer className={liveStatus?.challenge || liveStatus?.attention ? "remote-browser-help attention" : "remote-browser-help"}>
-          {inputError || liveStatus?.message} · Novas janelas aparecem automaticamente. Use “Janela” para alternar entre elas.
+          {inputError || liveStatus?.message} · {collectPages.length
+            ? "Clique numa miniatura para ver e controlar aquela página."
+            : "Novas janelas aparecem automaticamente. Use “Janela” para alternar entre elas."}
         </footer>
       </section>
     </div>
@@ -3865,14 +3924,17 @@ function JobsPanel({
           )}
           {visible.map((job) => {
             const running = job.status === "running";
+            // A collect paused on a MakerWorld check until the user solves it in the collect browser.
+            const attention = running && typeof job.metadata?.attention === "string" ? job.metadata.attention : "";
+            const waiting = attention !== "" && Boolean(job.metadata?.paused_for_verification);
             const lastLog = job.logs?.length ? job.logs[job.logs.length - 1] : "";
             const elapsed = jobActive(job)
               ? formatElapsed(job.created_at)
               : formatElapsed(job.created_at, job.updated_at);
             return (
-              <li key={job.id} className={`jobs-item ${job.status}`}>
+              <li key={job.id} className={`jobs-item ${job.status}${waiting ? " waiting" : ""}`}>
                 <span className="jobs-item-icon" aria-hidden="true">
-                  {job.status === "running" && <Loader2 size={16} className="spin" />}
+                  {job.status === "running" && (waiting ? <AlertCircle size={16} /> : <Loader2 size={16} className="spin" />)}
                   {job.status === "queued" && <Clock size={16} />}
                   {job.status === "completed" && <Check size={16} />}
                   {job.status === "failed" && <AlertCircle size={16} />}
@@ -3881,13 +3943,13 @@ function JobsPanel({
                 <div className="jobs-item-body">
                   <div className="jobs-item-title">
                     <strong>{JOB_TYPE_LABELS[job.type] ?? job.type}</strong>
-                    <span className={`jobs-status ${job.status}`}>
-                      {JOB_STATUS_LABELS[job.status]}{running && job.progress ? ` · ${job.progress}%` : ""}
+                    <span className={`jobs-status ${waiting ? "waiting" : job.status}`}>
+                      {waiting ? "Aguardando você" : JOB_STATUS_LABELS[job.status]}{running && job.progress ? ` · ${job.progress}%` : ""}
                     </span>
                   </div>
                   {jobSubject(job) && <span className="jobs-item-subject">{jobSubject(job)}</span>}
-                  <span className="jobs-item-message" title={job.status === "failed" ? lastLog : undefined}>
-                    {displayText(job.message)}
+                  <span className={attention ? "jobs-item-message attention" : "jobs-item-message"} title={job.status === "failed" ? lastLog : undefined}>
+                    {displayText(attention || job.message)}
                   </span>
                   {running && (
                     <div className="jobs-progress" aria-hidden="true">
@@ -3901,9 +3963,9 @@ function JobsPanel({
                         Abrir produto
                       </button>
                     )}
-                    {job.type === "collect_products" && running && collectViewerAvailable && (
+                    {job.type === "collect_products" && running && (collectViewerAvailable || attention) && (
                       <button className="link-button" onClick={onOpenCollectViewer}>
-                        Ver navegador
+                        {attention ? "Resolver no navegador" : "Ver navegador"}
                       </button>
                     )}
                     {job.type === "collect_products" && jobActive(job) && (
@@ -4436,6 +4498,8 @@ function CollectTab({
   manualUrl,
   productCount,
   scrolls,
+  parallel,
+  onParallelChange,
   onCollect,
   onCloseLogin,
   onExtractSelectedLinks,
@@ -4461,6 +4525,8 @@ function CollectTab({
   manualUrl: string;
   productCount: number;
   scrolls: number;
+  parallel: number;
+  onParallelChange: (value: number) => void;
   onCollect: () => void;
   onCloseLogin: () => void;
   onExtractSelectedLinks: () => void;
@@ -4574,6 +4640,15 @@ function CollectTab({
               value={scrolls}
               onChange={(event) => onScrollsChange(Number(event.target.value))}
             />
+          </label>
+          <label title="Páginas de produto abertas ao mesmo tempo no navegador da loja. Mais páginas aceleram a coleta, mas o MakerWorld pede verificação com mais frequência.">
+            Páginas por vez
+            <select value={parallel} onChange={(event) => onParallelChange(Number(event.target.value))}>
+              <option value={1}>1 (mais seguro)</option>
+              <option value={2}>2 (recomendado)</option>
+              <option value={3}>3</option>
+              <option value={4}>4 (mais rápido)</option>
+            </select>
           </label>
         </div>
 

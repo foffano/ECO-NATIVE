@@ -246,7 +246,7 @@ body {
   width: min(1400px, 100%);
   height: min(900px, 96vh);
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr) auto;
+  grid-template-rows: auto minmax(0, 1fr) auto auto;
   overflow: hidden;
   border: 1px solid var(--eco-sidebar-border-strong);
   border-radius: 16px;
@@ -275,6 +275,17 @@ body {
 .remote-browser-toolbar span .spin { margin-right: 8px; vertical-align: -2px; }
 .remote-browser-help { padding: 8px 16px; color: var(--eco-sidebar-text-muted); background: var(--eco-forest); font-size: 12px; text-align: center; }
 .remote-browser-help.attention { color: var(--eco-on-sidebar); font-weight: 500; }
+/* Previews of the other pages the collect has open. */
+.remote-browser-pages { display: flex; gap: 10px; padding: 10px 16px; overflow-x: auto; background: #111713; border-top: 1px solid var(--eco-sidebar-border-strong); }
+.remote-browser-page { flex: 0 0 168px; display: grid; gap: 4px; padding: 4px; border: 2px solid transparent; border-radius: 8px; background: #151b17; color: var(--eco-sidebar-text); cursor: pointer; text-align: left; }
+.remote-browser-page:hover { border-color: var(--eco-sidebar-border-strong); }
+.remote-browser-page.shown { border-color: var(--eco-green); }
+.remote-browser-page.alert { border-color: #f79009; }
+.remote-browser-page img,
+.remote-browser-page-blank { display: block; width: 100%; aspect-ratio: 16 / 9; border-radius: 4px; object-fit: cover; background: #0c110e; }
+.remote-browser-page-blank { display: grid; place-items: center; color: var(--eco-sidebar-text-muted); font-size: 12px; }
+.remote-browser-page-label { overflow: hidden; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.remote-browser-page.alert .remote-browser-page-label { color: #fdb022; font-weight: 600; }
 
 button,
 input,
@@ -4724,6 +4735,16 @@ pre {
 
 .jobs-status.failed {
   color: #b42318;
+}
+
+.jobs-status.waiting,
+.jobs-item-message.attention {
+  color: #b54708;
+  font-weight: 600;
+}
+
+.jobs-item.waiting .jobs-item-icon {
+  color: #b54708;
 }
 
 .jobs-item-subject {

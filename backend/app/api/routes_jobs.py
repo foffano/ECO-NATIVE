@@ -1,6 +1,6 @@
 from typing import Annotated, Any, Literal
 
-from fastapi import APIRouter, HTTPException, Request, Response
+from fastapi import APIRouter, HTTPException, Query, Request, Response
 from pydantic import BaseModel, Field
 
 from backend.app.db.models import Job, JobStatus
@@ -35,6 +35,8 @@ class CollectRequest(BaseModel):
     min_weight_g: int | None = None
     max_weight_g: int | None = None
     visible_browser: bool = True
+    # Model pages read at the same time in the store's browser; None = the server default.
+    parallel: int | None = Field(default=None, ge=1, le=4)
     ai_profile: str = "Padrao"
     ai_profile_id: str | None = None
     skip_ai_curation: bool = False
@@ -129,8 +131,9 @@ def close_makerworld_login(request: Request) -> dict[str, Any]:
 
 
 @router.get("/makerworld-login/frame")
-def makerworld_login_frame(request: Request) -> Response:
-    frame = get_login_session_frame(current_store_id(request))
+def makerworld_login_frame(request: Request, page_id: str | None = Query(default=None, max_length=32)) -> Response:
+    # With page_id: the small preview of another page of the collect browser.
+    frame = get_login_session_frame(current_store_id(request), page_id)
     if not frame:
         raise HTTPException(status_code=425, detail="Aguardando o primeiro quadro do navegador")
     return Response(frame, media_type="image/jpeg", headers={"Cache-Control": "no-store, max-age=0"})

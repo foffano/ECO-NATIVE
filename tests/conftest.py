@@ -19,3 +19,10 @@ def isolated_state():
     (DATA_DIR / ".maintenance").unlink(missing_ok=True)
     yield
     (DATA_DIR / ".maintenance").unlink(missing_ok=True)
+
+
+@pytest.fixture(autouse=True)
+def unpaced_makerworld(monkeypatch):
+    # Fake pages load instantly; the shared MakerWorld pace would only slow the suite down.
+    from backend.app.services import rate_limiter
+    monkeypatch.setattr(rate_limiter, "makerworld_page_limiter", rate_limiter.RateLimiter(10**6, 60.0))

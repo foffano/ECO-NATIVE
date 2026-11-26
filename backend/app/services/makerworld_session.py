@@ -22,6 +22,9 @@ from backend.app.services.makerworld_scraper import (
 VIEWPORT_WIDTH = 1280
 VIEWPORT_HEIGHT = 720
 FRAME_INTERVAL_SECONDS = 0.45
+# Previews of the collect's other pages: small and refreshed rarely, to spare the server's CPU.
+PREVIEW_INTERVAL_SECONDS = 2.0
+PREVIEW_RETRY_SECONDS = 10.0
 SESSION_IDLE_SECONDS = 30 * 60
 # A viewer attached to a collect browser stops capturing once nobody has fetched a frame for this long.
 VIEWER_IDLE_SECONDS = 60
@@ -57,6 +60,9 @@ class MakerWorldSessionStatus:
     challenge: bool = False
     attention: bool = False
     mode: str = "login"
+    # Collect browser: the page the collect works on, and whether the view follows it.
+    job_page_id: str | None = None
+    following: bool = True
 
 
 class BrowserPages:
@@ -148,6 +154,11 @@ class RemoteBrowserSession:
         self._loading = False
         self._challenge = False
         self._last_activity = time.monotonic()
+        # Collect browser only: a page the user picked to see instead of the collect's, and previews.
+        self._pinned: str | None = None
+        self._job_page_id: str | None = None
+        self._previews: dict[str, bytes] = {}
+        self._preview_challenges: dict[str, bool] = {}
         self._thread = threading.Thread(target=self._run, name=f"makerworld-{store_profile_id[:8]}", daemon=True)
 
     def start(self) -> None:
@@ -162,6 +173,8 @@ class RemoteBrowserSession:
             active_page_id = self._active_page_id
             loading = is_open and self._loading
             challenge = is_open and self._challenge
+            job_page_id = self._job_page_id
+            following = self._pinned is None
         configured = _configured(self.store_profile_id)
         notice = _collect_notices.get(self.store_profile_id) if self.attached else None
         if error:
@@ -185,7 +198,8 @@ class RemoteBrowserSession:
         return MakerWorldSessionStatus(open=is_open, url=url, message=message, configured=configured,
                                        pages=pages, active_page_id=active_page_id,
                                        loading=loading, challenge=challenge, attention=bool(notice),
-                                       mode="collect" if self.attached else "login")
+                                       mode="collect" if self.attached else "login",
+                                       job_page_id=job_page_id, following=following)
 
     def frame(self) -> bytes | None:
         self._last_view = time.monotonic()
@@ -327,13 +341,21 @@ class RemoteBrowserSession:
                 self._open = False
 
     def _run_attached(self) -> None:
-        """Stream the collect job's tab and pass pointer and keyboard input; the job keeps driving it."""
+        """Stream the collect job's page and pass pointer and keyboard input; the job keeps driving it.
+
+        With several pages open, the others show as small previews refreshed every few seconds.
+        The user can pick one to see and control it; the view then stays there until they go
+        back to following the collect, or the collect asks for help on another page.
+        """
         page = None
+        previews_due = 0.0
+        retry_at: dict[str, float] = {}
+        last_notice = None
         try:
-            page = CdpPage(self._endpoint)
+            page = CdpPage(self._endpoint, target_id=_collect_targets.get(self.store_profile_id))
             with self._lock:
                 self._open = True
-                self._active_page_id = "1"
+                self._active_page_id = page.target_id
             while time.monotonic() - self._last_view < VIEWER_IDLE_SECONDS:
                 while True:
                     try:
@@ -342,14 +364,35 @@ class RemoteBrowserSession:
                         break
                     if command.get("type") == "close":
                         return
+                    if command.get("type") == "select_page":
+                        # No page id means follow the collect again.
+                        with self._lock:
+                            self._pinned = command.get("page_id") or None
+                        continue
                     # Navigation stays with the job; only pointer and keyboard input pass through.
-                    if command.get("type") in ("navigate", "select_page"):
+                    if command.get("type") == "navigate":
                         continue
                     try:
                         self._execute(page, command)
                     except CdpError as exc:
                         with self._lock:
                             self._error = str(exc)
+                job_target = _collect_targets.get(self.store_profile_id)
+                notice = _collect_notices.get(self.store_profile_id)
+                with self._lock:
+                    if notice and notice != last_notice and self._pinned and self._pinned != job_target:
+                        self._pinned = None  # The collect needs the user on its own page.
+                    wanted = self._pinned or job_target
+                last_notice = notice
+                if wanted and wanted != page.target_id:
+                    try:
+                        page.switch_to(wanted)
+                    except CdpError:
+                        pass  # Try again on the next frame.
+                    if page.target_id != wanted:
+                        with self._lock:
+                            if self._pinned == wanted:
+                                self._pinned = None  # That page closed.
                 try:
                     frame = page.screenshot()
                     challenge, ready_state = page.evaluate("[Boolean(window._cf_chl_opt), document.readyState]")
@@ -357,12 +400,20 @@ class RemoteBrowserSession:
                     # The tab is between pages; keep showing the last frame.
                     frame, challenge, ready_state = None, False, "loading"
                 url = page.url
+                pages = [{"id": page.target_id or "1", "url": url}]
+                job_tabs = _collect_tabs.get(self.store_profile_id) or []
+                if len(job_tabs) > 1:
+                    pages = self._describe_tabs(page, job_tabs, previews_due <= time.monotonic(), retry_at)
+                    if previews_due <= time.monotonic():
+                        previews_due = time.monotonic() + PREVIEW_INTERVAL_SECONDS
                 with self._lock:
                     if frame:
                         self._frame = frame
                         self._error = None
                     self._url = url
-                    self._pages = [{"id": "1", "url": url}]
+                    self._pages = pages
+                    self._active_page_id = page.target_id
+                    self._job_page_id = job_target
                     self._challenge = challenge
                     self._loading = ready_state != "complete"
                 time.sleep(FRAME_INTERVAL_SECONDS)
@@ -377,6 +428,45 @@ class RemoteBrowserSession:
             with self._lock:
                 self._open = False
 
+    def _describe_tabs(self, page, job_tabs, refresh: bool, retry_at: dict[str, float]) -> list[dict[str, Any]]:
+        """The collect's pages for the panel, refreshing the previews of those not on screen."""
+        states = {tab["id"]: tab.get("state", "idle") for tab in job_tabs}
+        try:
+            urls = {tab["targetId"]: tab["url"] for tab in page.tabs()}
+        except CdpError:
+            urls = {}
+        described = []
+        for target_id, state in states.items():
+            if target_id not in urls:
+                continue
+            with self._lock:
+                challenge = self._preview_challenges.get(target_id, False)
+            now = time.monotonic()
+            if refresh and target_id != page.target_id and retry_at.get(target_id, 0) <= now:
+                try:
+                    preview = page.thumbnail(target_id, VIEWPORT_WIDTH, VIEWPORT_HEIGHT)
+                    challenge = bool(page.evaluate_in(target_id, "Boolean(window._cf_chl_opt)"))
+                    with self._lock:
+                        self._previews[target_id] = preview
+                        self._preview_challenges[target_id] = challenge
+                except CdpError:
+                    # A page Chromium does not paint right now; keep the last preview a while.
+                    retry_at[target_id] = now + PREVIEW_RETRY_SECONDS
+            with self._lock:
+                has_preview = target_id in self._previews
+            described.append({
+                "id": target_id,
+                "url": urls[target_id],
+                "state": "verification" if challenge and state != "idle" else state,
+                "preview": "1" if has_preview else "",
+            })
+        return described
+
+    def preview(self, page_id: str) -> bytes | None:
+        self._last_view = time.monotonic()
+        with self._lock:
+            return self._previews.get(page_id)
+
 
 def _clamp(x, y) -> tuple[float, float]:
     return max(0.0, min(VIEWPORT_WIDTH, float(x))), max(0.0, min(VIEWPORT_HEIGHT, float(y)))
@@ -387,6 +477,10 @@ _sessions_lock = threading.Lock()
 # DevTools endpoints of browsers that collect jobs are driving, and what the job needs from the user.
 _collect_endpoints: dict[str, str] = {}
 _collect_notices: dict[str, str] = {}
+# The DevTools target of the tab each collect job is working on, when it uses several tabs.
+_collect_targets: dict[str, str] = {}
+# What each of those pages is doing: [{"id": target, "state": ...}].
+_collect_tabs: dict[str, list[dict[str, str]]] = {}
 
 
 def _configured(store_profile_id: str) -> bool:
@@ -416,6 +510,8 @@ def watch_collect_browser(store_profile_id: str, endpoint: str | None):
         with _sessions_lock:
             _collect_endpoints.pop(store_profile_id, None)
             _collect_notices.pop(store_profile_id, None)
+            _collect_targets.pop(store_profile_id, None)
+            _collect_tabs.pop(store_profile_id, None)
             if getattr(_sessions.get(store_profile_id), "attached", False):
                 viewer = _sessions.pop(store_profile_id)
         if viewer is not None:
@@ -427,6 +523,14 @@ def set_collect_notice(store_profile_id: str, message: str | None) -> None:
         _collect_notices[store_profile_id] = message
     else:
         _collect_notices.pop(store_profile_id, None)
+
+
+def set_collect_target(store_profile_id: str, target_id: str) -> None:
+    _collect_targets[store_profile_id] = target_id
+
+
+def set_collect_tabs(store_profile_id: str, tabs: list[dict[str, str]]) -> None:
+    _collect_tabs[store_profile_id] = tabs
 
 
 def _collect_viewer(store_profile_id: str) -> RemoteBrowserSession | None:
@@ -499,10 +603,14 @@ def get_login_session_status(store_profile_id: str) -> MakerWorldSessionStatus:
     )
 
 
-def get_login_session_frame(store_profile_id: str) -> bytes | None:
+def get_login_session_frame(store_profile_id: str, page_id: str | None = None) -> bytes | None:
     # Frames are only requested by an open panel, so this is where a collect viewer starts.
     session = _session(store_profile_id) or _collect_viewer(store_profile_id)
-    return session.frame() if session else None
+    if not session:
+        return None
+    if page_id and session.attached:
+        return session.preview(page_id)
+    return session.frame()
 
 
 def send_login_session_input(store_profile_id: str, command: dict[str, Any]) -> None:

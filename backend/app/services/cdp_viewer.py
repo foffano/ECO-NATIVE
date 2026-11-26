@@ -39,24 +39,31 @@ class CdpError(RuntimeError):
 class CdpPage:
     """The part of Playwright's Page API the remote panel uses, over a raw DevTools socket."""
 
-    def __init__(self, endpoint: str, timeout: float = 10.0) -> None:
+    def __init__(self, endpoint: str, timeout: float = 10.0, target_id: str | None = None) -> None:
         with urllib.request.urlopen(f"{endpoint}/json/version", timeout=timeout) as response:
             socket_url = json.load(response)["webSocketDebuggerUrl"]
         self._socket = connect(socket_url, max_size=None, open_timeout=timeout)
         self._ids = itertools.count(1)
         self._session: str | None = None
         self._target: str | None = None
+        # One DevTools session per tab this client has attached to, the shown one and previews.
+        self._attached: dict[str, str] = {}
         self.mouse = _Mouse(self)
         self.keyboard = _Keyboard(self)
-        self._attach()
+        self._attach(target_id)
 
     def close(self) -> None:
         self._socket.close()
 
-    def call(self, method: str, params: dict | None = None, *, page: bool = True, timeout: float = 10.0) -> dict:
+    def call(
+        self, method: str, params: dict | None = None, *, page: bool = True, timeout: float = 10.0,
+        session: str | None = None,
+    ) -> dict:
         message_id = next(self._ids)
         message = {"id": message_id, "method": method, "params": params or {}}
-        if page:
+        if session:
+            message["sessionId"] = session
+        elif page:
             if not self._session:
                 raise CdpError("A aba da coleta foi fechada")
             message["sessionId"] = self._session
@@ -67,21 +74,61 @@ class CdpPage:
             if remaining <= 0:
                 raise CdpError(f"{method}: tempo esgotado")
             reply = json.loads(self._socket.recv(timeout=remaining))
-            if reply.get("method") == "Target.detachedFromTarget" and reply["params"].get("sessionId") == self._session:
-                self._session = None
+            if reply.get("method") == "Target.detachedFromTarget":
+                gone = reply["params"].get("sessionId")
+                self._attached = {target: sid for target, sid in self._attached.items() if sid != gone}
+                if gone == self._session:
+                    self._session = None
             if reply.get("id") == message_id:
                 if "error" in reply:
                     raise CdpError(f"{method}: {reply['error'].get('message')}")
                 return reply.get("result", {})
 
-    def _attach(self) -> None:
+    def tabs(self) -> list[dict]:
         targets = self.call("Target.getTargets", page=False)["targetInfos"]
-        tabs = [target for target in targets if target["type"] == "page" and not target["url"].startswith("devtools://")]
+        return [target for target in targets if target["type"] == "page" and not target["url"].startswith("devtools://")]
+
+    def _session_for(self, target_id: str) -> str:
+        session = self._attached.get(target_id)
+        if session is None:
+            session = self.call("Target.attachToTarget", {"targetId": target_id, "flatten": True}, page=False)["sessionId"]
+            self._attached[target_id] = session
+        return session
+
+    def _attach(self, target_id: str | None = None) -> None:
+        tabs = self.tabs()
         if not tabs:
             raise CdpError("Nenhuma aba aberta no navegador da coleta")
-        # The collect job drives the browser's first tab.
-        self._target = tabs[0]["targetId"]
-        self._session = self.call("Target.attachToTarget", {"targetId": self._target, "flatten": True}, page=False)["sessionId"]
+        # The page the job works on now; with no word from the job, its first page.
+        chosen = next((tab for tab in tabs if tab["targetId"] == target_id), tabs[0])
+        self._target = chosen["targetId"]
+        self._session = self._session_for(self._target)
+
+    @property
+    def target_id(self) -> str | None:
+        return self._target
+
+    def switch_to(self, target_id: str) -> None:
+        """Show another page, keeping the sessions already open for previews."""
+        if target_id == self._target and self._session:
+            return
+        self.mouse = _Mouse(self)
+        self._attach(target_id)
+
+    def thumbnail(self, target_id: str, width: int, height: int, scale: float = 0.25, timeout: float = 2.0) -> bytes:
+        """A small JPEG of another page, for the panel's previews."""
+        session = self._session_for(target_id)
+        data = self.call("Page.captureScreenshot", {
+            "format": "jpeg",
+            "quality": 45,
+            "clip": {"x": 0, "y": 0, "width": width, "height": height, "scale": scale},
+        }, session=session, timeout=timeout)["data"]
+        return base64.b64decode(data)
+
+    def evaluate_in(self, target_id: str, expression: str, timeout: float = 2.0):
+        result = self.call("Runtime.evaluate", {"expression": expression, "returnByValue": True},
+                           session=self._session_for(target_id), timeout=timeout)
+        return result.get("result", {}).get("value")
 
     def is_closed(self) -> bool:
         return self._session is None
