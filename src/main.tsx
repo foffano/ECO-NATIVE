@@ -67,6 +67,11 @@ type CollectMode = "keyword" | "random";
 // Steps of MakerWorld's "Peso total" slider, in grams; null is "sem limite".
 const WEIGHT_STEPS_G = [1, 10, 25, 50, 75, 100, 250, 500, 750, 1000, 2000] as const;
 
+/** "1 produto", "3 produtos": the count with the word in the right number. */
+function count(value: number, singular: string, plural: string): string {
+  return `${value} ${value === 1 ? singular : plural}`;
+}
+
 function formatWeight(grams: number | null): string {
   if (grams === null) return "Sem limite";
   return grams >= 1000 ? `${grams / 1000} kg` : `${grams} g`;
@@ -869,8 +874,6 @@ function productPipelineBadges(product: Product): PipelineBadge[] {
 
 function productCardSubtitle(product: Product): string {
   const parts: string[] = [];
-  const sku = productSku(product);
-  if (sku) parts.push(sku);
   if (product.listing.title) parts.push(product.listing.title);
   if (product.listing.price) {
     const numeric = Number(String(product.listing.price).replace(",", "."));
@@ -1654,7 +1657,7 @@ const tabInfo: Record<AppTab, { title: string; eyebrow: string }> = {
     title: "Dashboard",
   },
   collect: {
-    eyebrow: "MakerWorld scraper",
+    eyebrow: "MakerWorld",
     title: "Coleta",
   },
   products: {
@@ -2669,10 +2672,10 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
       setSelectedProductIds([]);
       setDetailsOpen(false);
       const restoredParts = [
-        `${summary.products} produto(s)`,
-        `${summary.store_profiles} loja(s)`,
-        summary.filament_spools ? `${summary.filament_spools} filamento(s)` : null,
-        `${summary.files} arquivo(s)`,
+        count(summary.products, "produto", "produtos"),
+        count(summary.store_profiles, "loja", "lojas"),
+        summary.filament_spools ? count(summary.filament_spools, "filamento", "filamentos") : null,
+        count(summary.files, "arquivo", "arquivos"),
         summary.env_restored ? "integrações (.env)" : null,
       ].filter(Boolean).join(", ");
       setNotice(`Backup restaurado: ${restoredParts}.`);
@@ -2752,7 +2755,7 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
         let regenerate = false;
         if (existing.size && missing.length) {
           // Finishing an interrupted batch only pays for the styles still missing.
-          if (!(await confirmRegeneration(`"${name}" ainda não tem imagem para ${missing.length} estilo(s): ${missing.map((style) => style.name).join(", ")}. Gerar só esses? Para refazer uma imagem existente, use o botão IA na miniatura.`))) {
+          if (!(await confirmRegeneration(`"${name}" ainda não tem imagem para ${count(missing.length, "estilo", "estilos")}: ${missing.map((style) => style.name).join(", ")}. Gerar só esses? Para refazer uma imagem existente, use o botão IA na miniatura.`))) {
             throw new Error("__cancelled__");
           }
         } else if (existing.size) {
@@ -3042,7 +3045,7 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
         .filter((product): product is Product => Boolean(product && hasListingContent(product)));
       if (
         withExisting.length
-        && !(await confirmRegeneration(`${withExisting.length} produto(s) selecionado(s) já possuem descrição/anúncio. Gerar em lote pode substituir textos existentes e somar novos custos de IA. Deseja continuar?`))
+        && !(await confirmRegeneration(`${withExisting.length === 1 ? "1 produto selecionado já tem" : `${withExisting.length} produtos selecionados já têm`} descrição/anúncio. Gerar em lote pode substituir textos existentes e somar novos custos de IA. Deseja continuar?`))
       ) {
         return;
       }
@@ -3053,7 +3056,7 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
         .filter((product): product is Product => Boolean(product && hasBaseImages(product)));
       if (
         withExisting.length
-        && !(await confirmRegeneration(`${withExisting.length} produto(s) selecionado(s) já possuem imagens base. O sistema reutiliza arquivos existentes quando possível; para recriar imagens específicas, use o botão IA nas miniaturas. Deseja continuar?`))
+        && !(await confirmRegeneration(`${withExisting.length === 1 ? "1 produto selecionado já tem" : `${withExisting.length} produtos selecionados já têm`} imagens base. O sistema reutiliza arquivos existentes quando possível; para recriar imagens específicas, use o botão IA nas miniaturas. Deseja continuar?`))
       ) {
         return;
       }
@@ -3074,10 +3077,10 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
         }
       }
       if (errors.length) {
-        const extra = errors.length > 1 ? ` (+${errors.length - 1} outro(s))` : "";
-        setNotice(`${queued} de ${total} tarefa(s) na fila. Não entraram: ${errors[0]}${extra}`);
+        const extra = errors.length > 1 ? ` (+${count(errors.length - 1, "outro", "outros")})` : "";
+        setNotice(`${queued} de ${count(total, "tarefa", "tarefas")} na fila. Não entraram: ${errors[0]}${extra}`);
       } else {
-        setNotice(`${label}: ${total} tarefa(s) na fila. Você pode continuar usando o app; acompanhe em Tarefas.`);
+        setNotice(`${label}: ${count(total, "tarefa", "tarefas")} na fila. Você pode continuar usando o app; acompanhe em Tarefas.`);
       }
     } finally {
       setBatchProgress(null);
@@ -3117,10 +3120,10 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
       setNotice("Selecione pelo menos um produto para apagar.");
       return;
     }
-    if (!(await confirmDangerousDelete(`Apagar ${productIds.length} produto(s) selecionado(s)?`))) return;
+    if (!(await confirmDangerousDelete(`Apagar ${productIds.length === 1 ? "1 produto selecionado" : `${productIds.length} produtos selecionados`}?`))) return;
     try {
       setBusy(true);
-      setNotice(`Apagando ${productIds.length} produto(s)...`);
+      setNotice(`Apagando ${count(productIds.length, "produto", "produtos")}…`);
       // One request for the whole batch; the screen updates once.
       await api<{ status: string; product_ids: string[] }>("/api/products/delete-batch", {
         method: "POST",
@@ -3128,7 +3131,7 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
       });
       productIds.forEach(removeProductFromState);
       setSelectedProductIds([]);
-      setNotice(`${productIds.length} produto(s) apagado(s).`);
+      setNotice(productIds.length === 1 ? "1 produto apagado" : `${productIds.length} produtos apagados`);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "Erro ao apagar produtos");
     } finally {
@@ -3146,10 +3149,10 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
       setNotice(listed ? "Os selecionados já estão publicados." : "Os selecionados já estão como não publicados.");
       return;
     }
-    const label = listed ? "publicado(s)" : "não publicado(s)";
+    const label = listed ? "publicado" : "não publicado";
     try {
       setBusy(true);
-      setNotice(`Marcando ${pendingIds.length} produto(s) como ${label}...`);
+      setNotice(`Marcando ${count(pendingIds.length, "produto", "produtos")} como ${label}…`);
       const listedAt = listed ? new Date().toISOString() : null;
       for (const productId of pendingIds) {
         const updated = await api<Product>(`/api/products/${productId}`, {
@@ -3158,7 +3161,7 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
         });
         patchProduct(updated);
       }
-      setNotice(`${pendingIds.length} produto(s) marcado(s) como ${label}.`);
+      setNotice(`${count(pendingIds.length, "produto marcado", "produtos marcados")} como ${label}`);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "Erro ao atualizar a publicação");
     } finally {
@@ -3773,7 +3776,7 @@ function formatElapsed(fromIso?: string, toIso?: string): string {
   if (minutes < 60) return `${minutes} min`;
   const hours = Math.floor(minutes / 60);
   if (hours < 24) return `${hours}h ${minutes % 60}min`;
-  return `${Math.floor(hours / 24)} dia(s)`;
+  return count(Math.floor(hours / 24), "dia", "dias");
 }
 
 const JOB_STATUS_LABELS: Record<Job["status"], string> = {
@@ -4378,11 +4381,16 @@ function StorePicker({
         {photoUrl ? <img src={photoUrl} alt="" /> : activeStore ? initial : <UserRound size={18} />}
       </div>
       <div className="store-picker-control">
-        <button className="store-picker-button" type="button" onClick={() => setOpen((value) => !value)} aria-expanded={open}>
-          <span>{activeStore?.name ?? "Selecionar loja"}</span>
-          <ChevronDown size={16} aria-hidden="true" />
-        </button>
-        {open && (
+        {/* A store login only ever sees its own store, so there is nothing to switch to. */}
+        {stores.length > 1 ? (
+          <button className="store-picker-button" type="button" onClick={() => setOpen((value) => !value)} aria-expanded={open}>
+            <span>{activeStore?.name ?? "Selecionar loja"}</span>
+            <ChevronDown size={16} aria-hidden="true" />
+          </button>
+        ) : (
+          <span className="store-picker-name">{activeStore?.name ?? ""}</span>
+        )}
+        {open && stores.length > 1 && (
           <div className="store-picker-menu" role="listbox">
             {stores.map((store) => {
               const selected = store.id === activeStore?.id;
@@ -4477,7 +4485,7 @@ function CollectTab({
         </div>
 
         <p className="settings-note collect-catalog-note">
-          Os produtos coletados entram direto no catálogo da loja ({productCount} produto(s), {blockedSourceUrls.length} URL(s) bloqueada(s)).
+          Os produtos coletados entram direto no catálogo da loja ({count(productCount, "produto", "produtos")}, {count(blockedSourceUrls.length, "URL bloqueada", "URLs bloqueadas")}).
         </p>
 
         <div className="collect-mode-switch" role="radiogroup" aria-label="Tipo de coleta">
@@ -4606,7 +4614,7 @@ function CollectTab({
             placeholder="Cole links especificos aqui, um por linha"
           />
           <div className="option-row">
-            <small>{manualUrl.split(/\s|,|\n/).filter((url) => url.trim()).length} link(s) na lista</small>
+            <small>{count(manualUrl.split(/\s|,|\n/).filter((url) => url.trim()).length, "link", "links")} na lista</small>
             <button className="primary" onClick={onExtractSelectedLinks} disabled={busy || !manualUrl.trim()}>
               <Link2 size={16} /> Extrair links selecionados
             </button>
@@ -4636,7 +4644,7 @@ function CollectTab({
                 </div>
               ))}
               {blockedSourceUrls.length > 8 && (
-                <small className="blocked-url-more">+ {blockedSourceUrls.length - 8} URL(s) bloqueada(s)</small>
+                <small className="blocked-url-more">+ {count(blockedSourceUrls.length - 8, "URL bloqueada", "URLs bloqueadas")}</small>
               )}
             </div>
           ) : (
@@ -4677,7 +4685,7 @@ function CollectTab({
                   <strong>{jobActive(job) ? "Em andamento" : JOB_STATUS_LABELS[job.status]}</strong>
                   <small>{displayText(job.message)}</small>
                   <small>
-                    {collectJobCreatedCount(job)} produto(s) coletado(s)
+                    {count(collectJobCreatedCount(job), "produto coletado", "produtos coletados")}
                     {cost.cost ? ` · IA ${formatUsd(cost.cost)}` : ""}
                     {cost.source === "logs" ? " · estimado por logs" : ""}
                   </small>
@@ -5018,6 +5026,7 @@ const ProductTile = React.memo(function ProductTile({
   const listed = productListed(product);
   const imageUrl = productThumbnailUrl(product, 384);
   const subtitle = productCardSubtitle(product);
+  const sku = productSku(product);
   const badges = productPipelineBadges(product);
   const stage = badges.find((badge) => badge.key === "stage");
   const steps = badges.filter((badge) => badge.key !== "stage");
@@ -5051,7 +5060,8 @@ const ProductTile = React.memo(function ProductTile({
       <button className="product-tile-body" onClick={open}>
         <strong title={product.name}>{product.name}</strong>
         <span className={subtitle ? "product-tile-subtitle" : "product-tile-subtitle muted"}>
-          {subtitle || "Sem anúncio gerado ainda"}
+          {sku && <code className="sku-tag">{sku}</code>}
+          {subtitle || (sku ? "" : "Sem anúncio gerado ainda")}
         </span>
       </button>
       <div className="product-tile-steps">
@@ -5398,7 +5408,7 @@ const BoardCard = React.memo(function BoardCard({
       </div>
       <button className="board-card-body" onClick={open}>
         <strong title={product.name}>{product.name}</strong>
-        <span className="board-card-sku">{productSku(product) || "Sem SKU"}</span>
+        <code className="board-card-sku">{productSku(product) || "Sem SKU"}</code>
         <span className="product-tile-steps">
           {steps.map((badge) => (
             <span className={`product-tile-step ${badge.state}`} key={badge.key} title={`${badge.label}: ${badge.detail}`}>
@@ -5707,8 +5717,8 @@ function CostsTab({
           )}
           <span className="costs-filter-meta">
             {filteredProducts.length === products.length
-              ? `${products.length} produto(s)`
-              : `${filteredProducts.length} de ${products.length} produto(s)`}
+              ? count(products.length, "produto", "produtos")
+              : `${filteredProducts.length} de ${count(products.length, "produto", "produtos")}`}
             {hasMoreRows ? ` · exibindo ${visibleTableRows.length}` : ""}
           </span>
         </div>
@@ -5823,7 +5833,7 @@ function CostsTab({
             </tbody>
             <tfoot>
               <tr>
-                <th colSpan={5}>Totais ({tableRows.length} produto(s))</th>
+                <th colSpan={5}>Totais ({count(tableRows.length, "produto", "produtos")})</th>
                 <th className="costs-num">{formatBrl(Math.round(totals.filament * 100) / 100)}</th>
                 <th className="costs-num">{formatBrl(Math.round(totals.energy * 100) / 100)}</th>
                 <th className="costs-num">{formatBrl(Math.round(totals.depreciation * 100) / 100)}</th>
@@ -6314,7 +6324,7 @@ function ProductsTab({
         {selectedProductIds.length > 0 && (
           <div className="selection-bar" role="toolbar" aria-label="Ações para os selecionados">
             <div className="selection-bar-count">
-              <strong>{selectedProductIds.length}</strong> selecionado(s)
+              <strong>{selectedProductIds.length}</strong> {selectedProductIds.length === 1 ? "selecionado" : "selecionados"}
               <button className="selection-bar-clear" onClick={() => onSelectedProductIdsChange([])} aria-label="Limpar seleção">
                 <X size={14} />
               </button>
@@ -6634,7 +6644,7 @@ function ProductsTab({
                     <div>
                       <strong>{formatUsd(productCostTotal(selectedProduct))}</strong>
                       <span>
-                        {selectedCostEvents.length} registro(s) — Texto {formatUsd(selectedCostSummary.openRouter)} — Imagens {formatUsd(selectedCostSummary.kie)}
+                        {count(selectedCostEvents.length, "registro", "registros")} — Texto {formatUsd(selectedCostSummary.openRouter)} — Imagens {formatUsd(selectedCostSummary.kie)}
                       </span>
                     </div>
                     <button className="quiet-button" onClick={() => setCostDetailsOpen((open) => !open)} disabled={!selectedCostEvents.length}>

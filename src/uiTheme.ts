@@ -14,7 +14,6 @@ export type UiThemeTokens = {
   green: string;
   greenDark: string;
   teal: string;
-  sidebarGlow: string;
 };
 
 export type UiThemePreference = {
@@ -23,6 +22,20 @@ export type UiThemePreference = {
 };
 
 export const UI_THEME_STORAGE_KEY = "eco_native_ui_theme";
+
+/**
+ * Surfaces, borders and text stay neutral in every theme, so the theme colour
+ * only shows in the sidebar, the accent and the content.
+ */
+const NEUTRAL_SURFACES = {
+  ink: "#1b1b19",
+  panel: "#ffffff",
+  page: "#f4f4f2",
+  soft: "#f1f1ef",
+  soft2: "#ebebe8",
+  line: "#e2e2de",
+  muted: "#6b6b66",
+} satisfies Partial<UiThemeTokens>;
 
 const DEFAULT_THEME: UiThemePreference = { id: "forest" };
 
@@ -39,20 +52,19 @@ export const UI_THEME_PRESETS: Array<{
     description: "Verde original do ECO Native.",
     swatch: "#0f7a54",
     tokens: {
-      ink: "#0b1f16",
+      ink: "#1b1b19",
       forest: "#071f16",
       forest2: "#103020",
-      panel: "#fffef7",
-      page: "#f4f8f0",
-      soft: "#edf7ef",
-      soft2: "#e7f3e7",
-      line: "#d9e7d9",
-      muted: "#5f7167",
+      panel: "#ffffff",
+      page: "#f4f4f2",
+      soft: "#f1f1ef",
+      soft2: "#ebebe8",
+      line: "#e2e2de",
+      muted: "#6b6b66",
       mint: "#bff2c8",
       green: "#24b96f",
       greenDark: "#0f7a54",
       teal: "#0c6a5a",
-      sidebarGlow: "rgba(36, 185, 111, 0.18)",
     },
   },
   {
@@ -61,20 +73,19 @@ export const UI_THEME_PRESETS: Array<{
     description: "Azul calmo para foco prolongado.",
     swatch: "#1d6fb8",
     tokens: {
-      ink: "#0b1a2a",
+      ink: "#1b1b19",
       forest: "#071626",
       forest2: "#102842",
-      panel: "#fbfdff",
-      page: "#f2f7fc",
-      soft: "#eaf3fb",
-      soft2: "#e1edf8",
-      line: "#d4e3f2",
-      muted: "#5f6f82",
+      panel: "#ffffff",
+      page: "#f4f4f2",
+      soft: "#f1f1ef",
+      soft2: "#ebebe8",
+      line: "#e2e2de",
+      muted: "#6b6b66",
       mint: "#cfe8ff",
       green: "#3b8fd9",
       greenDark: "#1d6fb8",
       teal: "#155f96",
-      sidebarGlow: "rgba(59, 143, 217, 0.2)",
     },
   },
   {
@@ -83,20 +94,19 @@ export const UI_THEME_PRESETS: Array<{
     description: "Tons quentes e acolhedores.",
     swatch: "#c45c1a",
     tokens: {
-      ink: "#2a1608",
+      ink: "#1b1b19",
       forest: "#241005",
       forest2: "#3a1c0a",
-      panel: "#fffaf5",
-      page: "#fbf4ec",
-      soft: "#f8ebde",
-      soft2: "#f3e2d1",
-      line: "#ead7c6",
-      muted: "#7a6455",
+      panel: "#ffffff",
+      page: "#f4f4f2",
+      soft: "#f1f1ef",
+      soft2: "#ebebe8",
+      line: "#e2e2de",
+      muted: "#6b6b66",
       mint: "#ffd9b8",
       green: "#e07a2f",
       greenDark: "#c45c1a",
       teal: "#9a4512",
-      sidebarGlow: "rgba(224, 122, 47, 0.2)",
     },
   },
   {
@@ -105,20 +115,19 @@ export const UI_THEME_PRESETS: Array<{
     description: "Roxo elegante para criatividade.",
     swatch: "#7c3aed",
     tokens: {
-      ink: "#1a1028",
+      ink: "#1b1b19",
       forest: "#140b20",
       forest2: "#241538",
-      panel: "#fdfbff",
-      page: "#f7f2fc",
-      soft: "#f0e8fa",
-      soft2: "#e8ddf7",
-      line: "#ddd0ef",
-      muted: "#6f6282",
+      panel: "#ffffff",
+      page: "#f4f4f2",
+      soft: "#f1f1ef",
+      soft2: "#ebebe8",
+      line: "#e2e2de",
+      muted: "#6b6b66",
       mint: "#e4d4ff",
       green: "#9f67ff",
       greenDark: "#7c3aed",
       teal: "#5b21b6",
-      sidebarGlow: "rgba(124, 58, 237, 0.2)",
     },
   },
   {
@@ -127,20 +136,19 @@ export const UI_THEME_PRESETS: Array<{
     description: "Neutro moderno com toque azulado.",
     swatch: "#475569",
     tokens: {
-      ink: "#111827",
+      ink: "#1b1b19",
       forest: "#0f172a",
       forest2: "#1e293b",
       panel: "#ffffff",
-      page: "#f4f6f8",
-      soft: "#eef2f6",
-      soft2: "#e6ebf0",
-      line: "#d7dee7",
-      muted: "#64748b",
+      page: "#f4f4f2",
+      soft: "#f1f1ef",
+      soft2: "#ebebe8",
+      line: "#e2e2de",
+      muted: "#6b6b66",
       mint: "#dbeafe",
       green: "#64748b",
       greenDark: "#475569",
       teal: "#334155",
-      sidebarGlow: "rgba(100, 116, 139, 0.18)",
     },
   },
   {
@@ -149,20 +157,19 @@ export const UI_THEME_PRESETS: Array<{
     description: "Rosa suave com contraste confortável.",
     swatch: "#db2777",
     tokens: {
-      ink: "#2a0f1c",
+      ink: "#1b1b19",
       forest: "#220918",
       forest2: "#3a1230",
-      panel: "#fffafd",
-      page: "#fdf2f8",
-      soft: "#fce7f3",
-      soft2: "#f9daea",
-      line: "#f0c4da",
-      muted: "#7a5568",
+      panel: "#ffffff",
+      page: "#f4f4f2",
+      soft: "#f1f1ef",
+      soft2: "#ebebe8",
+      line: "#e2e2de",
+      muted: "#6b6b66",
       mint: "#ffd6ea",
       green: "#ec4899",
       greenDark: "#db2777",
       teal: "#9d174d",
-      sidebarGlow: "rgba(219, 39, 119, 0.18)",
     },
   },
 ];
@@ -211,32 +218,15 @@ function rgbaFromHex(hex: string, alpha: number): string {
 
 export function deriveThemeFromAccent(accent: string): UiThemeTokens {
   const greenDark = normalizeHex(accent) ?? "#0f7a54";
-  const green = mixHex(greenDark, "#ffffff", 0.22);
-  const mint = mixHex(greenDark, "#ffffff", 0.72);
   const forest = mixHex(greenDark, "#000000", 0.72);
-  const forest2 = mixHex(greenDark, "#000000", 0.55);
-  const ink = mixHex(forest, "#000000", 0.25);
-  const page = mixHex(mint, "#ffffff", 0.55);
-  const soft = mixHex(mint, "#ffffff", 0.35);
-  const soft2 = mixHex(mint, "#ffffff", 0.22);
-  const line = mixHex(greenDark, "#ffffff", 0.78);
-  const muted = mixHex(ink, "#ffffff", 0.45);
-  const teal = mixHex(greenDark, "#000000", 0.35);
   return {
-    ink,
+    ...NEUTRAL_SURFACES,
     forest,
-    forest2,
-    panel: mixHex(page, "#ffffff", 0.35),
-    page,
-    soft,
-    soft2,
-    line,
-    muted,
-    mint,
-    green,
+    forest2: mixHex(greenDark, "#000000", 0.55),
+    mint: mixHex(greenDark, "#ffffff", 0.72),
+    green: mixHex(greenDark, "#ffffff", 0.22),
     greenDark,
-    teal,
-    sidebarGlow: rgbaFromHex(green, 0.18),
+    teal: mixHex(greenDark, "#000000", 0.35),
   };
 }
 
@@ -255,7 +245,6 @@ export function applyUiTheme(tokens: UiThemeTokens) {
   root.style.setProperty("--eco-green", tokens.green);
   root.style.setProperty("--eco-green-dark", tokens.greenDark);
   root.style.setProperty("--eco-teal", tokens.teal);
-  root.style.setProperty("--eco-sidebar-glow", tokens.sidebarGlow);
   for (const [key, value] of Object.entries(buildDerivedThemeVariables(tokens))) {
     root.style.setProperty(key, value);
   }
@@ -277,11 +266,11 @@ export function buildDerivedThemeVariables(tokens: UiThemeTokens): Record<string
     "--eco-sidebar-border-subtle": rgbaFromHex(tokens.mint, 0.14),
     "--eco-sidebar-hover": rgbaFromHex(tokens.mint, 0.13),
     "--eco-on-sidebar": mixHex(tokens.panel, tokens.mint, 0.08),
-    "--eco-shadow": rgbaFromHex(tokens.forest, 0.25),
-    "--eco-shadow-md": rgbaFromHex(tokens.forest, 0.28),
-    "--eco-shadow-lg": rgbaFromHex(tokens.forest, 0.34),
-    "--eco-shadow-xl": rgbaFromHex(tokens.forest, 0.38),
-    "--eco-shadow-deep": rgbaFromHex(tokens.forest, 0.42),
+    "--eco-shadow": "rgba(20, 20, 18, 0.1)",
+    "--eco-shadow-md": "rgba(20, 20, 18, 0.12)",
+    "--eco-shadow-lg": "rgba(20, 20, 18, 0.14)",
+    "--eco-shadow-xl": "rgba(20, 20, 18, 0.16)",
+    "--eco-shadow-deep": "rgba(20, 20, 18, 0.18)",
     "--eco-overlay": rgbaFromHex(tokens.forest, 0.58),
     "--eco-overlay-strong": rgbaFromHex(tokens.forest, 0.72),
     "--eco-accent-tint-12": rgbaFromHex(tokens.greenDark, 0.12),
@@ -299,8 +288,8 @@ export function buildDerivedThemeVariables(tokens: UiThemeTokens): Record<string
     "--eco-highlight-border": mixHex(tokens.line, tokens.green, 0.42),
     "--eco-surface-hover": mixHex(tokens.soft2, tokens.line, 0.35),
     "--eco-forest-alpha-14": rgbaFromHex(tokens.forest2, 0.14),
-    "--eco-shadow-sm": rgbaFromHex(tokens.forest2, 0.08),
-    "--eco-shadow-menu": rgbaFromHex(tokens.forest, 0.24),
+    "--eco-shadow-sm": "rgba(20, 20, 18, 0.06)",
+    "--eco-shadow-menu": "rgba(20, 20, 18, 0.12)",
     "--eco-backdrop-heavy": rgbaFromHex(tokens.forest, 0.82),
   };
 }
