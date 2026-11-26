@@ -5,6 +5,7 @@ A second Playwright connection would redirect the browser's downloads to its own
 screenshots, reads the page state and dispatches input to the job's tab.
 """
 import base64
+import io
 import itertools
 import json
 import time
@@ -115,15 +116,22 @@ class CdpPage:
         self.mouse = _Mouse(self)
         self._attach(target_id)
 
-    def thumbnail(self, target_id: str, width: int, height: int, scale: float = 0.25, timeout: float = 2.0) -> bytes:
-        """A small JPEG of another page, for the panel's previews."""
-        session = self._session_for(target_id)
-        data = self.call("Page.captureScreenshot", {
-            "format": "jpeg",
-            "quality": 45,
-            "clip": {"x": 0, "y": 0, "width": width, "height": height, "scale": scale},
-        }, session=session, timeout=timeout)["data"]
-        return base64.b64decode(data)
+    def thumbnail(self, target_id: str, width: int = 320, timeout: float = 3.0) -> bytes:
+        """A small JPEG of another page, for the panel's previews.
+
+        Captured at full size and shrunk here: a capture with `clip.scale` makes Chromium
+        re-render the page at that scale, which the collect sees as a page that changes
+        size under its clicks.
+        """
+        from PIL import Image
+
+        data = self.call("Page.captureScreenshot", {"format": "jpeg", "quality": 40},
+                         session=self._session_for(target_id), timeout=timeout)["data"]
+        image = Image.open(io.BytesIO(base64.b64decode(data)))
+        image.thumbnail((width, width))
+        output = io.BytesIO()
+        image.convert("RGB").save(output, "JPEG", quality=60)
+        return output.getvalue()
 
     def evaluate_in(self, target_id: str, expression: str, timeout: float = 2.0):
         result = self.call("Runtime.evaluate", {"expression": expression, "returnByValue": True},

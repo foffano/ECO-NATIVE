@@ -403,7 +403,7 @@ class RemoteBrowserSession:
                 pages = [{"id": page.target_id or "1", "url": url}]
                 job_tabs = _collect_tabs.get(self.store_profile_id) or []
                 if len(job_tabs) > 1:
-                    pages = self._describe_tabs(page, job_tabs, previews_due <= time.monotonic(), retry_at)
+                    pages = self._describe_tabs(page, job_tabs, previews_due <= time.monotonic(), retry_at, job_target)
                     if previews_due <= time.monotonic():
                         previews_due = time.monotonic() + PREVIEW_INTERVAL_SECONDS
                 with self._lock:
@@ -428,7 +428,8 @@ class RemoteBrowserSession:
             with self._lock:
                 self._open = False
 
-    def _describe_tabs(self, page, job_tabs, refresh: bool, retry_at: dict[str, float]) -> list[dict[str, Any]]:
+    def _describe_tabs(self, page, job_tabs, refresh: bool, retry_at: dict[str, float],
+                       job_target: str | None = None) -> list[dict[str, Any]]:
         """The collect's pages for the panel, refreshing the previews of those not on screen."""
         states = {tab["id"]: tab.get("state", "idle") for tab in job_tabs}
         try:
@@ -442,9 +443,10 @@ class RemoteBrowserSession:
             with self._lock:
                 challenge = self._preview_challenges.get(target_id, False)
             now = time.monotonic()
-            if refresh and target_id != page.target_id and retry_at.get(target_id, 0) <= now:
+            # Never the page on screen or the one the collect is clicking in.
+            if refresh and target_id not in (page.target_id, job_target) and retry_at.get(target_id, 0) <= now:
                 try:
-                    preview = page.thumbnail(target_id, VIEWPORT_WIDTH, VIEWPORT_HEIGHT)
+                    preview = page.thumbnail(target_id)
                     challenge = bool(page.evaluate_in(target_id, "Boolean(window._cf_chl_opt)"))
                     with self._lock:
                         self._previews[target_id] = preview

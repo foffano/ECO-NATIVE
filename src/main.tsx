@@ -8679,7 +8679,63 @@ function LoginScreen({ status, onAuthenticated }: { status: AuthStatus; onAuthen
   );
 }
 
+// The server is updated in place; a page opened before an update keeps running the old
+// interface until it reloads. Checked every minute and whenever the tab comes back.
+const VERSION_CHECK_MS = 60_000;
+
+function NewVersionBanner() {
+  const [serverVersion, setServerVersion] = useState("");
+
+  useEffect(() => {
+    let cancelled = false;
+    async function check() {
+      try {
+        const response = await fetch(`${API_BASE}/health`, { cache: "no-store" });
+        const health = (await response.json()) as { version?: string; maintenance?: boolean };
+        // A development server reports "dev"; only a released version means an update.
+        const released = /^\d+\.\d+\.\d+$/.test(health.version ?? "");
+        if (!cancelled && released && !health.maintenance && health.version !== __APP_VERSION__) {
+          setServerVersion(health.version);
+        }
+      } catch {
+        // The server may be restarting for the update; the next check retries.
+      }
+    }
+    const onVisible = () => {
+      if (document.visibilityState === "visible") void check();
+    };
+    void check();
+    const timer = window.setInterval(check, VERSION_CHECK_MS);
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, []);
+
+  if (!serverVersion) return null;
+  return (
+    <div className="version-banner" role="status">
+      <RefreshCw size={16} aria-hidden="true" />
+      <span>
+        Nova versão disponível (v{serverVersion}). Recarregue para usar a interface atualizada; as tarefas em andamento continuam no servidor.
+      </span>
+      <button className="toast-action" onClick={() => window.location.reload()}>Recarregar</button>
+    </div>
+  );
+}
+
 function Root() {
+  return (
+    <>
+      <NewVersionBanner />
+      <RootScreen />
+    </>
+  );
+}
+
+function RootScreen() {
   const [auth, setAuth] = useState<AuthStatus | null>(null);
 
   const loadStatus = useCallback(() => {

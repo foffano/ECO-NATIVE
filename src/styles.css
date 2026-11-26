@@ -684,6 +684,39 @@ button:disabled {
   white-space: nowrap;
 }
 
+.version-banner {
+  position: fixed;
+  top: 16px;
+  left: 50%;
+  /* Above every dialog, the remote browser included. */
+  z-index: 13000;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: max-content;
+  max-width: calc(100vw - 32px);
+  padding: 10px 10px 10px 14px;
+  transform: translateX(-50%);
+  background: var(--eco-forest);
+  border: 1px solid var(--eco-sidebar-border);
+  border-radius: 8px;
+  color: var(--eco-panel);
+  font-size: 13px;
+  line-height: 1.35;
+  box-shadow: 0 18px 40px var(--eco-shadow);
+}
+
+.version-banner .toast-action {
+  flex: 0 0 auto;
+  min-height: 30px;
+  padding: 0 12px;
+  background: var(--eco-panel);
+  border-radius: 6px;
+  color: var(--eco-forest);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
 .busy-toast {
   background: var(--eco-forest-2);
 }

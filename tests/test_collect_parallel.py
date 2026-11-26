@@ -353,7 +353,7 @@ class FakeCdp:
         self.switches.append(target_id)
         self.target_id = target_id
 
-    def thumbnail(self, target_id, width, height):
+    def thumbnail(self, target_id, width=320):
         from backend.app.services.cdp_viewer import CdpError
         if target_id in self.fail_preview:
             raise CdpError("sem pintura")
@@ -410,3 +410,24 @@ def test_collect_viewer_shows_previews_and_lets_the_user_pick_a_page(monkeypatch
         viewer._thread.join(timeout=3)
         for registry in (ms._collect_targets, ms._collect_tabs, ms._collect_notices):
             registry.pop("shop", None)
+
+
+def test_previews_shrink_a_normal_capture_instead_of_asking_chromium_to_scale():
+    """A capture with clip.scale re-renders the page at that scale under the collect's clicks."""
+    import base64, io
+    from PIL import Image
+
+    frame = io.BytesIO()
+    Image.new("RGB", (1280, 720), "green").save(frame, "JPEG")
+    page = CdpPage.__new__(CdpPage)
+    page._session, page._target, page._attached = "s1", "t1", {"t1": "s1", "t2": "s2"}
+    calls = []
+
+    def call(method, params=None, **kwargs):
+        calls.append((method, params, kwargs.get("session")))
+        return {"data": base64.b64encode(frame.getvalue()).decode()}
+
+    page.call = call
+    preview = Image.open(io.BytesIO(page.thumbnail("t2")))
+    assert preview.size == (320, 180)
+    assert calls == [("Page.captureScreenshot", {"format": "jpeg", "quality": 40}, "s2")]
