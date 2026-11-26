@@ -283,3 +283,21 @@ def test_stopped_collect_is_cancelled_and_keeps_saved_products(monkeypatch):
     assert result.metadata["created_products"] == 1
     assert "1 produto(s)" in result.message
     assert [p.source_url for p in store.load().products] == ["https://makerworld.com/pt/models/5"]
+
+
+def test_search_url_uses_makerworld_weight_steps():
+    assert scraper.build_search_url("organizador", 1, 10) == (
+        "https://makerworld.com/pt/search/models?keyword=organizador&total_weight=1%2C10"
+    )
+    # The top of the slider is "no limit", written as "-".
+    assert scraper.build_search_url("organizador", 25, None).endswith("total_weight=25%2C-")
+    # The full range is MakerWorld's default and adds no filter.
+    assert scraper.build_search_url("vaso", 1, None).endswith("keyword=vaso")
+    # Random collects open the home page, where the filter does not apply.
+    assert scraper.build_search_url("", 25, 100) == scraper.MAKERWORLD_HOME
+    try:
+        scraper.build_search_url("vaso", 100, 50)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("a max below the min must be refused")

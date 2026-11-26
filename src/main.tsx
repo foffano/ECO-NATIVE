@@ -62,6 +62,15 @@ const ONBOARDING_COMPLETE_KEY = "eco_native_onboarding_complete";
 
 type Marketplace = "shopee" | "tiktok_shop" | "kwai_shop" | "mercado_livre";
 type AppTab = "dashboard" | "collect" | "products" | "costs" | "settings";
+type CollectMode = "keyword" | "random";
+
+// Steps of MakerWorld's "Peso total" slider, in grams; null is "sem limite".
+const WEIGHT_STEPS_G = [1, 10, 25, 50, 75, 100, 250, 500, 750, 1000, 2000] as const;
+
+function formatWeight(grams: number | null): string {
+  if (grams === null) return "Sem limite";
+  return grams >= 1000 ? `${grams / 1000} kg` : `${grams} g`;
+}
 type ProductDetailSection = "listing" | "images" | "files" | "info";
 type SettingsSection = "store" | "integrations" | "appearance" | "colors" | "production" | "backup";
 type ProductStatus = "collected" | "in_edit" | "ready" | "exported";
@@ -1685,6 +1694,9 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
   const [manualUrl, setManualUrl] = useState("");
   const [collectLimit, setCollectLimit] = useState(8);
   const [collectScrolls, setCollectScrolls] = useState(8);
+  const [collectMode, setCollectMode] = useState<CollectMode>("keyword");
+  const [collectMinWeight, setCollectMinWeight] = useState<number>(WEIGHT_STEPS_G[0]);
+  const [collectMaxWeight, setCollectMaxWeight] = useState<number | null>(null);
   const [activeStoreProfileId, setActiveStoreProfileId] = useState("");
   const [storeProfileDraft, setStoreProfileDraft] = useState<StoreProfile | null>(null);
   const [openRouterApiKeyDraft, setOpenRouterApiKeyDraft] = useState("");
@@ -2386,9 +2398,16 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
   }
 
   function collectProducts() {
-    return runCollect("Coletando produtos", {
+    const random = collectMode === "random";
+    if (!random && !keyword.trim()) {
+      setNotice("Digite uma palavra-chave ou escolha a coleta aleatória.");
+      return Promise.resolve();
+    }
+    return runCollect(random ? "Coletando modelos recomendados" : "Coletando produtos", {
       store_profile_id: activeStoreProfile?.id ?? null,
-      keyword,
+      keyword: random ? "" : keyword,
+      min_weight_g: random ? null : collectMinWeight,
+      max_weight_g: random ? null : collectMaxWeight,
       urls: [],
       limit: collectLimit,
       scrolls: collectScrolls,
@@ -3301,6 +3320,14 @@ function App({ auth, onLogout }: { auth: AuthStatus; onLogout: () => Promise<voi
             busy={busy || collectRunning}
             jobs={storeJobs}
             keyword={keyword}
+            mode={collectMode}
+            minWeight={collectMinWeight}
+            maxWeight={collectMaxWeight}
+            onModeChange={setCollectMode}
+            onWeightChange={(min, max) => {
+              setCollectMinWeight(min);
+              setCollectMaxWeight(max);
+            }}
             limit={collectLimit}
             loginStatus={makerWorldLogin}
             manualUrl={manualUrl}
@@ -4391,6 +4418,11 @@ function CollectTab({
   busy,
   jobs,
   keyword,
+  mode,
+  minWeight,
+  maxWeight,
+  onModeChange,
+  onWeightChange,
   limit,
   loginStatus,
   manualUrl,
@@ -4411,6 +4443,11 @@ function CollectTab({
   busy: boolean;
   jobs: Job[];
   keyword: string;
+  mode: CollectMode;
+  minWeight: number;
+  maxWeight: number | null;
+  onModeChange: (mode: CollectMode) => void;
+  onWeightChange: (min: number, max: number | null) => void;
   limit: number;
   loginStatus: MakerWorldLoginStatus | null;
   manualUrl: string;
@@ -4443,11 +4480,73 @@ function CollectTab({
           Os produtos coletados entram direto no catálogo da loja ({productCount} produto(s), {blockedSourceUrls.length} URL(s) bloqueada(s)).
         </p>
 
+        <div className="collect-mode-switch" role="radiogroup" aria-label="Tipo de coleta">
+          <button
+            type="button"
+            role="radio"
+            aria-checked={mode === "keyword"}
+            className={mode === "keyword" ? "active" : ""}
+            onClick={() => onModeChange("keyword")}
+            disabled={busy}
+          >
+            Por palavra-chave
+          </button>
+          <button
+            type="button"
+            role="radio"
+            aria-checked={mode === "random"}
+            className={mode === "random" ? "active" : ""}
+            onClick={() => onModeChange("random")}
+            disabled={busy}
+          >
+            Aleatória (recomendados)
+          </button>
+        </div>
+
+        {mode === "random" && (
+          <p className="settings-note">
+            Abre a página inicial do MakerWorld, rola a lista de modelos recomendados pela plataforma e coleta os que ainda não
+            estão no catálogo.
+          </p>
+        )}
+
         <div className="form-grid">
-          <label>
-            Palavra-chave
-            <input value={keyword} onChange={(event) => onKeywordChange(event.target.value)} />
-          </label>
+          {mode === "keyword" && (
+            <>
+              <label style={{ gridColumn: "1 / -1" }}>
+                Palavra-chave
+                <input value={keyword} onChange={(event) => onKeywordChange(event.target.value)} />
+              </label>
+              <div className="weight-filter">
+                <span>Peso total do modelo (filtro do MakerWorld)</span>
+                <div className="weight-filter-selects">
+                  <select
+                    aria-label="Peso mínimo"
+                    value={minWeight}
+                    onChange={(event) => {
+                      const min = Number(event.target.value);
+                      onWeightChange(min, maxWeight !== null && maxWeight <= min ? null : maxWeight);
+                    }}
+                  >
+                    {WEIGHT_STEPS_G.map((grams) => (
+                      <option key={grams} value={grams}>{formatWeight(grams)}</option>
+                    ))}
+                  </select>
+                  <span>até</span>
+                  <select
+                    aria-label="Peso máximo"
+                    value={maxWeight ?? ""}
+                    onChange={(event) => onWeightChange(minWeight, event.target.value ? Number(event.target.value) : null)}
+                  >
+                    {WEIGHT_STEPS_G.filter((grams) => grams > minWeight).map((grams) => (
+                      <option key={grams} value={grams}>{formatWeight(grams)}</option>
+                    ))}
+                    <option value="">{formatWeight(null)}</option>
+                  </select>
+                </div>
+              </div>
+            </>
+          )}
           <label>
             Limite
             <input
@@ -4486,8 +4585,8 @@ function CollectTab({
           <button className="primary ghost" onClick={onCloseLogin} disabled={busy || !loginStatus?.open}>
             Fechar navegador
           </button>
-          <button className="primary dark" onClick={onCollect} disabled={busy}>
-            <Play size={18} /> Iniciar coleta
+          <button className="primary dark" onClick={onCollect} disabled={busy || (mode === "keyword" && !keyword.trim())}>
+            <Play size={18} /> {mode === "random" ? "Iniciar coleta aleatória" : "Iniciar coleta"}
           </button>
         </div>
 

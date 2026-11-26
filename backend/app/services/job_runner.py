@@ -21,6 +21,7 @@ from backend.app.services.makerworld_scraper import (
     ScrapedProduct,
     clean_makerworld_url,
     discover_model_urls,
+    weight_filter_param,
     scrape_product_urls,
     raise_if_stopped,
     stop_when,
@@ -143,7 +144,16 @@ def _run_collect_job(job: Job, payload) -> Job:
         if not urls:
             job.progress = 35
             job.message = "Buscando links no MakerWorld"
-            job.logs.append(f"Busca por palavra-chave: {payload.keyword or 'tendências'}")
+            min_weight_g = getattr(payload, "min_weight_g", None)
+            max_weight_g = getattr(payload, "max_weight_g", None)
+            if payload.keyword.strip():
+                job.logs.append(f"Busca por palavra-chave: {payload.keyword}")
+                weight = weight_filter_param(min_weight_g, max_weight_g)
+                if weight:
+                    low, high = weight.split(",")
+                    job.logs.append(f"Filtro de peso total: {low} g a {high + ' g' if high != '-' else 'sem limite'}")
+            else:
+                job.logs.append("Coleta aleatória: modelos recomendados na página inicial do MakerWorld")
             job.logs.append(f"Loja ativa: {store_profile.name} | nicho={store_profile.niche}")
             store.upsert_job(job)
             urls = discover_model_urls(
@@ -152,6 +162,8 @@ def _run_collect_job(job: Job, payload) -> Job:
                 headless=not payload.visible_browser,
                 store_profile_id=store_profile.id,
                 on_attention=ask_user,
+                min_weight_g=min_weight_g if payload.keyword.strip() else None,
+                max_weight_g=max_weight_g if payload.keyword.strip() else None,
             )
             job.logs.append(f"{len(urls)} link(s) candidato(s) encontrado(s) na busca.")
 

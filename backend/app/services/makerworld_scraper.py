@@ -87,12 +87,31 @@ def clean_makerworld_url(url: str) -> str:
     return url.split("?")[0]
 
 
-def build_search_url(keyword: str) -> str:
+# The MakerWorld "Peso total" filter is a slider with fixed steps, in grams;
+# the top step is "no limit" and goes in the URL as "-".
+WEIGHT_STEPS_G = (1, 10, 25, 50, 75, 100, 250, 500, 750, 1000, 2000)
+
+
+def weight_filter_param(min_weight_g: int | None, max_weight_g: int | None) -> str | None:
+    """MakerWorld's total_weight value, or None when the range is the whole slider."""
+    low = min_weight_g if min_weight_g in WEIGHT_STEPS_G else WEIGHT_STEPS_G[0]
+    high = max_weight_g if max_weight_g in WEIGHT_STEPS_G else None
+    if high is not None and high <= low:
+        raise ValueError("O peso máximo precisa ser maior que o peso mínimo.")
+    if low == WEIGHT_STEPS_G[0] and high is None:
+        return None
+    return f"{low},{high if high is not None else '-'}"
+
+
+def build_search_url(keyword: str, min_weight_g: int | None = None, max_weight_g: int | None = None) -> str:
     keyword = keyword.strip()
     if not keyword:
         return MAKERWORLD_HOME
-    encoded = urllib.parse.quote(keyword)
-    return f"https://makerworld.com/pt/search/models?keyword={encoded}"
+    query = {"keyword": keyword}
+    weight = weight_filter_param(min_weight_g, max_weight_g)
+    if weight:
+        query["total_weight"] = weight
+    return f"https://makerworld.com/pt/search/models?{urllib.parse.urlencode(query, quote_via=urllib.parse.quote)}"
 
 
 def makerworld_profile_dir(store_profile_id: str | None) -> Path:
@@ -282,9 +301,11 @@ def discover_model_urls(
     max_urls: int = 200,
     store_profile_id: str | None = None,
     on_attention: AttentionCallback | None = None,
+    min_weight_g: int | None = None,
+    max_weight_g: int | None = None,
 ) -> list[str]:
     headless = False
-    target_url = build_search_url(keyword)
+    target_url = build_search_url(keyword, min_weight_g, max_weight_g)
     urls: list[str] = []
     seen: set[str] = set()
     # Com muitos scrolls o usuario quer alcancar produtos mais abaixo na lista.

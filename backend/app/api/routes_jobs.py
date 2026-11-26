@@ -16,6 +16,7 @@ from backend.app.services.makerworld_session import (
 from backend.app.services.authorization import current_store_id, require_product, store_project_ids
 from backend.app.services.store_catalog import ensure_store_catalog
 from backend.app.services.usage_limits import enforce_quota
+from backend.app.services.makerworld_scraper import weight_filter_param
 from backend.app.services.job_queue import admission_lock, job_queue
 from backend.app.core.maintenance import maintenance_requested
 
@@ -30,6 +31,9 @@ class CollectRequest(BaseModel):
     urls: list[str] = []
     limit: int = 10
     scrolls: int = 8
+    # MakerWorld "Peso total" filter for keyword searches, in grams; None = no limit.
+    min_weight_g: int | None = None
+    max_weight_g: int | None = None
     visible_browser: bool = True
     ai_profile: str = "Padrao"
     ai_profile_id: str | None = None
@@ -150,7 +154,12 @@ def collect_products(payload: CollectRequest, request: Request) -> Job:
         project = ensure_store_catalog(store_id)
         payload.project_id = project.id
         payload.store_profile_id = project.store_profile_id
-        label = payload.keyword.strip() or (f"{len(payload.urls)} link(s)" if payload.urls else "")
+        if payload.keyword.strip() and not payload.urls:
+            try:
+                weight_filter_param(payload.min_weight_g, payload.max_weight_g)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+        label = payload.keyword.strip() or (f"{len(payload.urls)} link(s)" if payload.urls else "Coleta aleatória")
         job = Job(type="collect_products", project_id=payload.project_id, metadata={"label": label} if label else {})
         return job_queue.submit(job, lambda: run_collect_job(job, payload, job_queue.stop_event(job.id)))
 
