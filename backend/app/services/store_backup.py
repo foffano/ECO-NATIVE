@@ -231,6 +231,16 @@ def replace_directory_from_archive(archive: ZipFile, arc_prefix: str, target_dir
     return restore_directory_from_archive(archive, arc_prefix, target_dir)
 
 
+def _same_place_in_projects(old_path: str) -> Path | None:
+    """The file at the same place under this PROJECTS_DIR as under the old one."""
+    parts = PureWindowsPath(old_path).parts  # splits both / and \ paths
+    if "projects" not in parts:
+        return None
+    last = len(parts) - 1 - parts[::-1].index("projects")
+    rest = parts[last + 1:]
+    return PROJECTS_DIR.joinpath(*rest) if rest else None
+
+
 def remap_restored_paths(state: StudioState) -> None:
     for profile in state.store_profiles:
         if not profile.logo_path:
@@ -246,10 +256,11 @@ def remap_restored_paths(state: StudioState) -> None:
         for asset in product.assets:
             if not asset.path:
                 continue
-            filename = PureWindowsPath(asset.path).name
-            candidate = product_dir / filename
-            if candidate.exists():
-                asset.path = str(candidate)
+            # Keep subfolders such as versoes_anteriores; else look by name in the SKU folder.
+            for candidate in (_same_place_in_projects(asset.path), product_dir / PureWindowsPath(asset.path).name):
+                if candidate and candidate.is_file():
+                    asset.path = str(candidate)
+                    break
 
 
 def read_manifest(zip_bytes: bytes) -> tuple[ZipFile, dict]:

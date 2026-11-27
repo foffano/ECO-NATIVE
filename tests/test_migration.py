@@ -102,3 +102,20 @@ def test_legacy_full_backup_windows_asset_names(tmp_path, monkeypatch):
     store_backup.remap_restored_paths(state)
     assert state.products[0].assets[0].path == str(file)
     assert state.store_profiles[0].logo_path == str(logos / "logo.png")
+
+
+@pytest.mark.parametrize("old_root", ["/data", r"C:\old"])
+def test_remap_keeps_previous_image_versions(tmp_path, monkeypatch, old_root):
+    from backend.app.services import store_backup
+    from backend.app.db.models import StudioState, Product, Asset
+    projects = tmp_path / "projects"
+    previous = projects / "p" / "SKU" / "versoes_anteriores" / "SKU_capa_20261006.png"
+    previous.parent.mkdir(parents=True)
+    previous.touch()
+    monkeypatch.setattr(store_backup, "PROJECTS_DIR", projects)
+    separator = "\\" if "\\" in old_root else "/"
+    old_path = separator.join([old_root, "projects", "p", "SKU", "versoes_anteriores", previous.name])
+    product = Product(project_id="p", name="P", metadata={"sku": "SKU"}, assets=[Asset(product_id="x", kind="previous_generated_studio_classic", path=old_path)])
+    state = StudioState(products=[product])
+    store_backup.remap_restored_paths(state)
+    assert state.products[0].assets[0].path == str(previous)
