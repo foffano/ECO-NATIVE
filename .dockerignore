@@ -13,3 +13,4 @@ backups
 *.log
 *.tsbuildinfo
 tests
+.venv-macos

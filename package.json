@@ -25,6 +25,9 @@
     "serve": ".venv\\Scripts\\python.exe -m backend.web_server",
     "preview": "vite preview --host 127.0.0.1 --port 4173",
     "start:linux": "python -m backend.web_server",
+    "desktop:mac": "npm run build:frontend && .venv-macos/bin/python -m backend.desktop_app",
+    "build:mac": "bash scripts/build_macos_app.sh",
+    "install:mac": "bash scripts/build_macos_app.sh --install",
     "test:backend": "python -m pytest tests"
   },
   "dependencies": {

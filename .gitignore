@@ -13,3 +13,4 @@ exports/
 
 .pytest_cache/
 backups/
+.venv-macos/
