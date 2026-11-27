@@ -4,6 +4,37 @@ Aplicação web local para coletar produtos, gerar anúncios e imagens com IA e 
 
 **Stack:** React · Vite · FastAPI · Cloudflare Tunnel (opcional)
 
+## App do macOS
+
+O `ECO Native Studio.app` roda tudo no Mac numa janela própria (WebKit): API,
+interface, banco e o Chromium do Playwright vão dentro do app. Para gerar e instalar
+em `/Applications` (precisa de Python 3.12 e Node; o primeiro build baixa o Chromium):
+
+```bash
+npm run install:mac
+```
+
+`npm run build:mac` só gera `dist/macos/ECO Native Studio.app`, sem instalar. Para
+testar a janela direto do código, use `npm run desktop:mac`, que usa a pasta `data/`
+do repositório.
+
+- Os dados ficam em `~/Library/Application Support/ECO Native Studio` e os logs em
+  `logs/` dessa pasta (`server.log` e `desktop-console.log`).
+- A API ouve só em `127.0.0.1:18766`. A porta 18765 fica livre para o túnel SSH até a
+  VPS; se a 18766 estiver ocupada, o app usa outra porta livre.
+- O app lê o `PATH` do seu shell de login, então encontra os CLIs instalados por
+  Homebrew ou npm (como o Codex) mesmo quando aberto pelo Finder ou pelo Dock.
+- Fechar a janela ou usar Cmd+Q encerra o servidor e os navegadores do MakerWorld.
+  Se houver trabalhos em andamento, o app pede confirmação; os interrompidos ficam
+  como falha para revisão.
+- As janelas do Chromium das coletas e do login MakerWorld aparecem na tela do Mac,
+  além do painel dentro do app.
+- Sem um endereço público, a Kie.ai e os links da planilha da Shopee não alcançam as
+  imagens do Mac. Use o Codex para gerar imagens ou publique o app com um Cloudflare
+  Tunnel e preencha `PUBLIC_APP_URL`.
+
+Para atualizar: `git pull`, feche o app e rode `npm run install:mac` de novo.
+
 ## VPS Linux / Docker Compose
 
 Veja o [guia de implantação na VPS](docs/VPS-LINUX.md) para instalação, HTTPS,

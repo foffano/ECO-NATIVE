@@ -1,4 +1,5 @@
 import os
+import sys
 from pathlib import Path
 
 APP_NAME = "ECO Native Studio"
@@ -23,11 +24,16 @@ def get_data_dir() -> Path:
                 return candidate
 
     cwd = Path.cwd()
-    if (cwd / "package.json").exists() and (cwd / "backend").exists():
+    # A packaged app never uses a repository's data folder, wherever it is started from.
+    if not getattr(sys, "frozen", False) and (cwd / "package.json").exists() and (cwd / "backend").exists():
         return cwd / "data"
 
     if appdata:
         return Path(appdata) / APP_NAME
+
+    if sys.platform == "darwin":
+        # The macOS app (and any run outside the repository) keeps data where Mac apps do.
+        return Path.home() / "Library" / "Application Support" / APP_NAME
 
     return Path.home() / ".eco-native-studio"
 
