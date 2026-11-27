@@ -62,3 +62,11 @@ makerworld_page_limiter = RateLimiter(
     period=60.0,
     name="makerworld",
 )
+
+# Models read through MakerWorld's JSON routes (data + 3MF link + file each). Far faster than
+# pages, so this pace is what keeps the store's account from downloading in bursts.
+makerworld_api_limiter = RateLimiter(
+    max_calls=max(1, int(os.getenv("ECO_NATIVE_MAKERWORLD_API_PER_MINUTE", "20"))),
+    period=60.0,
+    name="makerworld-api",
+)

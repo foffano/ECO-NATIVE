@@ -26,3 +26,4 @@ def unpaced_makerworld(monkeypatch):
     # Fake pages load instantly; the shared MakerWorld pace would only slow the suite down.
     from backend.app.services import rate_limiter
     monkeypatch.setattr(rate_limiter, "makerworld_page_limiter", rate_limiter.RateLimiter(10**6, 60.0))
+    monkeypatch.setattr(rate_limiter, "makerworld_api_limiter", rate_limiter.RateLimiter(10**6, 60.0))

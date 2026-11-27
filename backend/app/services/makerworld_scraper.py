@@ -1,6 +1,9 @@
+from __future__ import annotations
+
 from collections import deque
 from collections.abc import Callable
 from contextlib import ExitStack, contextmanager
+import html
 import os
 import re
 import threading
@@ -69,11 +72,140 @@ MODEL_PAGE_STATE_JS = """() => {
 
 AttentionCallback = Callable[[str | None], None]
 
+# MakerWorld's own JSON routes, the ones its model page calls. They give a model's data and
+# a signed 3MF link without loading the page, using the collect browser's login cookies.
+MAKERWORLD_API = "https://makerworld.com/api/v1/design-service"
+# Set to "0" to always read model pages, as before the API was used.
+USE_MAKERWORLD_API = os.getenv("ECO_NATIVE_MAKERWORLD_API", "1") != "0"
+# After this many links in a row that the API refuses, the rest go straight to their pages.
+API_GIVE_UP_AFTER = 3
+DESIGN_ID = re.compile(r"/models/(\d+)")
+PROFILE_ID = re.compile(r"profileId-(\d+)")
+
+
+class MakerWorldApiUnavailable(RuntimeError):
+    """The API could not give this model; its page is read instead."""
+
+
+class MakerWorldModelMissing(RuntimeError):
+    """The model no longer exists: its page would only wait for a title that never comes."""
+
+
+def _api_json(api, url: str) -> dict:
+    response = api.get(url, headers={"accept": "application/json"}, timeout=30_000)
+    if "json" not in (response.headers.get("content-type") or ""):
+        # A Cloudflare check answers with an HTML page.
+        raise MakerWorldApiUnavailable(f"resposta {response.status} sem JSON (verificação do Cloudflare?)")
+    data = response.json()
+    if not response.ok:
+        error = data.get("error") if isinstance(data, dict) else None
+        raise MakerWorldApiUnavailable(f"{error or 'erro'} (HTTP {response.status})")
+    if not isinstance(data, dict):
+        raise MakerWorldApiUnavailable("resposta inesperada")
+    return data
+
+
+def html_to_text(value: str) -> str:
+    text = re.sub(r"<br\s*/?>|</p>|</li>|</h\d>", "\n", value or "", flags=re.IGNORECASE)
+    text = html.unescape(re.sub(r"<[^>]+>", "", text)).replace("\xa0", " ")
+    return re.sub(r"\n\s*\n+", "\n\n", re.sub(r"[ \t]+", " ", text)).strip()
+
+
+def capture_via_api(
+    api,
+    project_id: str,
+    url: str,
+    download_cover: bool,
+    download_model: bool,
+    sku_candidates: list[Product] | None = None,
+    project: Project | None = None,
+    store_profile: StoreProfile | None = None,
+) -> ScrapedProduct:
+    """Read a model and download its 3MF through MakerWorld's JSON routes."""
+    match = DESIGN_ID.search(url)
+    if not match:
+        raise MakerWorldApiUnavailable("link sem o número do modelo")
+    try:
+        design = _api_json(api, f"{MAKERWORLD_API}/design/{match.group(1)}")
+    except MakerWorldApiUnavailable as exc:
+        if "(HTTP 404)" in str(exc):
+            raise MakerWorldModelMissing("o modelo não existe mais no MakerWorld") from exc
+        raise
+    title = str(design.get("title") or "").strip()
+    if not title:
+        raise MakerWorldApiUnavailable("modelo sem título")
+    tags = [str(tag).strip() for tag in design.get("tags") or [] if str(tag).strip()]
+    image_url = design.get("coverUrl") or None
+
+    sku = None
+    if sku_candidates is not None and project and store_profile:
+        sku = resolve_sku_for_capture(title, sku_candidates, project, store_profile)
+
+    model_file_path = None
+    if download_model and sku:
+        profile = PROFILE_ID.search(url)
+        instances = design.get("instances") or []
+        instance_id = (
+            (profile.group(1) if profile else None)
+            or design.get("defaultInstanceId")
+            or (instances[0].get("id") if instances else None)
+        )
+        if not instance_id:
+            raise MakerWorldApiUnavailable("modelo sem perfil de impressão")
+        info = _api_json(api, f"{MAKERWORLD_API}/instance/{instance_id}/f3mf?type=download&fileType=")
+        if not info.get("url"):
+            raise MakerWorldApiUnavailable("o MakerWorld não devolveu o link do 3MF")
+        response = api.get(info["url"], timeout=180_000)
+        body = response.body() if response.ok else b""
+        if not body.startswith(b"PK"):  # A 3MF is a zip file.
+            raise MakerWorldApiUnavailable(f"download do 3MF falhou (HTTP {response.status})")
+        product_dir = product_assets_dir(project_id, sku)
+        product_dir.mkdir(parents=True, exist_ok=True)
+        output_path = product_dir / model_filename(sku, Path(str(info.get("name") or "")).suffix or ".3mf")
+        output_path.write_bytes(body)
+        model_file_path = str(output_path)
+
+    local_image_path = None
+    if download_cover and image_url and sku:
+        local_image_path = download_cover_image(project_id, sku, image_url)
+
+    return ScrapedProduct(
+        name=title,
+        source_url=url,
+        tags=tags,
+        description=html_to_text(str(design.get("summary") or "")),
+        image_url=image_url,
+        local_image_path=local_image_path,
+        model_file_path=model_file_path,
+        sku=sku,
+    )
+
 
 def collect_parallelism(requested: int | None) -> int:
     if requested is None:
         requested = DEFAULT_COLLECT_PARALLEL
     return max(1, min(MAX_COLLECT_PARALLEL, int(requested)))
+
+
+def wait_for_api_slot(page) -> None:
+    """Hold a model read through the API until the shared pace allows it, staying stoppable."""
+    def pause(seconds: float) -> None:
+        raise_if_stopped()
+        page.wait_for_timeout(seconds * 1000)
+
+    rate_limiter.makerworld_api_limiter.acquire(sleep=pause)
+
+
+def show_api_notice(page) -> None:
+    """The collect browser shows a note instead of a blank tab while models come through the API."""
+    try:
+        page.set_content(
+            "<body style='font:16px sans-serif;display:grid;place-items:center;height:90vh;color:#334'>"
+            "<p>Coletando pela API do MakerWorld, sem abrir as páginas dos modelos.<br>"
+            "Se algum modelo precisar da página, ela abre aqui.</p></body>"
+        )
+    except (AttributeError, PlaywrightError):
+        pass
 
 
 def wait_for_page_slot(page) -> None:
@@ -563,11 +695,14 @@ def scrape_product_urls(
     on_attention: AttentionCallback | None = None,
     parallel: int | None = 1,
     on_log: Callable[[str], None] | None = None,
+    use_api: bool | None = None,
 ) -> list[ScrapedProduct]:
     """Capture model pages, reporting each product as soon as its files are on disk.
 
-    Up to `parallel` model pages load or download at the same time, each in its own tab of
-    the store's browser. A page that never loads is reported through on_failure instead of
+    Each model is first read through MakerWorld's JSON routes with the browser's login
+    cookies, without opening its page. Models the API refuses are read from their pages:
+    up to `parallel` load or download at the same time, each in its own window of the
+    store's browser. A page that never loads is reported through on_failure instead of
     becoming a product, so the link can be collected again later.
     """
     normalized_urls = []
@@ -581,7 +716,8 @@ def scrape_product_urls(
 
     products: list[ScrapedProduct] = []
     sku_candidates = list(sku_reference_products or [])
-    queue = deque(normalized_urls)
+    queue: deque[str] = deque()
+    use_api = USE_MAKERWORLD_API if use_api is None else use_api
     with sync_playwright() as playwright, ExitStack() as contexts:
         browser = contexts.enter_context(open_makerworld_context(
             playwright,
@@ -595,6 +731,13 @@ def scrape_product_urls(
         )
         notify = tabs.attention(on_attention)
 
+        def remember_sku(product: ScrapedProduct) -> None:
+            # The next model must not take this SKU.
+            if product.sku:
+                sku_candidates.append(
+                    Product(project_id=project_id, name=product.name, metadata={"sku": product.sku})
+                )
+
         def report(product: ScrapedProduct) -> None:
             products.append(product)
             if on_product:
@@ -603,6 +746,44 @@ def scrape_product_urls(
         def fail(url: str, exc: Exception) -> None:
             if on_failure:
                 on_failure(url, capture_error_message(exc))
+
+        api = getattr(browser, "request", None) if use_api else None
+        if api is None:
+            queue.extend(normalized_urls)
+        else:
+            show_api_notice(tabs.free[0])
+            refused_in_a_row = 0
+            for url in normalized_urls:
+                raise_if_stopped()
+                if refused_in_a_row >= API_GIVE_UP_AFTER:
+                    queue.append(url)
+                    continue
+                wait_for_api_slot(tabs.free[0])
+                try:
+                    product = capture_via_api(
+                        api, project_id, url, download_cover, download_model,
+                        sku_candidates=sku_candidates, project=project, store_profile=store_profile,
+                    )
+                except CollectStopped:
+                    raise
+                except MakerWorldModelMissing as exc:
+                    # The API answered; only this link is gone.
+                    refused_in_a_row = 0
+                    fail(url, exc)
+                    continue
+                except Exception as exc:
+                    refused_in_a_row += 1
+                    queue.append(url)
+                    if on_log:
+                        on_log(f"API do MakerWorld não atendeu {url} ({capture_error_message(exc)}); será lido pela página.")
+                        if refused_in_a_row == API_GIVE_UP_AFTER:
+                            on_log("A API recusou vários links seguidos; os demais serão lidos pelas páginas.")
+                    continue
+                refused_in_a_row = 0
+                remember_sku(product)
+                report(product)
+            if on_log and products:
+                on_log(f"{len(products)} produto(s) lido(s) pela API do MakerWorld, sem abrir a página.")
 
         def start_loading() -> None:
             while queue and tabs.busy < tabs.limit:
@@ -660,14 +841,8 @@ def scrape_product_urls(
                 tabs.release(page)
                 fail(url, exc)
                 return
-            if product.sku:
-                sku_candidates.append(
-                    Product(
-                        project_id=project_id,
-                        name=product.name,
-                        metadata={"sku": product.sku},
-                    )
-                )
+            # Reported only after its download; the next page must not reuse this SKU meanwhile.
+            remember_sku(product)
             if not (download_model and product.sku):
                 tabs.release(page)
                 report(product)
